@@ -10,8 +10,10 @@
     "bip110_fork_height": 961640,
     "bip110_fork_hash": "0000000000000050c1e5f69672f459293be14f46e5a494e7a8c8541396f18eeb",
     "pinned_knots_version": "29.4.3.knots20260508",
+    "pinned_knots_arm64_sha256": "5c1a8a4df75acde2f15accc4358c678c3597b0244206ba472774e10cf9e86115",
     "upstream_repository": "https://github.com/bitcoinknots/bitcoin/releases/tag/v29.4.3.knots20260508",
     "upstream_archive_base": "https://bitcoinknots.org/files/29.x/29.4.3.knots20260508/",
+    "upstream_archive_name": "bitcoin-29.4.3.knots20260508-arm64-apple-darwin.tar.gz",
     "required_gbt_rules": ["segwit", "blake2b"],
     "coinbase_maturity": {
       "standard": 100,
