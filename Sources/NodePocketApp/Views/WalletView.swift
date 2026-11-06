@@ -217,16 +217,16 @@ public struct WalletView: View {
 
     private var chainIdentityBadge: some View {
         HStack(spacing: 6) {
-            Image(systemName: "checkmark.shield.fill")
-                .foregroundColor(.green)
-            Text("BTCB2 \(state.selectedNetwork.rawValue.uppercased()) Verified")
+            Image(systemName: state.selectedNetwork == .regtest ? "hammer.fill" : "checkmark.shield.fill")
+                .foregroundColor(state.selectedNetwork == .regtest ? .purple : .green)
+            Text(state.selectedNetwork == .regtest ? "REGTEST TESTBED (Development Only)" : "BTCB2 MAINNET (BIP-110 Live Validation)")
                 .font(.caption)
                 .bold()
-                .foregroundColor(.green)
+                .foregroundColor(state.selectedNetwork == .regtest ? .purple : .green)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(Capsule().fill(Color.green.opacity(0.15)))
+        .background(Capsule().fill((state.selectedNetwork == .regtest ? Color.purple : Color.green).opacity(0.15)))
     }
 
     private func balanceDetail(label: String, amount: Double) -> some View {

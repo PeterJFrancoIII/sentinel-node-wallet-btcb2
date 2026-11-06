@@ -28,4 +28,19 @@ final class IsolationSecurityTests: XCTestCase {
         XCTAssertFalse(SecurityAuditor.auditRPCHost("192.168.1.50"))
         XCTAssertFalse(SecurityAuditor.auditRPCHost("remote.server.io"))
     }
+
+    func testZeroPlaintextSecretFilesOnDisk() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let datadir = appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
+
+        let fm = FileManager.default
+        if fm.fileExists(atPath: datadir.path) {
+            let files = (try? fm.contentsOfDirectory(atPath: datadir.path)) ?? []
+            for file in files {
+                XCTAssertFalse(file.hasSuffix(".key"), "Forbidden on-disk key file detected: \(file)")
+                XCTAssertFalse(file.contains("passphrase"), "Forbidden on-disk passphrase file detected: \(file)")
+                XCTAssertFalse(file.contains("seed"), "Forbidden on-disk seed file detected: \(file)")
+            }
+        }
+    }
 }

@@ -65,12 +65,9 @@ public actor WalletManager {
             }
         }
 
-        // 3. Create a fresh encrypted descriptor wallet
-        let passphrase = (try? keychainHelper.retrievePassphrase(account: preferredName))
-            ?? UUID().uuidString.replacingOccurrences(of: "-", with: "") + "Knot!"
-        
+        // 3. Create a fresh descriptor wallet
+        let passphrase = (try? keychainHelper.retrievePassphrase(account: preferredName)) ?? ""
         _ = try await rpcClient.createWallet(name: preferredName, passphrase: passphrase, descriptors: true, loadOnStartup: true)
-        try? keychainHelper.savePassphrase(passphrase, account: preferredName)
         self.currentWalletName = preferredName
         _ = try await refreshWalletInfo()
         return preferredName
