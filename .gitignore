@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Xcode / SPM
+.build/
+Packages/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+*.xccheckout
+DerivedData/
+
+# NodePocket runtime and test data
+data/
+*.dat
+*.log
+*.pid
+.cookie
+rpc_credentials.json
+
+# Binaries and archives
+dist/
+*.dmg
+*.app
+*.zip
+*.tar.gz
