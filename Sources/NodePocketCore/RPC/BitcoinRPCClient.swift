@@ -48,8 +48,11 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         self.session = URLSession(configuration: config)
     }
 
-    private var endpointURL: URL? {
-        URL(string: "http://\(host):\(port)/")
+    public func getEndpointURL(walletName: String? = nil) -> URL? {
+        if let wallet = walletName, !wallet.isEmpty {
+            return URL(string: "http://\(host):\(port)/wallet/\(wallet)")
+        }
+        return URL(string: "http://\(host):\(port)/")
     }
 
     private var basicAuthHeader: String {
@@ -58,8 +61,8 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         return "Basic \(data.base64EncodedString())"
     }
 
-    public func call<T: Decodable>(method: String, params: [Any] = []) async throws -> T {
-        guard let url = endpointURL else {
+    public func call<T: Decodable>(method: String, params: [Any] = [], walletName: String? = nil) async throws -> T {
+        guard let url = getEndpointURL(walletName: walletName) else {
             throw RPCClientError.invalidURL
         }
 
@@ -151,20 +154,41 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "getblocktemplate", params: [["rules": rules]])
     }
 
-    public func getWalletInfo() async throws -> WalletInfo {
-        try await call(method: "getwalletinfo")
+    public func listWallets() async throws -> [String] {
+        try await call(method: "listwallets")
     }
 
-    public func getBalances() async throws -> WalletBalances {
-        try await call(method: "getbalances")
+    public func listWalletDir() async throws -> WalletDirResponse {
+        try await call(method: "listwalletdir")
     }
 
-    public func getNewAddress(label: String = "", addressType: String = "bech32") async throws -> String {
-        try await call(method: "getnewaddress", params: [label, addressType])
+    public func loadWallet(name: String) async throws -> LoadWalletResponse {
+        try await call(method: "loadwallet", params: [name])
     }
 
-    public func backupWallet(destinationPath: String) async throws {
-        let _: String = try await call(method: "backupwallet", params: [destinationPath])
+    public func createWallet(name: String, passphrase: String, descriptors: Bool = true, loadOnStartup: Bool = true) async throws -> CreateWalletResponse {
+        let params: [Any] = [name, false, false, passphrase, false, descriptors, loadOnStartup]
+        return try await call(method: "createwallet", params: params)
+    }
+
+    public func generateToAddress(blocks: Int, address: String) async throws -> [String] {
+        try await call(method: "generatetoaddress", params: [blocks, address])
+    }
+
+    public func getWalletInfo(walletName: String? = nil) async throws -> WalletInfo {
+        try await call(method: "getwalletinfo", walletName: walletName)
+    }
+
+    public func getBalances(walletName: String? = nil) async throws -> WalletBalances {
+        try await call(method: "getbalances", walletName: walletName)
+    }
+
+    public func getNewAddress(label: String = "", addressType: String = "bech32", walletName: String? = nil) async throws -> String {
+        try await call(method: "getnewaddress", params: [label, addressType], walletName: walletName)
+    }
+
+    public func backupWallet(destinationPath: String, walletName: String? = nil) async throws {
+        let _: String = try await call(method: "backupwallet", params: [destinationPath], walletName: walletName)
     }
 
     public func stopNode() async throws -> String {

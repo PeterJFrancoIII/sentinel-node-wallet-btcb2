@@ -11,8 +11,11 @@ public struct NodeView: View {
                 // Top Status Header
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Node Status")
-                            .font(.system(size: 26, weight: .bold))
+                        HStack(spacing: 8) {
+                            Text("NODE Pocket")
+                                .font(.system(size: 26, weight: .bold))
+                            networkBadge
+                        }
                         Text("Bitcoin Knots \(BTCB2ConsensusConstants.pinnedKnotsVersion) • BIP-110 BLAKE2b")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -23,17 +26,76 @@ public struct NodeView: View {
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.windowBackgroundColor)))
 
-                // Primary Controls
-                HStack(spacing: 12) {
-                    if state.nodeState == .stopped {
-                        Button(action: { state.startNode() }) {
-                            Label("Start Node", systemImage: "play.fill")
+                // Hero 1-Click Launch Card (Prominent when stopped or starting)
+                if state.nodeState == .stopped || state.isStartingUp {
+                    VStack(alignment: .leading, spacing: 14) {
+                        HStack {
+                            Image(systemName: "bolt.shield.fill")
+                                .font(.title)
+                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("1-Click BTCB2 Knots Node & Wallet")
+                                    .font(.headline)
+                                Text("Autonomously launches embedded Bitcoin Knots, binds strict loopback RPC, and unlocks your encrypted descriptor wallet.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+
+                        Divider()
+
+                        HStack(spacing: 16) {
+                            // Network Selection
+                            HStack(spacing: 8) {
+                                Text("Network:")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                                Picker("Network", selection: Binding(
+                                    get: { state.selectedNetwork },
+                                    set: { state.switchNetwork($0) }
+                                )) {
+                                    Text("Mainnet (Real BTCB2)").tag(BTCB2Network.mainnet)
+                                    Text("Regtest (Local Playground)").tag(BTCB2Network.regtest)
+                                    Text("Testnet4").tag(BTCB2Network.testnet4)
+                                }
+                                .pickerStyle(.segmented)
+                                .frame(width: 310)
+                                .disabled(state.isStartingUp)
+                            }
+
+                            Spacer()
+
+                            if state.isStartingUp {
+                                HStack(spacing: 10) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text(state.startupStatus)
+                                        .font(.subheadline)
+                                        .bold()
+                                        .foregroundColor(.orange)
+                                }
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 8)
+                            } else {
+                                Button(action: { state.startNode() }) {
+                                    Label("Start 1-Click Node & Wallet", systemImage: "play.fill")
+                                        .font(.headline)
+                                        .padding(.horizontal, 18)
+                                        .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.green)
+                            }
                         }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.green)
-                    } else {
+                    }
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+                }
+
+                // Controls Row (When Running)
+                if state.nodeState != .stopped && !state.isStartingUp {
+                    HStack(spacing: 12) {
                         Button(action: { state.stopNode() }) {
                             Label("Stop Node", systemImage: "stop.fill")
                                 .padding(.horizontal, 16)
@@ -41,25 +103,32 @@ public struct NodeView: View {
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
-                    }
 
-                    Button(action: {
-                        Task {
-                            await state.nodeManager.stop()
-                            try? state.nodeManager.start()
+                        Button(action: {
+                            Task {
+                                await state.nodeManager.stop()
+                                state.startNode()
+                            }
+                        }) {
+                            Label("Restart", systemImage: "arrow.clockwise")
                         }
-                    }) {
-                        Label("Restart", systemImage: "arrow.clockwise")
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(state.nodeState == .stopped)
+                        .buttonStyle(.bordered)
 
-                    Spacer()
+                        if state.selectedNetwork == .regtest {
+                            Button(action: { state.generateRegtestBlock() }) {
+                                Label("Generate 1 Block", systemImage: "hammer.fill")
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.purple)
+                        }
 
-                    Button(action: { showAdvancedSheet = true }) {
-                        Label("Advanced Settings", systemImage: "slider.horizontal.3")
+                        Spacer()
+
+                        Button(action: { showAdvancedSheet = true }) {
+                            Label("Advanced Settings", systemImage: "slider.horizontal.3")
+                        }
+                        .buttonStyle(.bordered)
                     }
-                    .buttonStyle(.bordered)
                 }
 
                 // Grid Metrics
@@ -82,7 +151,7 @@ public struct NodeView: View {
 
                     metricCard(
                         title: "Connected Peers",
-                        value: "\(state.nodeManager.config.profile.maxConnections) Max",
+                        value: "\(state.blockchainInfo != nil ? (state.selectedNetwork == .regtest ? "1 (Local)" : "\(state.nodeManager.config.profile.maxConnections) Max") : "0")",
                         subtitle: "Strict Outbound Only (Inbound Disabled)",
                         icon: "network",
                         color: .purple
@@ -139,6 +208,16 @@ public struct NodeView: View {
         }
     }
 
+    private var networkBadge: some View {
+        Text(state.selectedNetwork.rawValue.uppercased())
+            .font(.caption2)
+            .bold()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().fill(state.selectedNetwork == .mainnet ? Color.blue.opacity(0.2) : Color.purple.opacity(0.2)))
+            .foregroundColor(state.selectedNetwork == .mainnet ? .blue : .purple)
+    }
+
     private var nodeStateBadge: some View {
         HStack(spacing: 6) {
             Circle()
@@ -154,6 +233,7 @@ public struct NodeView: View {
     }
 
     private var stateColor: Color {
+        if state.isStartingUp { return .orange }
         switch state.nodeState {
         case .running: return .green
         case .starting, .stopping: return .orange
@@ -163,6 +243,7 @@ public struct NodeView: View {
     }
 
     private var stateText: String {
+        if state.isStartingUp { return "Starting (1-Click)..." }
         switch state.nodeState {
         case .running(let pid): return "Running (PID \(pid))"
         case .starting: return "Starting..."

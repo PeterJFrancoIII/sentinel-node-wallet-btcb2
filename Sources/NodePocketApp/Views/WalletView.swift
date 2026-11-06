@@ -219,7 +219,7 @@ public struct WalletView: View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.shield.fill")
                 .foregroundColor(.green)
-            Text("BTCB2 Mainnet Verified")
+            Text("BTCB2 \(state.selectedNetwork.rawValue.uppercased()) Verified")
                 .font(.caption)
                 .bold()
                 .foregroundColor(.green)

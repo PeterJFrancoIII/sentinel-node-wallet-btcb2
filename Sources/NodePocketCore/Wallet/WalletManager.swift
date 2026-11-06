@@ -39,6 +39,43 @@ public actor WalletManager {
         self.keychainHelper = keychainHelper
     }
 
+    /// Automatically ensures that a descriptor wallet is loaded on node startup.
+    /// If no wallet exists, creates a fresh encrypted descriptor wallet with keychain-backed passphrase.
+    @discardableResult
+    public func ensureDefaultWalletLoaded(preferredName: String = "default_wallet") async throws -> String {
+        // 1. Check if any wallet is already loaded in memory
+        if let loaded = try? await rpcClient.listWallets(), let first = loaded.first, !first.isEmpty {
+            self.currentWalletName = first
+            _ = try await refreshWalletInfo()
+            return first
+        }
+
+        // 2. Check if a wallet directory exists on disk
+        if let dir = try? await rpcClient.listWalletDir() {
+            if dir.wallets.contains(where: { $0.name == preferredName }) {
+                _ = try await rpcClient.loadWallet(name: preferredName)
+                self.currentWalletName = preferredName
+                _ = try await refreshWalletInfo()
+                return preferredName
+            } else if let firstDisk = dir.wallets.first {
+                _ = try await rpcClient.loadWallet(name: firstDisk.name)
+                self.currentWalletName = firstDisk.name
+                _ = try await refreshWalletInfo()
+                return firstDisk.name
+            }
+        }
+
+        // 3. Create a fresh encrypted descriptor wallet
+        let passphrase = (try? keychainHelper.retrievePassphrase(account: preferredName))
+            ?? UUID().uuidString.replacingOccurrences(of: "-", with: "") + "Knot!"
+        
+        _ = try await rpcClient.createWallet(name: preferredName, passphrase: passphrase, descriptors: true, loadOnStartup: true)
+        try? keychainHelper.savePassphrase(passphrase, account: preferredName)
+        self.currentWalletName = preferredName
+        _ = try await refreshWalletInfo()
+        return preferredName
+    }
+
     /// Creates a modern, descriptor-based encrypted wallet.
     public func createEncryptedDescriptorWallet(
         name: String,
@@ -49,21 +86,10 @@ public actor WalletManager {
             throw RPCClientError.serializationError("Wallet name and passphrase cannot be empty.")
         }
 
-        // createwallet "wallet_name" disable_private_keys blank "passphrase" false descriptors load_on_startup
-        let params: [Any] = [
-            name,
-            false,       // disable_private_keys
-            false,       // blank
-            passphrase,  // passphrase
-            false,       // avoid_reuse
-            true,        // descriptors
-            true         // load_on_startup
-        ]
-
-        let _: [String: AnyCodableValue] = try await rpcClient.call(method: "createwallet", params: params)
+        _ = try await rpcClient.createWallet(name: name, passphrase: passphrase, descriptors: true, loadOnStartup: true)
 
         if storeInKeychain {
-            try keychainHelper.savePassphrase(passphrase, account: name)
+            try? keychainHelper.savePassphrase(passphrase, account: name)
         }
 
         self.currentWalletName = name
@@ -72,17 +98,15 @@ public actor WalletManager {
 
     /// Loads an existing wallet by name.
     public func loadWallet(name: String) async throws {
-        let params: [Any] = [name, true]
-        let _: [String: AnyCodableValue] = try await rpcClient.call(method: "loadwallet", params: params)
-
+        _ = try await rpcClient.loadWallet(name: name)
         self.currentWalletName = name
         _ = try await refreshWalletInfo()
     }
 
     /// Fetches the latest balances and encryption status for the active wallet.
     public func refreshWalletInfo() async throws -> WalletSnapshot {
-        let info = try await rpcClient.getWalletInfo()
-        let balances = try await rpcClient.getBalances()
+        let info = try await rpcClient.getWalletInfo(walletName: currentWalletName)
+        let balances = try await rpcClient.getBalances(walletName: currentWalletName)
 
         let isLocked: Bool
         let isEncrypted: Bool
@@ -110,13 +134,16 @@ public actor WalletManager {
 
     /// Generates a new Bech32 (BIP-173 / native SegWit) receive address.
     public func generateReceiveAddress(label: String = "") async throws -> String {
-        try await rpcClient.getNewAddress(label: label, addressType: "bech32")
+        try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
     }
 
     /// Backs up the wallet database to an isolated, operator-specified path.
     public func exportBackup(to fileURL: URL) async throws {
-        try await rpcClient.backupWallet(destinationPath: fileURL.path)
+        try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: currentWalletName)
+    }
+
+    /// Generates blocks to address (available on regtest for testing).
+    public func generateRegtestBlocks(count: Int, address: String) async throws -> [String] {
+        try await rpcClient.generateToAddress(blocks: count, address: address)
     }
 }
-
-public struct AnyCodableValue: Codable, Sendable {}

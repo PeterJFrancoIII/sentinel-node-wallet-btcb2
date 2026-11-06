@@ -1,11 +1,11 @@
 import Foundation
 
 public struct NodeConfig: Sendable {
-    public let network: BTCB2Network
-    public let rpcPort: Int
+    public var network: BTCB2Network
+    public var rpcPort: Int
     public let rpcUser: String
     public let rpcPassword: String
-    public let p2pPort: Int
+    public var p2pPort: Int
     public var profile: SyncProfile
     public let dataDirectory: URL
 
@@ -38,6 +38,8 @@ public struct NodeConfig: Sendable {
     }
 
     /// Renders safe bitcoin.conf contents with strict localhost binding and profile options.
+    /// In Bitcoin Knots 29.x, network-specific options (rpcbind, rpcallowip, port, rpcport)
+    /// MUST be placed inside network-specific sections ([main], [testnet4], [regtest]).
     public func renderBitcoinConf() -> String {
         var lines: [String] = []
         lines.append("# NODE Pocket BTCB2 Autonomous Configuration")
@@ -45,10 +47,7 @@ public struct NodeConfig: Sendable {
         lines.append("server=1")
         lines.append("listen=1")
         lines.append("daemon=0")
-        lines.append("rpcbind=127.0.0.1")
-        lines.append("rpcallowip=127.0.0.1")
-        lines.append("rpcport=\(rpcPort)")
-        lines.append("port=\(p2pPort)")
+        lines.append("fallbackfee=0.0001")
         lines.append("rpcuser=\(rpcUser)")
         lines.append("rpcpassword=\(rpcPassword)")
         lines.append("")
@@ -63,18 +62,25 @@ public struct NodeConfig: Sendable {
             lines.append("prune=0")
         }
         lines.append("")
-        lines.append("# Network Specific Section")
-        switch network {
-        case .mainnet:
-            lines.append("[main]")
-        case .testnet4:
-            lines.append("[testnet4]")
-            lines.append("testnet4=1")
-        case .regtest:
-            lines.append("[regtest]")
-            lines.append("regtest=1")
-            lines.append("testactivationheight=blake2b@20")
-        }
+        lines.append("# Network Specific Configuration Sections")
+        lines.append("[main]")
+        lines.append("port=8333")
+        lines.append("rpcport=8332")
+        lines.append("rpcbind=127.0.0.1")
+        lines.append("rpcallowip=127.0.0.1")
+        lines.append("")
+        lines.append("[testnet4]")
+        lines.append("port=48333")
+        lines.append("rpcport=48332")
+        lines.append("rpcbind=127.0.0.1")
+        lines.append("rpcallowip=127.0.0.1")
+        lines.append("")
+        lines.append("[regtest]")
+        lines.append("port=18444")
+        lines.append("rpcport=18443")
+        lines.append("rpcbind=127.0.0.1")
+        lines.append("rpcallowip=127.0.0.1")
+        lines.append("testactivationheight=blake2b@20")
 
         return lines.joined(separator: "\n") + "\n"
     }

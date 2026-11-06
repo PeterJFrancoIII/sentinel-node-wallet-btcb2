@@ -23,6 +23,24 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/NodePocket"
 chmod +x "${APP_BUNDLE}/Contents/MacOS/NodePocket"
 
+# Embed official verified Bitcoin Knots binaries
+KNOTS_CACHE_DIR="${ROOT_DIR}/.cache/bitcoin-29.4.3.knots20260508/bin"
+if [ -f "${KNOTS_CACHE_DIR}/bitcoind" ]; then
+    echo "Embedding official Bitcoin Knots bitcoind into bundle..."
+    cp "${KNOTS_CACHE_DIR}/bitcoind" "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+    chmod +x "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+    codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+fi
+
+if [ -f "${KNOTS_CACHE_DIR}/bitcoin-cli" ]; then
+    echo "Embedding official Bitcoin Knots bitcoin-cli into bundle..."
+    cp "${KNOTS_CACHE_DIR}/bitcoin-cli" "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
+    chmod +x "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
+    codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
+fi
+
+codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/NodePocket"
+
 # Copy resources
 if [ -f "${ROOT_DIR}/Resources/consensus-manifest.json" ]; then
     cp "${ROOT_DIR}/Resources/consensus-manifest.json" "${APP_BUNDLE}/Contents/Resources/"

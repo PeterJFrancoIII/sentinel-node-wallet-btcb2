@@ -11,7 +11,7 @@ public enum NodeState: Equatable, Sendable {
 public final class NodeManager: @unchecked Sendable {
     public private(set) var state: NodeState = .stopped
     public var config: NodeConfig
-    public let rpcClient: BitcoinRPCClient
+    public private(set) var rpcClient: BitcoinRPCClient
     public let hashrateTracker: HashrateTracker
 
     private var process: Process?
@@ -33,6 +33,18 @@ public final class NodeManager: @unchecked Sendable {
             password: config.rpcPassword
         )
         self.hashrateTracker = HashrateTracker(windowSize: 30)
+    }
+
+    public func updateNetwork(_ network: BTCB2Network) {
+        self.config.network = network
+        self.config.rpcPort = network.defaultRPCPort
+        self.config.p2pPort = network.defaultP2PPort
+        self.rpcClient = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: config.rpcPort,
+            user: config.rpcUser,
+            password: config.rpcPassword
+        )
     }
 
     private func updateState(_ newState: NodeState) {
@@ -65,10 +77,19 @@ public final class NodeManager: @unchecked Sendable {
 
         let proc = Process()
         proc.executableURL = executableURL
-        proc.arguments = [
+        var arguments = [
             "-conf=\(config.configFileURL.path)",
             "-datadir=\(config.dataDirectory.path)"
         ]
+        switch config.network {
+        case .regtest:
+            arguments.append("-regtest")
+        case .testnet4:
+            arguments.append("-testnet4")
+        case .mainnet:
+            break
+        }
+        proc.arguments = arguments
 
         let outPipe = Pipe()
         let errPipe = Pipe()
@@ -182,12 +203,38 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
-    private func findBitcoindBinary() -> URL? {
-        let candidates = [
-            "/opt/homebrew/bin/bitcoind",
-            "/usr/local/bin/bitcoind",
-            Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind").path
-        ]
+    public func waitForRPCReadiness(timeoutSeconds: TimeInterval = 25.0) async throws {
+        let start = Date()
+        while Date().timeIntervalSince(start) < timeoutSeconds {
+            do {
+                _ = try await rpcClient.getBlockchainInfo()
+                onLogMessage?("[RPC] Connected to Bitcoin Knots RPC server successfully.")
+                return
+            } catch {
+                try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+            }
+        }
+        throw RPCClientError.networkError("Timed out waiting for bitcoind RPC server to respond after \(Int(timeoutSeconds))s.")
+    }
+
+    public func findBitcoindBinary() -> URL? {
+        var candidates: [String] = []
+
+        // 1. App Bundle (Production deployment)
+        candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind").path)
+
+        // 2. Sibling of current executable
+        if let execURL = Bundle.main.executableURL {
+            candidates.append(execURL.deletingLastPathComponent().appendingPathComponent("bitcoind").path)
+        }
+
+        // 3. Local build cache in developer workspace
+        candidates.append("/Users/computer/Developer/NodePocketBTCB2/.cache/bitcoin-29.4.3.knots20260508/bin/bitcoind")
+
+        // 4. Standard host installations
+        candidates.append("/opt/homebrew/bin/bitcoind")
+        candidates.append("/usr/local/bin/bitcoind")
+
         let fm = FileManager.default
         for path in candidates {
             if fm.isExecutableFile(atPath: path) {

@@ -72,3 +72,20 @@ public struct BlockTemplateResponse: Codable, Sendable {
     public let height: Int?
     public let curtime: Int?
 }
+
+public struct WalletDirResponse: Codable, Sendable {
+    public struct Entry: Codable, Sendable {
+        public let name: String
+    }
+    public let wallets: [Entry]
+}
+
+public struct CreateWalletResponse: Codable, Sendable {
+    public let name: String
+    public let warnings: [String]?
+}
+
+public struct LoadWalletResponse: Codable, Sendable {
+    public let name: String
+    public let warning: String?
+}

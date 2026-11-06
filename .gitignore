@@ -24,6 +24,7 @@ rpc_credentials.json
 
 # Binaries and archives
 dist/
+.cache/
 *.dmg
 *.app
 *.zip
