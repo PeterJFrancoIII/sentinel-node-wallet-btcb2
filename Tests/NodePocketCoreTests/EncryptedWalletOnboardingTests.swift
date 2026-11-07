@@ -20,9 +20,25 @@ private final class WalletCreateRPCStub: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
+    private func readRequestBody() -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var bytes = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let received = stream.read(&bytes, maxLength: bytes.count)
+            if received <= 0 { break }
+            data.append(contentsOf: bytes.prefix(received))
+            if data.count > 65536 { return nil }
+        }
+        return data
+    }
+
     override func startLoading() {
         do {
-            guard let body = request.httpBody,
+            guard let body = readRequestBody(),
                   let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                   let method = payload["method"] as? String else {
                 throw NSError(domain: "wallet-test", code: 1, userInfo: [
