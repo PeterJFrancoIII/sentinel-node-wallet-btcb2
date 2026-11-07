@@ -551,4 +551,135 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertEqual(successCount, 1, "Exactly one concurrent login attempt must succeed")
         XCTAssertEqual(serializedOrReplayRejections, 1, "The competing attempt must fail closed (rateLimited or replayedTOTPTimestep)")
     }
+
+    func testLoginAbortedIfWalletLockedDuringDeviceOwnerPrompt() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_abort_prompt_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let salt = try WalletAuthCoordinator.randomBytes(count: 32)
+        let hash = try WalletAuthCoordinator.deriveKey(password: "TestPassword123!@#", salt: salt)
+        let secret = "JBSWY3DPEHPK3PXP"
+
+        let initialRecord = AuthRegistryRecord(
+            username: "lock_tester",
+            saltHex: salt.map { String(format: "%02x", $0) }.joined(),
+            passwordHashHex: hash.map { String(format: "%02x", $0) }.joined(),
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: secret,
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try (try encoder.encode(initialRecord)).write(to: registryURL)
+
+        WalletAuthCoordinator.simulateKeychainFailure(status: errSecMissingEntitlement)
+        defer {
+            WalletAuthCoordinator.clearTestOverrides()
+        }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+
+        await coordinator.setMockDeviceOwnerHook {
+            continuation.yield()
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return true
+        }
+
+        let time = Date().timeIntervalSince1970
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret, time: time)
+
+        let loginTask = Task {
+            try await coordinator.login(
+                username: "lock_tester",
+                password: "TestPassword123!@#",
+                totpCode: code,
+                time: time
+            )
+        }
+
+        for await _ in stream {
+            break
+        }
+
+        // Simulate operator clicking Lock while prompt is suspended
+        await coordinator.invalidateSession()
+
+        do {
+            _ = try await loginTask.value
+            XCTFail("Login must fail when session was invalidated during device-owner challenge")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .authAbortedByLock)
+        }
+
+        let session = await coordinator.currentSession
+        XCTAssertNil(session, "No active session may exist after lock-aborted login")
+    }
+
+    func testRecoveryLoginAbortedIfWalletLockedDuringDeviceOwnerPrompt() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_abort_recovery_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "recovery_lock_user")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: Date().timeIntervalSince1970)
+
+        _ = try await coordinator.enroll(
+            username: "recovery_lock_user",
+            password: "StrongPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+
+        await coordinator.setMockDeviceOwnerHook {
+            continuation.yield()
+            try await Task.sleep(nanoseconds: 50_000_000)
+            return true
+        }
+
+        let recoveryCode = enrollment.recoveryCodes[0]
+
+        let recoveryTask = Task {
+            try await coordinator.loginWithRecoveryCode(
+                username: "recovery_lock_user",
+                code: recoveryCode
+            )
+        }
+
+        for await _ in stream {
+            break
+        }
+
+        // Invalidate session during device-owner prompt
+        await coordinator.invalidateSession()
+
+        do {
+            _ = try await recoveryTask.value
+            XCTFail("Recovery login must fail when session was invalidated during device-owner challenge")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .authAbortedByLock)
+        }
+
+        let session = await coordinator.currentSession
+        XCTAssertNil(session, "No active session may exist after lock-aborted recovery login")
+    }
 }

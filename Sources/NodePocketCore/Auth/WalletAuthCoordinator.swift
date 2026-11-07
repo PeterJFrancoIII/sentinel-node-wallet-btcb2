@@ -20,9 +20,12 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
     case storageError(String)
     case unauthorizedHighRiskAction(String)
     case approvalExpired
+    case authAbortedByLock
 
     public var errorDescription: String? {
         switch self {
+        case .authAbortedByLock:
+            return "Authentication aborted because the Wallet Manager was locked or the session was invalidated."
         case .unauthenticated:
             return "Wallet Manager is locked. Please log in with your credentials and 2FA."
         case .invalidCredentials:
@@ -208,6 +211,7 @@ public actor WalletAuthCoordinator {
     private var activeSession: WalletAuthCapability?
     private var isAuthInFlight: Bool = false
     private var recordGeneration: UInt64 = 0
+    private var currentAuthEpoch: UInt64 = 0
     public static let sessionDurationSeconds: TimeInterval = 15 * 60 // 15 minutes
 
     // P0-3: Private registry of unforgeable, single-use high-risk approvals
@@ -220,13 +224,24 @@ public actor WalletAuthCoordinator {
 
     // Testing overrides
 #if DEBUG
+    public typealias DeviceOwnerChallengeHook = @Sendable () async throws -> Bool
     private var mockDeviceOwnerSuccessForTesting = false
+    private var mockDeviceOwnerHook: DeviceOwnerChallengeHook? = nil
     private static var inMemoryTOTPSecretsForTesting: [String: String] = [:]
     private static var allowInMemoryMockForTesting = false
     private static var simulatedKeychainFailureStatus: OSStatus? = nil
 
     public func setMockDeviceOwnerSuccessForTesting(_ enabled: Bool) {
         self.mockDeviceOwnerSuccessForTesting = enabled
+    }
+
+    public func setMockDeviceOwnerHook(_ hook: DeviceOwnerChallengeHook?) {
+        self.mockDeviceOwnerHook = hook
+    }
+
+    public func clearInstanceTestOverrides() {
+        self.mockDeviceOwnerSuccessForTesting = false
+        self.mockDeviceOwnerHook = nil
     }
 
     public static func setMockTOTPSecretForTesting(username: String, secretBase32: String) {
@@ -425,7 +440,14 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.rateLimited(secondsRemaining: 2)
         }
         isAuthInFlight = true
-        defer { isAuthInFlight = false }
+        currentAuthEpoch += 1
+        let capturedEpoch = currentAuthEpoch
+        let capturedGeneration = self.recordGeneration
+        defer {
+            if currentAuthEpoch == capturedEpoch {
+                isAuthInFlight = false
+            }
+        }
 
         guard var rec = record else {
             throw WalletAuthError.notEnrolled
@@ -462,14 +484,14 @@ public actor WalletAuthCoordinator {
             secret = try Self.loadTOTPSecretFromKeychain(username: rec.username)
         } catch {
             if let legacy = rec.legacyTotpSecretBase32 {
-                // Audit 033 / 035: Non-blocking async device-owner challenge prior to unmigrated fallback
+                // Audit 033 / 035 / 039: Non-blocking async device-owner challenge prior to unmigrated fallback
                 #if DEBUG
-                let shouldBypassDeviceOwner = mockDeviceOwnerSuccessForTesting
-                #else
-                let shouldBypassDeviceOwner = false
-                #endif
-
-                if !shouldBypassDeviceOwner {
+                if let hook = mockDeviceOwnerHook {
+                    let success = try await hook()
+                    guard success else {
+                        throw WalletAuthError.deviceOwnerAuthCanceled
+                    }
+                } else if !mockDeviceOwnerSuccessForTesting {
                     let context = LAContext()
                     var authError: NSError?
                     guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
@@ -495,11 +517,43 @@ public actor WalletAuthCoordinator {
                         throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
                     }
                 }
+                #else
+                let context = LAContext()
+                var authError: NSError?
+                guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                    throw WalletAuthError.deviceOwnerAuthFailed(
+                        authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable for unmigrated credential."
+                    )
+                }
+
+                do {
+                    let success = try await context.evaluatePolicy(
+                        .deviceOwnerAuthentication,
+                        localizedReason: "Authorize fallback to unmigrated credential for " + rec.username
+                    )
+                    guard success else {
+                        throw WalletAuthError.deviceOwnerAuthCanceled
+                    }
+                } catch let laError as LAError {
+                    if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                        throw WalletAuthError.deviceOwnerAuthCanceled
+                    }
+                    throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+                } catch {
+                    throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+                }
+                #endif
                 secret = legacy
             } else {
                 throw error
             }
         }
+
+        // Audit 039: Guard against lock/logout or record invalidation during asynchronous device-owner challenge
+        guard self.currentAuthEpoch == capturedEpoch, self.recordGeneration == capturedGeneration else {
+            throw WalletAuthError.authAbortedByLock
+        }
+
         let (valid, timeStep) = Self.verifyTOTP(secret: secret, code: totpCode, time: time)
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
@@ -554,7 +608,14 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.rateLimited(secondsRemaining: 2)
         }
         isAuthInFlight = true
-        defer { isAuthInFlight = false }
+        currentAuthEpoch += 1
+        let capturedEpoch = currentAuthEpoch
+        let capturedGeneration = self.recordGeneration
+        defer {
+            if currentAuthEpoch == capturedEpoch {
+                isAuthInFlight = false
+            }
+        }
 
         guard var rec = record else {
             throw WalletAuthError.notEnrolled
@@ -603,14 +664,14 @@ public actor WalletAuthCoordinator {
             throw registerFailedAttempt(&rec)
         }
 
-        // MANDATORY P0-2: Require explicit device-owner presence / Touch ID step-up
+        // MANDATORY P0-2 / Audit 039: Require explicit device-owner presence / Touch ID step-up
         #if DEBUG
-        let shouldBypassDeviceOwner = mockDeviceOwnerSuccessForTesting
-        #else
-        let shouldBypassDeviceOwner = false
-        #endif
-
-        if !shouldBypassDeviceOwner {
+        if let hook = mockDeviceOwnerHook {
+            let success = try await hook()
+            guard success else {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+        } else if !mockDeviceOwnerSuccessForTesting {
             let context = LAContext()
             var authError: NSError?
             guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
@@ -632,6 +693,34 @@ public actor WalletAuthCoordinator {
             } catch {
                 throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
             }
+        }
+        #else
+        let context = LAContext()
+        var authError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+            throw WalletAuthError.deviceOwnerAuthFailed(
+                authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
+            )
+        }
+
+        do {
+            let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: deviceOwnerReason)
+            guard success else {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+        } catch let laError as LAError {
+            if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+            throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+        } catch {
+            throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+        }
+        #endif
+
+        // Audit 039: Guard against lock/logout or record invalidation during asynchronous device-owner challenge
+        guard self.currentAuthEpoch == capturedEpoch, self.recordGeneration == capturedGeneration else {
+            throw WalletAuthError.authAbortedByLock
         }
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
@@ -673,6 +762,8 @@ public actor WalletAuthCoordinator {
 
     public func invalidateSession() {
         self.recordGeneration += 1
+        self.currentAuthEpoch += 1
+        self.isAuthInFlight = false
         self.activeSession = nil
         self.activeApprovals.removeAll()
     }
@@ -701,12 +792,12 @@ public actor WalletAuthCoordinator {
         try verifyCapability(capability)
 
         #if DEBUG
-        let shouldBypassDeviceOwner = mockDeviceOwnerSuccessForTesting
-        #else
-        let shouldBypassDeviceOwner = false
-        #endif
-
-        if !shouldBypassDeviceOwner {
+        if let hook = mockDeviceOwnerHook {
+            let success = try await hook()
+            guard success else {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+        } else if !mockDeviceOwnerSuccessForTesting {
             let context = LAContext()
             var authError: NSError?
             guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
@@ -729,7 +820,32 @@ public actor WalletAuthCoordinator {
                 throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
             }
         }
+        #else
+        let context = LAContext()
+        var authError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+            throw WalletAuthError.deviceOwnerAuthFailed(
+                authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
+            )
+        }
 
+        do {
+            let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+            guard success else {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+        } catch let laError as LAError {
+            if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+            throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+        } catch {
+            throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+        }
+        #endif
+
+        // Audit 039: Re-verify capability and active session post-suspension to prevent approvals during lock/logout
+        try verifyCapability(capability)
         touchSession()
 
         let approvalId = UUID()

@@ -327,6 +327,9 @@ public final class AppState: ObservableObject {
 
     public func loginUser(username: String, password: String, totpCode: String) async throws {
         let session = try await authCoordinator.login(username: username, password: password, totpCode: totpCode)
+        guard await authCoordinator.currentSession?.id == session.id else {
+            return
+        }
         self.authSession = session
         self.isWalletTabUnlocked = true
         self.isMigrationPending = await authCoordinator.isMigrationPending
@@ -337,6 +340,9 @@ public final class AppState: ObservableObject {
 
     public func loginWithRecoveryCode(username: String, code: String) async throws {
         let session = try await authCoordinator.loginWithRecoveryCode(username: username, code: code)
+        guard await authCoordinator.currentSession?.id == session.id else {
+            return
+        }
         self.authSession = session
         self.isWalletTabUnlocked = true
         self.isMigrationPending = await authCoordinator.isMigrationPending
