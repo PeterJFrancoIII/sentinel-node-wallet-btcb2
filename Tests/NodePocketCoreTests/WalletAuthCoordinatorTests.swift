@@ -147,6 +147,61 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertTrue(migratedRecord.isTotpInKeychain)
     }
 
+    func testLoginWithLegacyFallbackRequiresDeviceOwnerAndPurgesPlaintext() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_login_fallback_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let salt = try WalletAuthCoordinator.randomBytes(count: 32)
+        let hash = try WalletAuthCoordinator.deriveKey(password: "MigratePassword123!@#", salt: salt)
+        let secret = "JBSWY3DPEHPK3PXP"
+
+        let initialRecord = AuthRegistryRecord(
+            username: "fallback_user",
+            saltHex: salt.map { String(format: "%02x", $0) }.joined(),
+            passwordHashHex: hash.map { String(format: "%02x", $0) }.joined(),
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: secret,
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try (try encoder.encode(initialRecord)).write(to: registryURL)
+
+        // Initialize with simulated Keychain failure so migration fails initially
+        WalletAuthCoordinator.simulateKeychainFailure(status: errSecMissingEntitlement)
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Test login with mock device-owner approval and in-memory mock enabled for write
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let time = Date().timeIntervalSince1970
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret, time: time)
+
+        let cap = try await coordinator.login(
+            username: "fallback_user",
+            password: "MigratePassword123!@#",
+            totpCode: code,
+            time: time
+        )
+        XCTAssertEqual(cap.username, "fallback_user")
+
+        // Verify disk record: legacyTotpSecretBase32 must now be purged and isTotpInKeychain set to true!
+        let postLoginData = try Data(contentsOf: registryURL)
+        let updatedRecord = try JSONDecoder().decode(AuthRegistryRecord.self, from: postLoginData)
+        XCTAssertNil(updatedRecord.legacyTotpSecretBase32, "Plaintext legacy secret MUST be purged upon successful login re-migration")
+        XCTAssertTrue(updatedRecord.isTotpInKeychain)
+    }
+
     func testConstantTimeComparison() {
         let a = Data([0x01, 0x02, 0x03, 0x04])
         let b = Data([0x01, 0x02, 0x03, 0x04])
