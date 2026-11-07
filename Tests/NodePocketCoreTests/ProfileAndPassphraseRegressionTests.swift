@@ -53,6 +53,68 @@ final class ProfileAndPassphraseRegressionTests: XCTestCase {
         XCTAssertEqual(reopened.storageMode.pruneMB, 550)
     }
 
+
+    func testCustomPeerLimitAndInboundPolicyRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_peer_limit_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        var custom = SyncProfile.preset(for: .balanced)
+        custom.maxConnections = 47
+        let config = NodeConfig(
+            rpcUser: "test_user",
+            rpcPassword: "not_a_real_password",
+            allowInboundP2P: true,
+            profile: custom,
+            dataDirectory: dir
+        )
+        try config.writeToDisk()
+
+        let reopened = NodeConfig(dataDirectory: dir)
+        XCTAssertEqual(reopened.profile.maxConnections, 47)
+        XCTAssertTrue(reopened.allowInboundP2P)
+        XCTAssertTrue(reopened.renderBitcoinConf().contains("maxconnections=47"))
+        XCTAssertTrue(reopened.renderBitcoinConf().contains("listen=1"))
+
+        // Changing the cap must not silently re-enable or disable inbound P2P.
+        var lower = reopened
+        lower.profile.maxConnections = 5
+        lower.allowInboundP2P = false
+        try lower.writeToDisk()
+        let disabled = NodeConfig(dataDirectory: dir)
+        XCTAssertEqual(disabled.profile.maxConnections, 5)
+        XCTAssertFalse(disabled.allowInboundP2P)
+        XCTAssertTrue(disabled.renderBitcoinConf().contains("listen=0"))
+    }
+
+    func testConfiguredPeerLimitIsOverriddenOnlyForUltraPower() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_ultra_peers_\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = NodeManager(config: NodeConfig(dataDirectory: dir))
+        var custom = SyncProfile.preset(for: .fast)
+        custom.maxConnections = 40
+        let status = try await manager.applyConfiguration(
+            profile: custom,
+            storageMode: .compact(pruneMB: StorageMode.defaultPruneMB),
+            allowInboundP2P: true
+        )
+        XCTAssertTrue(status.contains("next node startup"))
+        XCTAssertEqual(manager.config.profile.maxConnections, 40)
+        XCTAssertEqual(manager.maxConnectionsForCurrentPowerMode, 40)
+        XCTAssertNil(manager.verifiedRunningMaxConnections)
+
+        XCTAssertTrue(try await manager.applyUltraMode(active: true))
+        XCTAssertEqual(manager.maxConnectionsForCurrentPowerMode, 4)
+        XCTAssertEqual(manager.config.profile.maxConnections, 40, "Ultra must not erase the saved operator cap")
+        XCTAssertNil(manager.verifiedRunningMaxConnections, "Stopped nodes must not claim a verified runtime cap")
+
+        XCTAssertTrue(try await manager.applyUltraMode(active: false))
+        XCTAssertEqual(manager.maxConnectionsForCurrentPowerMode, 40)
+        XCTAssertTrue(manager.config.allowInboundP2P)
+    }
+
     func testGenerateStrongEncryptionPassphraseIsRandomAndNeverASeedClaim() throws {
         let first = try WalletPassphraseGenerator.generate()
         let second = try WalletPassphraseGenerator.generate()
