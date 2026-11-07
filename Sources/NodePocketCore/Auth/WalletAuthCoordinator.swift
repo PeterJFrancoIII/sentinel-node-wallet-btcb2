@@ -279,6 +279,11 @@ public actor WalletAuthCoordinator {
         record != nil
     }
 
+    /// Indicates whether a legacy plaintext credential is still awaiting verified Keychain migration.
+    public var isMigrationPending: Bool {
+        record?.legacyTotpSecretBase32 != nil
+    }
+
     public var enrolledUsername: String? {
         record?.username
     }
@@ -409,7 +414,7 @@ public actor WalletAuthCoordinator {
         password: String,
         totpCode: String,
         time: TimeInterval = Date().timeIntervalSince1970
-    ) throws -> WalletAuthCapability {
+    ) async throws -> WalletAuthCapability {
         guard var rec = record else {
             throw WalletAuthError.notEnrolled
         }
@@ -445,7 +450,7 @@ public actor WalletAuthCoordinator {
             secret = try Self.loadTOTPSecretFromKeychain(username: rec.username)
         } catch {
             if let legacy = rec.legacyTotpSecretBase32 {
-                // Audit 033: Requiring explicit device-owner presence before permitting unmigrated fallback
+                // Audit 033 / 035: Non-blocking async device-owner challenge prior to unmigrated fallback
                 #if DEBUG
                 let shouldBypassDeviceOwner = mockDeviceOwnerSuccessForTesting
                 #else
@@ -460,20 +465,22 @@ public actor WalletAuthCoordinator {
                             authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable for unmigrated credential."
                         )
                     }
-                    var authSuccess = false
-                    var evalError: Error?
-                    let sema = DispatchSemaphore(value: 0)
-                    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Authorize fallback to unmigrated credential for " + rec.username) { success, err in
-                        authSuccess = success
-                        evalError = err
-                        sema.signal()
-                    }
-                    _ = sema.wait(timeout: .now() + 60)
-                    guard authSuccess else {
-                        if let laErr = evalError as? LAError, laErr.code == .userCancel || laErr.code == .appCancel || laErr.code == .systemCancel {
+
+                    do {
+                        let success = try await context.evaluatePolicy(
+                            .deviceOwnerAuthentication,
+                            localizedReason: "Authorize fallback to unmigrated credential for " + rec.username
+                        )
+                        guard success else {
                             throw WalletAuthError.deviceOwnerAuthCanceled
                         }
-                        throw WalletAuthError.deviceOwnerAuthFailed(evalError?.localizedDescription ?? "Device-owner authorization failed.")
+                    } catch let laError as LAError {
+                        if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                            throw WalletAuthError.deviceOwnerAuthCanceled
+                        }
+                        throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+                    } catch {
+                        throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
                     }
                 }
                 secret = legacy
@@ -490,7 +497,7 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.replayedTOTPTimestep
         }
 
-        // Audit 033: If login used unmigrated legacy secret, attempt immediate protected Keychain save and purge plaintext
+        // Audit 033 / 035: If login used unmigrated legacy secret, attempt immediate protected Keychain save and purge plaintext
         if rec.legacyTotpSecretBase32 != nil {
             if (try? Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: secret)) != nil {
                 if let verified = try? Self.loadTOTPSecretFromKeychain(username: rec.username), verified == secret {
