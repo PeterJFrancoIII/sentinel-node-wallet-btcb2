@@ -25,6 +25,10 @@
 
 - Minimal consensus-security peer policy: default Balanced par=2/cache512MiB/maxconnections24, Quiet 1/256/16 and Fast 4/1024/32. Relay full blocks and transactions and permit inbound P2P when reachable, but explicitly disable NAT-PMP/UPnP auto-mapping and NEVER expose RPC; peer limit is a ceiling, not a guaranteed number of peers. Preserve wallet data and user-selectable Quiet/Fast/profile settings. [Canonical v10 node policy](docs/MINIMAL_CONSENSUS_SECURITY_V10.md).
 
+## Rolling historical ledger coverage
+
+The **Storage Footprint** selector must show two separate quantities: (1) the *observed* time depth of locally retained blockchain files based on Knots `getblockchaininfo.pruneheight` and verified local header timestamps, and (2) a *projected* approximate time depth for the selected pruning MiB based on current block/undo-file storage density. Forecasts recalculate without additional RPC on each keystroke; read-only polling is capped to once per 120 seconds. Display the most meaningful years/months/weeks/days/hours with `~` and calibration status when the node is in IBD or no reliable byte data exists. Clearly distinguish retained block history from full consensus validation, money insurance, archival access, wallet recovery and deep-reorg guarantees. [v11 storage coverage specification](docs/ROLLING_HISTORY_COVERAGE_V11.md).
+
 ## Wallet v7 P0 gates — failing any blocks live spending
 
 1. **Encrypted-by-default wallet:** Existing code's empty-passphrase default MUST be repaired; no silent creation of unencrypted wallet. No passphrases or seeds in plaintext fallback files.
