@@ -115,8 +115,8 @@ public struct NetworkView: View {
                             .font(.headline)
                         Spacer()
                         let conns = state.networkInfo?.connections ?? 0
-                        let maxConns = state.nodeManager.config.profile.maxConnections
-                        Text("\(conns) / \(maxConns) Max Peers")
+                        let liveCap = state.nodeManager.verifiedRunningMaxConnections.map(String.init) ?? "unverified"
+                        Text("\(conns) / \(liveCap) Running Cap")
                             .font(.caption)
                             .bold()
                             .padding(.horizontal, 8)
@@ -128,10 +128,11 @@ public struct NetworkView: View {
                         statPill(label: "Total Connected", value: "\(state.networkInfo?.connections ?? 0)")
                         statPill(label: "Outbound Peers", value: "\(state.networkInfo?.connections_out ?? 0)")
                         statPill(label: "Inbound Peers", value: "\(state.networkInfo?.connections_in ?? 0)")
-                        statPill(label: "Max Configured Cap", value: "\(state.nodeManager.config.profile.maxConnections)")
+                        statPill(label: "Configured Cap", value: "\(state.nodeManager.config.profile.maxConnections)")
+                        statPill(label: "Running Cap", value: state.nodeManager.verifiedRunningMaxConnections.map(String.init) ?? "unverified")
                     }
 
-                    Text("Note: -maxconnections sets an upper limit on peer connections. Without inbound port forwarding / NAT traversal, Bitcoin Knots establishes ~10–11 outbound connections (8 full-relay + 2 block-relay-only + feelers) by design. Inbound connections require explicit local firewall & router port forwarding.")
+                    Text("Maximum peers is a cap, not a target. Ultra Power enforces 4 peers even if a higher value is configured. App-owned daemons report their launched cap; an adopted daemon may have unknown command-line overrides. Outbound connections are normally limited by peer-selection policy. Inbound peers additionally require listening enabled and firewall/router reachability.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
