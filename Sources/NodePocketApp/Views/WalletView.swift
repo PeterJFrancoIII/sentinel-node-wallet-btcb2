@@ -624,11 +624,19 @@ public struct WalletView: View {
                 Text("Password").font(.caption).bold()
                 Group {
                     if showEnrollmentPassword {
-                        TextField("Strong Password", text: $enrollPassword)
-                            .textContentType(.newPassword)
+                        if #available(macOS 14.0, *) {
+                            TextField("Strong Password", text: $enrollPassword)
+                                .textContentType(.newPassword)
+                        } else {
+                            TextField("Strong Password", text: $enrollPassword)
+                        }
                     } else {
-                        SecureField("Strong Password", text: $enrollPassword)
-                            .textContentType(.newPassword)
+                        if #available(macOS 14.0, *) {
+                            SecureField("Strong Password", text: $enrollPassword)
+                                .textContentType(.newPassword)
+                        } else {
+                            SecureField("Strong Password", text: $enrollPassword)
+                        }
                     }
                 }
                 .textFieldStyle(.roundedBorder)
