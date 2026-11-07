@@ -105,12 +105,14 @@ final class ProfileAndPassphraseRegressionTests: XCTestCase {
         XCTAssertEqual(manager.maxConnectionsForCurrentPowerMode, 40)
         XCTAssertNil(manager.verifiedRunningMaxConnections)
 
-        XCTAssertTrue(try await manager.applyUltraMode(active: true))
+        let activated = try await manager.applyUltraMode(active: true)
+        XCTAssertTrue(activated)
         XCTAssertEqual(manager.maxConnectionsForCurrentPowerMode, 4)
         XCTAssertEqual(manager.config.profile.maxConnections, 40, "Ultra must not erase the saved operator cap")
         XCTAssertNil(manager.verifiedRunningMaxConnections, "Stopped nodes must not claim a verified runtime cap")
 
-        XCTAssertTrue(try await manager.applyUltraMode(active: false))
+        let reverted = try await manager.applyUltraMode(active: false)
+        XCTAssertTrue(reverted)
         XCTAssertEqual(manager.maxConnectionsForCurrentPowerMode, 40)
         XCTAssertTrue(manager.config.allowInboundP2P)
     }
