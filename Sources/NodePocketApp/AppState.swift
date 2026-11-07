@@ -60,6 +60,14 @@ public final class AppState: ObservableObject {
         nodeManager.onStateChange = { [weak self] state in
             Task { @MainActor in
                 self?.nodeState = state
+                if case .running = state {
+                    // The next low-frequency sample will refresh real coverage.
+                } else {
+                    // An inactive node cannot certify live retained-history data.
+                    self?.rollingHistoryCoverage = nil
+                    self?.rollingHistoryStatus = "Node not running — history coverage unavailable"
+                    self?.lastRollingCoveragePoll = nil
+                }
                 self?.appendLog("[STATE] Node changed state to: \(state)")
             }
         }
