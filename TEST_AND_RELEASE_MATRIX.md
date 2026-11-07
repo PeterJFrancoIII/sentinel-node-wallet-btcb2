@@ -21,3 +21,17 @@
 | Public release | Apple Developer ID for app+bitcoind; notarization/staple/Gatekeeper; signed updates; independent wallet audit | BLOCKED |
 
 **No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
+
+## Candidate bug-fix acceptance (not yet Mac-validated)
+
+| Change | Test evidence required | Current status |
+| --- | --- | --- |
+| Quiet / Balanced / Fast selector | One serialized write/restart per Apply, `bitcoin.conf` numerical settings and actual Knots process startup, no hidden errors | NOT RUN on Mac |
+| Settings survive relaunch | Reopen app and verify last-selected profile, threads/cache/peers and unchanged pruning | NOT RUN on Mac |
+| Battery behavior | Fast remains selected on battery, no automatic switch to Balanced | NOT RUN on Mac |
+| Adopted-daemon case | Unverified process cannot be stopped; clear error; implement PID/datadir-verified safe adoption before claiming seamless adoption | PARTIAL — deliberate fail-closed |
+| Strong passphrase generation | `SecRandomCopyBytes` (32 bytes), 43-character base64url, distinct samples, no seed/recovery mislabeling | Swift XCTest added; NOT RUN |
+| Protected Keychain storage | New wallet name/account item requiring device-owner presence; no silent overwrite, save errors block wallet creation | Mac manual test NOT RUN |
+| Saved-passphrase fill | User explicitly requests fill and authenticates; decline/cancel must not release secret, both create and later send prompts | Mac manual test NOT RUN |
+| Wallet backup | Export/restore encrypted descriptor wallet, proof that passphrase alone does not recover descriptors, Keychain unavailable scenario | NOT RUN |
+| Apple Passwords compatibility | Do not claim generic Keychain item is automatically visible in Apple's Passwords app; verify UI wording | Documentation only |
