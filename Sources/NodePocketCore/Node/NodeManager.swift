@@ -29,6 +29,20 @@ public final class NodeManager: @unchecked Sendable {
     private var monitorTask: Task<Void, Never>?
 
     public private(set) var isUltraActive: Bool = false
+
+    /// Configured capacity can differ from the running daemon's effective cap.
+    /// Ultra Power always overrides maxconnections with 4 for app-owned Knots.
+    public var maxConnectionsForCurrentPowerMode: Int {
+        isUltraActive ? 4 : config.profile.maxConnections
+    }
+
+    /// Only claim a runtime cap when the app owns the started subprocess.
+    /// An adopted daemon may have additional command-line overrides.
+    public var verifiedRunningMaxConnections: Int? {
+        guard state.isRunning, process != nil else { return nil }
+        return maxConnectionsForCurrentPowerMode
+    }
+
     public var onStateChange: (@Sendable (NodeState) -> Void)?
     public var onLogMessage: (@Sendable (String) -> Void)?
     public var onBlockchainUpdate: (@Sendable (BlockchainInfo, HashrateReport, NetworkInfo?, (state: ETAState, display: String)) -> Void)?
@@ -254,7 +268,8 @@ public final class NodeManager: @unchecked Sendable {
     /// one config write, no concurrent profile/storage racing or swallowed errors.
     @MainActor public func applyConfiguration(
         profile newProfile: SyncProfile,
-        storageMode newMode: StorageMode
+        storageMode newMode: StorageMode,
+        allowInboundP2P newInbound: Bool? = nil
     ) async throws -> String {
         guard !settingsInFlight else {
             throw RPCClientError.serializationError("A node configuration change is already in progress.")
@@ -279,8 +294,11 @@ public final class NodeManager: @unchecked Sendable {
             throw RPCClientError.serializationError("Invalid resource profile limits.")
         }
 
-        if config.profile == newProfile && config.storageMode == newMode {
-            return "Settings are already configured."
+        let requestedInbound = newInbound ?? config.allowInboundP2P
+        if config.profile == newProfile && config.storageMode == newMode && config.allowInboundP2P == requestedInbound {
+            return isUltraActive
+                ? "Settings saved; Ultra Power currently overrides maxconnections to 4 until stable AC power."
+                : "Settings are already configured."
         }
         let previous = config
         let wasRunning: Bool
@@ -293,7 +311,14 @@ public final class NodeManager: @unchecked Sendable {
             throw RPCClientError.serializationError("Wait for the node to finish starting or stopping.")
         }
 
-        if wasRunning {
+        // Ultra's hard 4-peer command-line override wins over bitcoin.conf. Do
+        // not restart for a change that cannot become effective until AC resumes.
+        let queuedForUltra = wasRunning && isUltraActive
+        if queuedForUltra && process == nil {
+            throw RPCClientError.serializationError("Cannot queue settings on an externally managed Ultra node; verify the daemon first.")
+        }
+
+        if wasRunning && !queuedForUltra {
             if process != nil {
                 await stop()
                 guard state == .stopped else {
@@ -317,16 +342,24 @@ public final class NodeManager: @unchecked Sendable {
 
         config.profile = newProfile
         config.storageMode = newMode
+        config.allowInboundP2P = requestedInbound
         do {
             try config.writeToDisk()
-            if wasRunning {
-                try start(ultraOverride: isUltraActive)
+            if wasRunning && !queuedForUltra {
+                try start(ultraOverride: false)
                 try await waitForRPCReadiness(timeoutSeconds: 90)
             }
-            let status = wasRunning ? "Applied after clean restart and verified RPC connectivity." :
-                "Saved. Settings will take effect on the next node startup."
+            let status: String
+            if queuedForUltra {
+                status = "Saved, not active yet: Ultra Power is running with a 4-peer command-line cap. Your configured \(newProfile.maxConnections)-peer cap and inbound policy apply when stable AC resumes and Knots restarts."
+            } else if wasRunning {
+                status = "Applied after clean restart and verified RPC connectivity. Max peer count is a cap, not a connection target."
+            } else {
+                status = "Saved. Settings will take effect on the next node startup."
+            }
             onLogMessage?("[CONFIG] \(newProfile.type.rawValue) par=\(newProfile.parThreads) " +
-                          "dbcache=\(newProfile.dbCacheMB) maxconnections=\(newProfile.maxConnections). " + status)
+                          "dbcache=\(newProfile.dbCacheMB) maxconnections=\(newProfile.maxConnections) " +
+                          "listen=\(requestedInbound ? 1 : 0). " + status)
             return status
         } catch {
             // Restore last known configuration on any failed change. Never erase wallet/chain.
