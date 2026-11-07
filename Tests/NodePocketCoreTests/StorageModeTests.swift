@@ -3,11 +3,11 @@ import XCTest
 
 final class StorageModeTests: XCTestCase {
     func testCompactPruningDefaultsAndValidation() throws {
-        // Default is 550 MiB
+        // New installations default to 2 GiB while retaining a 550 MiB minimum
         let defaultMode = StorageMode.compact(pruneMB: StorageMode.defaultPruneMB)
         XCTAssertTrue(defaultMode.isPruned)
         XCTAssertFalse(defaultMode.isArchival)
-        XCTAssertEqual(defaultMode.pruneMB, 550)
+        XCTAssertEqual(defaultMode.pruneMB, 2048)
 
         // 550 MiB is valid
         let mode550 = try StorageMode.validateCompactPrune(mb: 550)
