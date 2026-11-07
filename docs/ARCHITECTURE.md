@@ -81,6 +81,10 @@ The verification time-remaining estimator continuously monitors initial block do
 
 ---
 
+## Rolling block-history observability (v11)
+
+Existing Storage Footprint card opens Advanced and provides live `pruneheight`-to-tip block time coverage. The selected pruning size previews a bounded projection using `getblockchaininfo.size_on_disk` and `prune_target_size`, not assumptions about the entire historical blockchain's density. Recalculate on every UI selection from cached sample, poll local headers at most every 120 seconds, and use logical year/month/week/day/hour units. Suppress misleading projection while IBD or when the buffer has not reached steady state. See [v11 rolling coverage](ROLLING_HISTORY_COVERAGE_V11.md).
+
 ## 4. BIP-110 / BLAKE2b Consensus Verification
 
 See [Minimal Consensus Security v10](MINIMAL_CONSENSUS_SECURITY_V10.md). A pruned node fully validates consensus and advertises limited block serving (BIP 159); archival retention is not required for independent verification. Node defaults permit normal outbound block/transaction relay and user-approved inbound P2P, but disable implicit NAT-PMP/UPnP router changes. New installs default to Balanced (2 threads, 512 MiB cache, 24 connection cap), while Quiet/Fast change resource limits only and retain the user's pruning choice.
