@@ -60,6 +60,7 @@ public struct WalletView: View {
     @State private var showRecoveryLogin: Bool = false
     @State private var enrollUsername: String = ""
     @State private var enrollPassword: String = ""
+    @State private var showEnrollmentPassword: Bool = false
     @State private var enrollTotpCode: String = ""
     @State private var isAuthActionInProgress: Bool = false
     @State private var authLocalError: String? = nil
@@ -613,21 +614,64 @@ public struct WalletView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Username").font(.caption).bold()
                 TextField("operator", text: $enrollUsername)
+                    .textContentType(.username)
                     .textFieldStyle(.roundedBorder)
                     .accessibilityIdentifier("user-enroll-name")
             }
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Password").font(.caption).bold()
-                SecureField("Strong Password", text: $enrollPassword)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("user-enroll-password")
+                Group {
+                    if showEnrollmentPassword {
+                        TextField("Strong Password", text: $enrollPassword)
+                            .textContentType(.newPassword)
+                    } else {
+                        SecureField("Strong Password", text: $enrollPassword)
+                            .textContentType(.newPassword)
+                    }
+                }
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("user-enroll-password")
+
+                HStack(spacing: 12) {
+                    Button("Generate Strong Password") {
+                        do {
+                            enrollPassword = try WalletAuthCoordinator.generateStrongOperatorPassword()
+                            authLocalError = nil
+                        } catch {
+                            authLocalError = "Secure password generation failed: \(error.localizedDescription)"
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    Toggle("Show", isOn: $showEnrollmentPassword)
+                        .toggleStyle(.checkbox)
+                }
+                Text("Apple Passwords may suggest a strong password when this app is signed and linked to an approved website. Automatic password saving is not available in this development build.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
             }
 
             if let data = state.generatedEnrollmentData {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("2-Factor Authenticator Setup (RFC 6238)").font(.caption).bold()
                     Text("Scan or enter this key in your authenticator app (Apple Passwords, Google Authenticator, etc.):")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
+                    Button("Add Verification Code to Apple Passwords") {
+                        // The user must approve the OS-controlled credential choice.
+                        // Opening the URL does not itself certify a successful save.
+                        var components = URLComponents(string: data.otpauthURI)
+                        components?.scheme = "apple-otpauth"
+                        guard let url = components?.url, NSWorkspace.shared.open(url) else {
+                            authLocalError = "Could not open Apple Passwords verification-code setup. You can use another authenticator."
+                            return
+                        }
+                        authLocalError = nil
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityIdentifier("user-enroll-apple-totp")
+                    Text("Apple Passwords will ask which saved login should receive the code. Enter a current code below to verify setup. Keeping both factors in one vault reduces their independence.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
 
@@ -659,6 +703,7 @@ public struct WalletView: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Enter 6-Digit Authenticator Code to Confirm").font(.caption).bold()
                         TextField("000000", text: $enrollTotpCode)
+                            .textContentType(.oneTimeCode)
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 140)
                             .accessibilityIdentifier("user-enroll-totp")
