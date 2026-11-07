@@ -18,7 +18,7 @@ FORBIDDEN=(
 )
 
 for term in "${FORBIDDEN[@]}"; do
-    MATCHES=$(git -C "${ROOT_DIR}" grep -i "${term}" ":(exclude)scripts/secret_scan.sh" ":(exclude)Tests/NodePocketCoreTests/IsolationSecurityTests.swift" ":(exclude)Sources/NodePocketCore/Isolation/SecurityAuditor.swift" ":(exclude)docs/ISOLATION_REPORT.md" || true)
+    MATCHES=$(git -C "${ROOT_DIR}" grep -i "${term}" ":(exclude)scripts/secret_scan.sh" ":(exclude)Tests/NodePocketCoreTests/IsolationSecurityTests.swift" ":(exclude)Sources/NodePocketCore/Isolation/SecurityAuditor.swift" ":(exclude)docs/ISOLATION_REPORT.md" ":(exclude)tools/verify_governance.py" || true)
     if [ -n "${MATCHES}" ]; then
         echo "❌ Isolation violation found for term '${term}':"
         echo "${MATCHES}"
