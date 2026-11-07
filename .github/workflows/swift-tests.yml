@@ -17,4 +17,4 @@ jobs:
       - name: Swift toolchain
         run: swift --version
       - name: Compile and run native unit tests
-        run: swift test --parallel
+        run: swift test
