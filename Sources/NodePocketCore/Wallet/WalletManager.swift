@@ -173,11 +173,15 @@ public actor WalletManager {
             throw WalletSecurityError.unencryptedWalletProhibited
         }
 
-        _ = try await rpcClient.createWallet(name: name, passphrase: passphrase, descriptors: true, loadOnStartup: true)
-
+        // Record a user-consented, protected passphrase BEFORE attempting wallet
+        // creation, so an ambiguous RPC timeout cannot strand an encrypted wallet
+        // whose passphrase failed to save. Do not discard it automatically on error.
         if storeInKeychain {
-            try? keychainHelper.savePassphrase(passphrase, account: name)
+            try keychainHelper.savePassphrase(passphrase, account: name)
         }
+        _ = try await rpcClient.createWallet(
+            name: name, passphrase: passphrase, descriptors: true, loadOnStartup: true
+        )
 
         self.currentWalletName = name
         _ = try await refreshWalletInfo()
