@@ -734,7 +734,7 @@ public struct WalletView: View {
                                     guard authorized else { return }
                                     sendPassphraseInput = try await keychain.retrievePassphraseInteractively(account: name)
                                 } catch {
-                                    sendErrorMessage = "Keychain fill denied: \\(error.localizedDescription)"
+                                    sendErrorMessage = "Keychain fill denied: \(error.localizedDescription)"
                                 }
                             }
                         }
