@@ -549,12 +549,14 @@ public struct WalletView: View {
                     Button(action: {
                         let savePanel = NSSavePanel()
                         savePanel.title = "Backup Wallet Database"
-                        savePanel.nameFieldStringValue = "wallet_backup_\(Int(Date().timeIntervalSince1970)).dat"
+                        let targetWallet = state.walletSnapshot?.name ?? "wallet"
+                        savePanel.nameFieldStringValue = "\(targetWallet)_backup_\(Int(Date().timeIntervalSince1970)).dat"
                         if savePanel.runModal() == .OK, let url = savePanel.url {
                             Task {
                                 do {
-                                    try await state.walletManager.exportBackup(to: url)
-                                    state.appendLog("[WALLET] Successfully exported backup to \(url.path)")
+                                    try await state.exportBackup(to: url)
+                                    state.alertMessage = "Wallet backup successfully saved to:\n\(url.path)"
+                                    state.showAlert = true
                                 } catch {
                                     state.alertMessage = "Backup failed: \(error.localizedDescription)"
                                     state.showAlert = true

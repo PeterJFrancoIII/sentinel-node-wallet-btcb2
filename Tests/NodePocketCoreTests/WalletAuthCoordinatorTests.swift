@@ -682,4 +682,98 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let session = await coordinator.currentSession
         XCTAssertNil(session, "No active session may exist after lock-aborted recovery login")
     }
+
+    func testWalletExportBackupAndRestoreRequireAuthAndHighRiskApproval() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_backup_auth_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let rpc = BitcoinRPCClient(user: "test", password: "pwd")
+        let manager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        let destURL = tempDir.appendingPathComponent("test_backup.dat")
+
+        // 1. Unauthenticated (nil capability) must throw .unauthenticated
+        do {
+            try await manager.exportBackup(to: destURL, capability: nil, approval: nil)
+            XCTFail("exportBackup without capability must throw .unauthenticated")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .unauthenticated)
+        }
+
+        // Enroll and log in
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "backup_operator")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        let capability = try await coordinator.enroll(
+            username: "backup_operator",
+            password: "BackupPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // 2. Valid capability but missing approval must throw .unauthorizedHighRiskAction
+        do {
+            try await manager.exportBackup(to: destURL, capability: capability, approval: nil)
+            XCTFail("exportBackup without high-risk approval must throw .unauthorizedHighRiskAction")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 3. Approval bound to wrong action must throw .unauthorizedHighRiskAction
+        let wrongApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "delete",
+            target: "default_wallet",
+            reason: "Wrong action"
+        )
+        do {
+            try await manager.exportBackup(to: destURL, capability: capability, approval: wrongApproval)
+            XCTFail("exportBackup with wrong action approval must throw .unauthorizedHighRiskAction")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 4. Same for restoreWallet: nil capability and nil approval must throw
+        let dummyRestoreFile = tempDir.appendingPathComponent("restore.dat")
+        try "dummy".write(to: dummyRestoreFile, atomically: true, encoding: .utf8)
+
+        do {
+            _ = try await manager.restoreWallet(name: "restored", backupFile: dummyRestoreFile, capability: nil, approval: nil)
+            XCTFail("restoreWallet without capability must throw .unauthenticated")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .unauthenticated)
+        }
+
+        do {
+            _ = try await manager.restoreWallet(name: "restored", backupFile: dummyRestoreFile, capability: capability, approval: nil)
+            XCTFail("restoreWallet without approval must throw .unauthorizedHighRiskAction")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+    }
 }

@@ -514,14 +514,27 @@ public final class AppState: ObservableObject {
     }
 
     public func prepareSendPreview(to destinationAddress: String, amountSats: Int64, feeQuote: FeeQuote) async throws -> FundedTxPreview {
-        try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote)
+        try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote, capability: self.authSession)
     }
 
     public func executeAuthorizedSend(preview: FundedTxPreview, explicitPassphrase: String? = nil) async throws -> String {
-        let txid = try await walletManager.executeAuthorizedSend(preview: preview, explicitPassphrase: explicitPassphrase)
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        let approval = try await requestHighRiskApproval(
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Authorize sending \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
+        )
+        let txid = try await walletManager.executeAuthorizedSend(
+            preview: preview,
+            explicitPassphrase: explicitPassphrase,
+            capability: session,
+            approval: approval
+        )
         appendLog("[TRANSACTION] Broadcasted \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress): \(txid)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: session)
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: session)) ?? []
         return txid
     }
 
@@ -563,12 +576,42 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public func exportBackup(to fileURL: URL) async throws {
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        let target = (await walletManager.currentWalletName) ?? walletSnapshot?.name ?? "default_wallet"
+        let approval = try await requestHighRiskApproval(
+            action: "export",
+            target: target,
+            reason: "Authorize exporting encrypted backup of wallet '\(target)'"
+        )
+        if FileManager.default.fileExists(atPath: fileURL.path) {
+            try? FileManager.default.removeItem(at: fileURL)
+        }
+        try await walletManager.exportBackup(to: fileURL, capability: session, approval: approval)
+        appendLog("[WALLET] Successfully exported backup of '\(target)' to \(fileURL.path)")
+    }
+
     public func restoreWallet(name: String, backupFile: URL) async throws -> String {
-        let restoredName = try await walletManager.restoreWallet(name: name, backupFile: backupFile, capability: self.authSession)
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        let approval = try await requestHighRiskApproval(
+            action: "restore",
+            target: name,
+            reason: "Authorize restoring wallet '\(name)' from backup"
+        )
+        let restoredName = try await walletManager.restoreWallet(
+            name: name,
+            backupFile: backupFile,
+            capability: session,
+            approval: approval
+        )
         appendLog("[WALLET] Successfully restored wallet '\(restoredName)' from \(backupFile.lastPathComponent)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: session)
+        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: session)) ?? ""
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: session)) ?? []
         return restoredName
     }
 
