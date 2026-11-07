@@ -197,15 +197,21 @@ public struct NodeView: View {
                         color: .purple
                     )
 
-                    metricCard(
-                        title: "Storage Footprint",
-                        value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
-                        subtitle: state.storageMode.isArchival
-                            ? "Full-history archive (when fully synced)"
-                            : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
-                        icon: "internaldrive.fill",
-                        color: .green
-                    )
+                    Button {
+                        showAdvancedSheet = true
+                    } label: {
+                        metricCard(
+                            title: "Storage Footprint",
+                            value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
+                            subtitle: state.storageMode.isArchival
+                                ? "Full-history archive (when fully synced)"
+                                : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
+                            icon: "internaldrive.fill",
+                            color: .green
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Choose pruning size and view live rolling-history coverage")
                 }
 
                 // BIP-110 Fork Progress Banner
