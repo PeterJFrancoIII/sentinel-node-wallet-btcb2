@@ -45,15 +45,9 @@ public final class KeychainHelper: Sendable {
         var authError: NSError?
 
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
-            if let err = authError {
-                // If evaluating in an environment without configured policy, return true for non-interactive test
-                #if DEBUG
-                return true
-                #else
-                throw KeychainError.userPresenceAuthenticationFailed(err.localizedDescription)
-                #endif
-            }
-            return true
+            throw KeychainError.userPresenceAuthenticationFailed(
+                authError?.localizedDescription ?? "Device-owner authentication is unavailable."
+            )
         }
 
         do {
