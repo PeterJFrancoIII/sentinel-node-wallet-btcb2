@@ -20,7 +20,7 @@ public struct NetworkView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Estimated BLAKE2b Network Hashrate")
+                            Text("Estimated BLAKE2b Network Hashrate (30-Block Trend)")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
                             Text(state.hashrateReport?.displayHashrate ?? "Calculating...")
@@ -33,25 +33,89 @@ public struct NetworkView: View {
                     Divider()
 
                     HStack(spacing: 24) {
-                        statPill(label: "Consensus Difficulty", value: String(format: "%.4f", state.hashrateReport?.difficulty ?? 0.0))
-                        statPill(label: "Sample Window", value: "\(state.hashrateReport?.sampleCount ?? 0) blocks")
-                        statPill(label: "Valid Intervals", value: "\(state.hashrateReport?.validIntervalCount ?? 0)")
+                        statPill(label: "Smoothed Rate (120-Block)", value: state.hashrateReport?.displaySmoothedHashrate ?? "--")
+                        statPill(label: "Difficulty", value: String(format: "%.4f", state.hashrateReport?.difficulty ?? 0.0))
+                        statPill(label: "Avg Block Interval", value: String(format: "%.1fs", state.hashrateReport?.averageBlockIntervalSeconds ?? 600.0))
+                        statPill(label: "Sampled Blocks", value: "\(state.hashrateReport?.sampleCount ?? 0)")
                         statPill(label: "Telemetry Age", value: String(format: "%.0fs", state.hashrateReport?.telemetryAgeSeconds ?? 0.0))
                     }
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
-                // Mathematical & Consensus Details
+                // Compact Rolling History Chart (Sparkline / Bar)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "chart.bar.xaxis")
+                            .foregroundColor(.blue)
+                        Text("Rolling Hashrate History (Last 30 Sampled Blocks)")
+                            .font(.headline)
+                        Spacer()
+                        Text("Local Blockwork Sampling")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if let history = state.hashrateReport?.history, !history.isEmpty {
+                        VStack(spacing: 8) {
+                            HStack(alignment: .bottom, spacing: 4) {
+                                ForEach(history) { point in
+                                    VStack(spacing: 2) {
+                                        let maxRate = max(history.map { $0.hashratePH }.max() ?? 1.0, 0.001)
+                                        let normalizedHeight = CGFloat(min(max(point.hashratePH / maxRate, 0.1), 1.0)) * 70.0
+
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .fill(Color.blue.opacity(0.85))
+                                            .frame(height: normalizedHeight)
+
+                                        Text("\(point.height % 100)")
+                                            .font(.system(size: 8, design: .monospaced))
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                            }
+                            .frame(height: 90)
+                            .padding(.top, 8)
+
+                            HStack {
+                                Text("Earlier Blocks")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text("Latest Block Tip")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    } else {
+                        HStack {
+                            Spacer()
+                            VStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Gathering block samples from local daemon...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.vertical, 24)
+                            Spacer()
+                        }
+                    }
+                }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+
+                // BIP-110 Mathematical & Consensus Details
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Image(systemName: "function")
                             .foregroundColor(.orange)
-                        Text("BIP-110 Work & Difficulty Model")
+                        Text("BIP-110 Proof-of-Work & Target Model")
                             .font(.headline)
                     }
 
-                    Text("Network hashrate is derived from cumulative expected proof-of-work divided by valid elapsed block intervals over a 30-block rolling window: H = Σ(2²⁵⁶ / (Target + 1)) / Σ(Δt). Miner timestamp anomalies (Δt ≤ 0) are flagged and excluded from the rate denominator to prevent artificial spikes.")
+                    Text("Network hashrate is derived from cumulative expected proof-of-work divided by valid elapsed block intervals over rolling windows: H = Σ(2²⁵⁶ / (Target + 1)) / Σ(Δt). Miner timestamp anomalies (Δt ≤ 0) are excluded from the rate denominator to ensure mathematical stability.")
                         .font(.caption)
                         .foregroundColor(.secondary)
 

@@ -166,6 +166,10 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "loadwallet", params: [name])
     }
 
+    public func restoreWallet(name: String, backupFile: String) async throws -> LoadWalletResponse {
+        try await call(method: "restorewallet", params: [name, backupFile])
+    }
+
     public func createWallet(name: String, passphrase: String, descriptors: Bool = true, loadOnStartup: Bool = true) async throws -> CreateWalletResponse {
         let params: [Any] = [name, false, false, passphrase, false, descriptors, loadOnStartup]
         return try await call(method: "createwallet", params: params)
@@ -181,6 +185,26 @@ public final class BitcoinRPCClient: @unchecked Sendable {
 
     public func getBalances(walletName: String? = nil) async throws -> WalletBalances {
         try await call(method: "getbalances", walletName: walletName)
+    }
+
+    public func listTransactions(walletName: String? = nil, count: Int = 30) async throws -> [TransactionRecord] {
+        try await call(method: "listtransactions", params: ["*", count, 0, true], walletName: walletName)
+    }
+
+    public func sendToAddress(address: String, amount: Double, comment: String = "", walletName: String? = nil) async throws -> String {
+        try await call(method: "sendtoaddress", params: [address, amount, comment], walletName: walletName)
+    }
+
+    public func walletPassphrase(passphrase: String, timeout: Int = 60, walletName: String? = nil) async throws {
+        let _: String? = try? await call(method: "walletpassphrase", params: [passphrase, timeout], walletName: walletName)
+    }
+
+    public func walletLock(walletName: String? = nil) async throws {
+        let _: String? = try? await call(method: "walletlock", walletName: walletName)
+    }
+
+    public func estimateSmartFee(confTarget: Int = 6) async throws -> SmartFeeResponse {
+        try await call(method: "estimatesmartfee", params: [confTarget])
     }
 
     public func getNewAddress(label: String = "", addressType: String = "bech32", walletName: String? = nil) async throws -> String {

@@ -22,7 +22,7 @@ public final class NodeManager: @unchecked Sendable {
 
     public var onStateChange: (@Sendable (NodeState) -> Void)?
     public var onLogMessage: (@Sendable (String) -> Void)?
-    public var onBlockchainUpdate: (@Sendable (BlockchainInfo, HashrateReport) -> Void)?
+    public var onBlockchainUpdate: (@Sendable (BlockchainInfo, HashrateReport, NetworkInfo?) -> Void)?
 
     public init(config: NodeConfig = NodeConfig()) {
         self.config = config
@@ -96,17 +96,40 @@ public final class NodeManager: @unchecked Sendable {
         proc.standardOutput = outPipe
         proc.standardError = errPipe
 
+        let tipLock = NSLock()
+        var lastTipForwardTime: TimeInterval = 0
+
         outPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
-            if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                self?.onLogMessage?(str)
+            guard let str = String(data: data, encoding: .utf8), !str.isEmpty else { return }
+
+            let lines = str.components(separatedBy: .newlines)
+            for line in lines {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { continue }
+
+                if trimmed.contains("UpdateTip:") {
+                    tipLock.lock()
+                    let now = Date().timeIntervalSince1970
+                    let shouldForward = (now - lastTipForwardTime) >= 1.5
+                    if shouldForward {
+                        lastTipForwardTime = now
+                    }
+                    tipLock.unlock()
+
+                    if shouldForward {
+                        self?.onLogMessage?(trimmed)
+                    }
+                } else {
+                    self?.onLogMessage?(trimmed)
+                }
             }
         }
 
         errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
-                self?.onLogMessage?("[STDERR] \(str)")
+                self?.onLogMessage?("[STDERR] \(str.trimmingCharacters(in: .whitespacesAndNewlines))")
             }
         }
 
@@ -194,8 +217,9 @@ public final class NodeManager: @unchecked Sendable {
                         }
                     }
 
+                    let netInfo = try? await self.rpcClient.getNetworkInfo()
                     let report = self.hashrateTracker.generateReport()
-                    self.onBlockchainUpdate?(binfo, report)
+                    self.onBlockchainUpdate?(binfo, report, netInfo)
                 } catch {
                     // Suppress connection errors during initial startup
                 }
@@ -203,7 +227,12 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
-    public func waitForRPCReadiness(timeoutSeconds: TimeInterval = 25.0) async throws {
+    public func adoptRunningDaemon(pid: Int32 = 0) {
+        updateState(.running(pid: pid))
+        startMonitoring()
+    }
+
+    public func waitForRPCReadiness(timeoutSeconds: TimeInterval = 60.0) async throws {
         let start = Date()
         while Date().timeIntervalSince(start) < timeoutSeconds {
             do {

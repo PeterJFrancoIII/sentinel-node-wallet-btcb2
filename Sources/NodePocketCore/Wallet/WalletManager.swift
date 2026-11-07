@@ -134,6 +134,59 @@ public actor WalletManager {
         try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
     }
 
+    /// Fetches recent wallet transactions (receive, send, coinbase).
+    public func fetchRecentTransactions(count: Int = 30) async throws -> [TransactionRecord] {
+        try await rpcClient.listTransactions(walletName: currentWalletName, count: count)
+    }
+
+    /// Gated Send: sends BTCB2 to a destination address.
+    /// If wallet is encrypted, unlocks temporarily for 15 seconds, broadcasts, and re-locks.
+    public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
+        guard amount > 0 else {
+            throw RPCClientError.serializationError("Send amount must be greater than 0.")
+        }
+        guard destinationAddress.starts(with: "bc1") || destinationAddress.starts(with: "bcrt1") || destinationAddress.starts(with: "tb1") else {
+            throw RPCClientError.serializationError("Invalid destination address format. Native SegWit Bech32 required.")
+        }
+
+        // If encrypted, unlock temporarily
+        let isEncrypted = latestSnapshot?.isEncrypted ?? false
+        if isEncrypted {
+            let pass = passphrase ?? (try? keychainHelper.retrievePassphrase(account: currentWalletName ?? "default_wallet")) ?? ""
+            guard !pass.isEmpty else {
+                throw RPCClientError.serializationError("Wallet is encrypted. Passphrase required to authorize send.")
+            }
+            try await rpcClient.walletPassphrase(passphrase: pass, timeout: 15, walletName: currentWalletName)
+        }
+
+        defer {
+            if isEncrypted {
+                Task {
+                    try? await self.rpcClient.walletLock(walletName: self.currentWalletName)
+                }
+            }
+        }
+
+        let txid = try await rpcClient.sendToAddress(
+            address: destinationAddress,
+            amount: amount,
+            comment: "NODE Pocket BTCB2 Transfer",
+            walletName: currentWalletName
+        )
+
+        // Refresh snapshot immediately
+        _ = try await refreshWalletInfo()
+        return txid
+    }
+
+    /// Restores a wallet from an existing backup file.
+    public func restoreWallet(name: String, backupFile: URL) async throws -> String {
+        let resp = try await rpcClient.restoreWallet(name: name, backupFile: backupFile.path)
+        self.currentWalletName = resp.name
+        _ = try await refreshWalletInfo()
+        return resp.name
+    }
+
     /// Backs up the wallet database to an isolated, operator-specified path.
     public func exportBackup(to fileURL: URL) async throws {
         try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: currentWalletName)

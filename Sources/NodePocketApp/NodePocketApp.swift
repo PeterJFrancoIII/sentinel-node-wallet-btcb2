@@ -9,7 +9,13 @@ struct NodePocketApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appState)
-                .frame(minWidth: 780, minHeight: 520)
+                .frame(minWidth: 840, minHeight: 560)
+                .onAppear {
+                    // Autonomous 1-Click bootstrap on first app open
+                    if appState.nodeState == .stopped && !appState.isStartingUp {
+                        appState.startNode()
+                    }
+                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)

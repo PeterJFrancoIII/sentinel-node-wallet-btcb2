@@ -16,7 +16,7 @@ public struct NodeView: View {
                                 .font(.system(size: 26, weight: .bold))
                             networkBadge
                         }
-                        Text("Bitcoin Knots \(BTCB2ConsensusConstants.pinnedKnotsVersion) • BIP-110 BLAKE2b")
+                        Text("Bitcoin Knots \(BTCB2ConsensusConstants.pinnedKnotsVersion) • BIP-110 BLAKE2b Consensus")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -56,7 +56,7 @@ public struct NodeView: View {
                                     set: { state.switchNetwork($0) }
                                 )) {
                                     Text("Mainnet (Real BTCB2)").tag(BTCB2Network.mainnet)
-                                    Text("Regtest (Local Playground)").tag(BTCB2Network.regtest)
+                                    Text("Regtest (Playground)").tag(BTCB2Network.regtest)
                                     Text("Testnet4").tag(BTCB2Network.testnet4)
                                 }
                                 .pickerStyle(.segmented)
@@ -98,8 +98,8 @@ public struct NodeView: View {
                     HStack(spacing: 12) {
                         Button(action: { state.stopNode() }) {
                             Label("Stop Node", systemImage: "stop.fill")
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 8)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
                         }
                         .buttonStyle(.borderedProminent)
                         .tint(.red)
@@ -115,11 +115,16 @@ public struct NodeView: View {
                         .buttonStyle(.bordered)
 
                         if state.selectedNetwork == .regtest {
-                            Button(action: { state.generateRegtestBlock() }) {
-                                Label("Generate 1 Block", systemImage: "hammer.fill")
+                            Button(action: { state.generateRegtestBlocks(count: 1) }) {
+                                Label("Mine 1 Block", systemImage: "hammer.fill")
                             }
                             .buttonStyle(.borderedProminent)
                             .tint(.purple)
+
+                            Button(action: { state.generateRegtestBlocks(count: 100) }) {
+                                Label("Mine 100 Blocks (Mature)", systemImage: "bolt.fill")
+                            }
+                            .buttonStyle(.bordered)
                         }
 
                         Spacer()
@@ -151,7 +156,7 @@ public struct NodeView: View {
 
                     metricCard(
                         title: "Connected Peers",
-                        value: "\(state.blockchainInfo != nil ? (state.selectedNetwork == .regtest ? "1 (Local)" : "\(state.nodeManager.config.profile.maxConnections) Max") : "0")",
+                        value: "\(state.networkInfo?.connections ?? (state.blockchainInfo != nil ? (state.selectedNetwork == .regtest ? 0 : 8) : 0)) Connected",
                         subtitle: "Strict Outbound Only (Inbound Disabled)",
                         icon: "network",
                         color: .purple
@@ -164,6 +169,37 @@ public struct NodeView: View {
                         icon: "internaldrive.fill",
                         color: .green
                     )
+                }
+
+                // BIP-110 Fork Progress Banner (When on Mainnet)
+                if state.selectedNetwork == .mainnet {
+                    let blocks = state.blockchainInfo?.blocks ?? 0
+                    let forkHeight = BTCB2ConsensusConstants.forkActivationHeight
+                    let forkProgress = min(max(Double(blocks) / Double(forkHeight), 0.0), 1.0)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: blocks >= forkHeight ? "checkmark.shield.fill" : "hourglass")
+                                .foregroundColor(blocks >= forkHeight ? .green : .orange)
+                            Text(blocks >= forkHeight ? "BIP-110 BLAKE2b Consensus Active" : "Pre-Fork History Synchronization")
+                                .font(.headline)
+                            Spacer()
+                            Text(blocks >= forkHeight ? "Post-Fork Tip" : "\(blocks) / \(forkHeight) Blocks")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        ProgressView(value: forkProgress)
+                            .tint(blocks >= forkHeight ? .green : .orange)
+
+                        Text(blocks >= forkHeight ?
+                             "Local node is actively validating native BLAKE2b blocks past fork activation height \(forkHeight)." :
+                             "Currently syncing historical blocks toward BIP-110 hard-fork height \(forkHeight) (activated block hash: \(BTCB2ConsensusConstants.forkActivationBlockHash.prefix(16))...).")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
                 }
 
                 // Best Block & Fork Checkpoint Card

@@ -9,8 +9,11 @@ public final class AppState: ObservableObject {
     @Published public var isStartingUp: Bool = false
     @Published public var startupStatus: String = ""
     @Published public var blockchainInfo: BlockchainInfo?
+    @Published public var networkInfo: NetworkInfo?
     @Published public var hashrateReport: HashrateReport?
     @Published public var walletSnapshot: WalletSnapshot?
+    @Published public var transactions: [TransactionRecord] = []
+    @Published public var systemHealth: SystemHealthSnapshot?
     @Published public var selectedProfileType: SyncProfileType = .quiet
     @Published public var receiveAddress: String = ""
     @Published public var logs: [String] = []
@@ -19,13 +22,20 @@ public final class AppState: ObservableObject {
 
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
+    private var healthTimer: AnyCancellable?
+    private let timeFormatter: DateFormatter
 
     public init() {
         let config = NodeConfig(network: .mainnet, profile: .preset(for: .quiet))
         self.nodeManager = NodeManager(config: config)
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient)
 
+        let tf = DateFormatter()
+        tf.dateFormat = "HH:mm:ss"
+        self.timeFormatter = tf
+
         setupBindings()
+        startHealthMonitoring()
     }
 
     private func setupBindings() {
@@ -38,22 +48,45 @@ public final class AppState: ObservableObject {
 
         nodeManager.onLogMessage = { [weak self] msg in
             Task { @MainActor in
-                self?.appendLog(msg.trimmingCharacters(in: .whitespacesAndNewlines))
+                self?.appendLog(msg)
             }
         }
 
-        nodeManager.onBlockchainUpdate = { [weak self] binfo, report in
+        nodeManager.onBlockchainUpdate = { [weak self] binfo, report, netInfo in
             Task { @MainActor in
                 self?.blockchainInfo = binfo
                 self?.hashrateReport = report
+                self?.networkInfo = netInfo
+
+                // Refresh transactions periodically
+                if let txs = try? await self?.walletManager.fetchRecentTransactions(count: 30) {
+                    self?.transactions = txs
+                }
             }
         }
     }
 
+    private func startHealthMonitoring() {
+        healthTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect().sink { [weak self] _ in
+            guard let self = self else { return }
+            let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
+            self.systemHealth = snapshot
+
+            // Dynamic throttling: If on battery and in Fast profile, auto-adjust to Balanced
+            if snapshot.isOnBattery && self.selectedProfileType == .fast {
+                self.appendLog("[SYSTEM] Detected battery operation; auto-adjusting to Balanced profile to conserve power.")
+                self.applyProfile(.balanced)
+            }
+        }
+        // Initial health check
+        self.systemHealth = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
+    }
+
     public func appendLog(_ log: String) {
-        logs.append("[\(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium))] \(log)")
-        if logs.count > 500 {
-            logs.removeFirst(logs.count - 500)
+        let timeString = timeFormatter.string(from: Date())
+        logs.append("[\(timeString)] \(log)")
+        if logs.count > 300 {
+            logs.removeFirst(logs.count - 300)
         }
     }
 
@@ -67,9 +100,16 @@ public final class AppState: ObservableObject {
 
         Task {
             do {
-                try nodeManager.start()
-                startupStatus = "Awaiting loopback RPC connection..."
-                try await nodeManager.waitForRPCReadiness(timeoutSeconds: 25)
+                // Check if background daemon is already responding
+                let isAlreadyRunning = (try? await nodeManager.rpcClient.getBlockchainInfo()) != nil
+                if isAlreadyRunning {
+                    nodeManager.adoptRunningDaemon()
+                    appendLog("[BOOTSTRAP] Connected to active bitcoind daemon.")
+                } else {
+                    try nodeManager.start()
+                    startupStatus = "Awaiting loopback RPC connection..."
+                    try await nodeManager.waitForRPCReadiness(timeoutSeconds: 60)
+                }
 
                 startupStatus = "Loading encrypted descriptor wallet..."
                 let walletName = try await walletManager.ensureDefaultWalletLoaded()
@@ -83,9 +123,13 @@ public final class AppState: ObservableObject {
 
                 startupStatus = "Refreshing balances..."
                 self.walletSnapshot = try? await walletManager.refreshWalletInfo()
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
 
                 if let binfo = try? await nodeManager.rpcClient.getBlockchainInfo() {
                     self.blockchainInfo = binfo
+                }
+                if let netInfo = try? await nodeManager.rpcClient.getNetworkInfo() {
+                    self.networkInfo = netInfo
                 }
 
                 startupStatus = "Ready"
@@ -115,8 +159,10 @@ public final class AppState: ObservableObject {
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient)
         self.receiveAddress = ""
         self.walletSnapshot = nil
+        self.transactions = []
         self.blockchainInfo = nil
         self.hashrateReport = nil
+        self.networkInfo = nil
         appendLog("[CONFIG] Switched network to \(network.rawValue).")
 
         if nodeState != .stopped {
@@ -127,20 +173,38 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func generateRegtestBlock() {
+    public func generateRegtestBlocks(count: Int = 1) {
         guard selectedNetwork == .regtest else { return }
         Task {
             do {
                 let targetAddr = receiveAddress.isEmpty ? try await walletManager.generateReceiveAddress() : receiveAddress
-                let hashes = try await walletManager.generateRegtestBlocks(count: 1, address: targetAddr)
-                appendLog("[MINING] Generated regtest block: \(hashes.first ?? "")")
+                let hashes = try await walletManager.generateRegtestBlocks(count: count, address: targetAddr)
+                appendLog("[MINING] Generated \(hashes.count) regtest block(s). Tip: \(hashes.last ?? "")")
                 self.blockchainInfo = try? await nodeManager.rpcClient.getBlockchainInfo()
                 self.walletSnapshot = try? await walletManager.refreshWalletInfo()
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
             } catch {
                 alertMessage = "Block generation failed: \(error.localizedDescription)"
                 showAlert = true
             }
         }
+    }
+
+    public func sendTransaction(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
+        let txid = try await walletManager.send(to: destinationAddress, amount: amount, passphrase: passphrase)
+        appendLog("[TRANSACTION] Broadcasted \(amount) BTCB2 to \(destinationAddress): \(txid)")
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        return txid
+    }
+
+    public func restoreWallet(name: String, backupFile: URL) async throws -> String {
+        let restoredName = try await walletManager.restoreWallet(name: name, backupFile: backupFile)
+        appendLog("[WALLET] Successfully restored wallet '\(restoredName)' from \(backupFile.lastPathComponent)")
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
+        self.receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        return restoredName
     }
 
     public func applyProfile(_ profileType: SyncProfileType) {
@@ -175,6 +239,7 @@ public final class AppState: ObservableObject {
             do {
                 let snap = try await walletManager.refreshWalletInfo()
                 self.walletSnapshot = snap
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
             } catch {
                 // Wallet may not be loaded yet
             }

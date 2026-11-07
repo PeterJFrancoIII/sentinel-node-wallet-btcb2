@@ -25,7 +25,7 @@ public struct ContentView: View {
     public var body: some View {
         VStack(spacing: 0) {
             // Top Toolbar Navigation Bar
-            HStack {
+            HStack(spacing: 12) {
                 // View Switcher (Node, Wallet, Network)
                 Picker("View", selection: $selectedTab) {
                     ForEach(AppViewTab.allCases) { tab in
@@ -33,22 +33,50 @@ public struct ContentView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 320)
+                .frame(width: 300)
 
                 Spacer()
 
+                // System Health Pill (MacBook Air / Host)
+                if let health = state.systemHealth {
+                    HStack(spacing: 6) {
+                        Image(systemName: health.isOnBattery ? "battery.75" : "powerplug.fill")
+                            .font(.caption2)
+                            .foregroundColor(health.isOnBattery ? .orange : .green)
+
+                        Text(String(format: "%.0f GB Free", health.freeDiskGB))
+                            .font(.system(size: 11, weight: .medium, design: .monospaced))
+                            .foregroundColor(health.isDiskSpaceLow ? .red : .secondary)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(Capsule().fill(Color(NSColor.controlBackgroundColor)))
+                }
+
+                // Network Selector
+                Picker("Network", selection: Binding(
+                    get: { state.selectedNetwork },
+                    set: { state.switchNetwork($0) }
+                )) {
+                    Text("Mainnet").tag(BTCB2Network.mainnet)
+                    Text("Regtest").tag(BTCB2Network.regtest)
+                    Text("Testnet4").tag(BTCB2Network.testnet4)
+                }
+                .pickerStyle(.menu)
+                .frame(width: 105)
+
                 // Sync Profile Quick Selector
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Image(systemName: "leaf.fill")
                         .foregroundColor(profileColor)
-                        .font(.caption)
+                        .font(.caption2)
                     Picker("Profile", selection: $state.selectedProfileType) {
                         ForEach(SyncProfileType.allCases, id: \.self) { p in
                             Text(p.rawValue).tag(p)
                         }
                     }
                     .pickerStyle(.menu)
-                    .frame(width: 120)
+                    .frame(width: 110)
                     .onChange(of: state.selectedProfileType) { newProfile in
                         state.applyProfile(newProfile)
                     }
@@ -58,7 +86,7 @@ public struct ContentView: View {
                     Image(systemName: "gearshape.fill")
                 }
                 .buttonStyle(.plain)
-                .padding(.leading, 8)
+                .padding(.leading, 4)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)
@@ -78,6 +106,15 @@ public struct ContentView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(
+                Group {
+                    Button("") { selectedTab = .node }.keyboardShortcut("1", modifiers: .command)
+                    Button("") { selectedTab = .wallet }.keyboardShortcut("2", modifiers: .command)
+                    Button("") { selectedTab = .network }.keyboardShortcut("3", modifiers: .command)
+                }
+                .opacity(0)
+                .frame(width: 0, height: 0)
+            )
         }
         .sheet(isPresented: $showAdvancedSheet) {
             AdvancedSheet()

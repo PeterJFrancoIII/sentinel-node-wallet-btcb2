@@ -16,25 +16,49 @@ public struct NodeConfig: Sendable {
     public init(
         network: BTCB2Network = .mainnet,
         rpcPort: Int? = nil,
-        rpcUser: String = "nodepocket_user",
-        rpcPassword: String = UUID().uuidString.replacingOccurrences(of: "-", with: ""),
+        rpcUser: String? = nil,
+        rpcPassword: String? = nil,
         p2pPort: Int? = nil,
         profile: SyncProfile = .preset(for: .quiet),
         dataDirectory: URL? = nil
     ) {
-        self.network = network
-        self.rpcPort = rpcPort ?? network.defaultRPCPort
-        self.rpcUser = rpcUser
-        self.rpcPassword = rpcPassword
-        self.p2pPort = p2pPort ?? network.defaultP2PPort
-        self.profile = profile
-
-        if let dir = dataDirectory {
-            self.dataDirectory = dir
+        let dir: URL
+        if let d = dataDirectory {
+            dir = d
         } else {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            self.dataDirectory = appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
+            dir = appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
         }
+        self.dataDirectory = dir
+
+        // Preserve existing credentials from bitcoin.conf if present to prevent 401 mismatch
+        var user = rpcUser ?? "nodepocket_user"
+        var pass = rpcPassword ?? ""
+
+        if pass.isEmpty {
+            let confURL = dir.appendingPathComponent("bitcoin.conf")
+            if let content = try? String(contentsOf: confURL, encoding: .utf8) {
+                for line in content.components(separatedBy: .newlines) {
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    if trimmed.hasPrefix("rpcuser=") {
+                        user = String(trimmed.dropFirst("rpcuser=".count))
+                    } else if trimmed.hasPrefix("rpcpassword=") {
+                        pass = String(trimmed.dropFirst("rpcpassword=".count))
+                    }
+                }
+            }
+        }
+
+        if pass.isEmpty {
+            pass = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        }
+
+        self.network = network
+        self.rpcPort = rpcPort ?? network.defaultRPCPort
+        self.rpcUser = user
+        self.rpcPassword = pass
+        self.p2pPort = p2pPort ?? network.defaultP2PPort
+        self.profile = profile
     }
 
     /// Renders safe bitcoin.conf contents with strict localhost binding and profile options.

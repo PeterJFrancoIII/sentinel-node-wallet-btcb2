@@ -23,6 +23,8 @@ public struct NetworkInfo: Codable, Sendable {
     public let subversion: String
     public let protocolversion: Int
     public let connections: Int
+    public let connections_in: Int?
+    public let connections_out: Int?
 }
 
 public struct MempoolInfo: Codable, Sendable {
@@ -61,6 +63,56 @@ public struct WalletInfo: Codable, Sendable {
     public let txcount: Int
     public let descriptors: Bool?
     public let unlocked_until: Int?
+}
+
+public struct TransactionRecord: Codable, Identifiable, Sendable {
+    public var id: String { "\(txid)_\(category)_\(vout ?? 0)" }
+    public let address: String?
+    public let category: String // "send", "receive", "generate", "immature"
+    public let amount: Double
+    public let label: String?
+    public let vout: Int?
+    public let confirmations: Int
+    public let blockhash: String?
+    public let blockheight: Int?
+    public let blocktime: Int?
+    public let txid: String
+    public let time: Int
+    public let timereceived: Int?
+
+    public init(
+        address: String?,
+        category: String,
+        amount: Double,
+        label: String? = nil,
+        vout: Int? = nil,
+        confirmations: Int,
+        blockhash: String? = nil,
+        blockheight: Int? = nil,
+        blocktime: Int? = nil,
+        txid: String,
+        time: Int,
+        timereceived: Int? = nil
+    ) {
+        self.address = address
+        self.category = category
+        self.amount = amount
+        self.label = label
+        self.vout = vout
+        self.confirmations = confirmations
+        self.blockhash = blockhash
+        self.blockheight = blockheight
+        self.blocktime = blocktime
+        self.txid = txid
+        self.time = time
+        self.timereceived = timereceived
+    }
+}
+
+public struct SmartFeeResponse: Codable, Sendable {
+    public let feerate: Double?
+    public let blocks: Int?
+    public let errors: [String]?
 }
 
 public struct BlockTemplateResponse: Codable, Sendable {
