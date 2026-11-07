@@ -24,12 +24,14 @@ final class SyncProfileTests: XCTestCase {
     }
 
     func testBitcoinConfRendering() {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("sync_profile_test_\(UUID().uuidString)")
         let config = NodeConfig(
             rpcPort: 8332,
             rpcUser: "test_user",
             rpcPassword: "test_password_123",
             p2pPort: 8333,
-            profile: .preset(for: .quiet)
+            profile: .preset(for: .quiet),
+            dataDirectory: tempDir
         )
 
         let conf = config.renderBitcoinConf()

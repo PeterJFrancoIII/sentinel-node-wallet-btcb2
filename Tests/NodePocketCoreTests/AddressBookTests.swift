@@ -37,7 +37,9 @@ final class AddressBookTests: XCTestCase {
         // 1. Add valid recipient
         let r1 = try book.addRecipient(name: "Cold Storage", address: addr1)
         XCTAssertEqual(r1.name, "Cold Storage")
-        XCTAssertEqual(book.recipients.count, 1)
+        let r2 = try book.addRecipient(name: "Secondary Wallet", address: addr2)
+        XCTAssertEqual(r2.name, "Secondary Wallet")
+        XCTAssertEqual(book.recipients.count, 2)
 
         // 2. Reject duplicate address
         XCTAssertThrowsError(try book.addRecipient(name: "Duplicate", address: addr1))
@@ -47,6 +49,7 @@ final class AddressBookTests: XCTestCase {
 
         // 4. Verify allowlist enforcement
         XCTAssertTrue(book.isAllowed(address: addr1))
+        XCTAssertTrue(book.isAllowed(address: addr2))
         XCTAssertFalse(book.isAllowed(address: unapprovedAddr), "Unapproved address must be rejected when allowlist is ON")
 
         // 5. Disable allowlist -> any valid address allowed
@@ -60,6 +63,7 @@ final class AddressBookTests: XCTestCase {
 
         // 7. Remove recipient
         try book.removeRecipient(id: r1.id)
+        try book.removeRecipient(id: r2.id)
         XCTAssertEqual(book.recipients.count, 0)
         XCTAssertFalse(book.isAllowed(address: addr1))
     }

@@ -19,6 +19,7 @@ public final class NodeManager: @unchecked Sendable {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private let stateLock = NSLock()
+    @MainActor private var settingsInFlight = false
     private var monitorTask: Task<Void, Never>?
 
     public var onStateChange: (@Sendable (NodeState) -> Void)?
@@ -65,9 +66,9 @@ public final class NodeManager: @unchecked Sendable {
         try config.writeToDisk()
 
         guard let executableURL = binaryURL ?? findBitcoindBinary() else {
-            onLogMessage?("[INFO] bitcoind binary not found on local PATH. Ready for standalone integration or mock RPC.")
-            updateState(.stopped)
-            return
+            let message = "Verified app-bundled Knots bitcoind is unavailable. Refusing system-wide fallback."
+            updateState(.error(message))
+            throw RPCClientError.serializationError(message)
         }
 
         let proc = Process()
@@ -139,58 +140,137 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
+    /// Graceful shutdown is mandatory for a node writing chainstate.
+    /// Never SIGKILL the owned bitcoind on an ordinary stop or upgrade.
     public func stop() async {
         updateState(.stopping)
         monitorTask?.cancel()
         monitorTask = nil
 
-        // Attempt RPC stop first
         do {
             _ = try await rpcClient.stopNode()
-            onLogMessage?("[NODE] Sent RPC stop signal to bitcoind.")
+            onLogMessage?("[NODE] Requested graceful Knots shutdown; waiting for clean exit.")
         } catch {
-            onLogMessage?("[NODE] RPC stop call returned: \(error.localizedDescription); proceeding with process termination.")
+            // If RPC is unavailable, do not assume that force terminating a process is safe.
+            if let owned = process, !owned.isRunning {
+                process = nil
+                updateState(.stopped)
+                return
+            }
+            updateState(.error("Cannot confirm graceful node shutdown: \(error.localizedDescription)"))
+            return
         }
 
-        if let proc = process, proc.isRunning {
-            proc.terminate()
-            for _ in 0..<10 {
-                if !proc.isRunning { break }
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline {
+            if let owned = process {
+                if !owned.isRunning { break }
+            } else {
+                // Adopted daemons do not have a Process handle; wait until RPC closes.
+                if (try? await rpcClient.getBlockchainInfo()) == nil { break }
             }
-            if proc.isRunning {
-                kill(proc.processIdentifier, SIGKILL)
-            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
-        self.process = nil
-        self.stdoutPipe = nil
-        self.stderrPipe = nil
+        if let owned = process, owned.isRunning {
+            updateState(.error("Knots is still shutting down. No force-kill was issued; inspect its logs before retrying."))
+            return
+        }
+        if process == nil, (try? await rpcClient.getBlockchainInfo()) != nil {
+            updateState(.error("Adopted Knots daemon is still responding; shutdown not yet confirmed."))
+            return
+        }
+
+        process = nil
+        stdoutPipe = nil
+        stderrPipe = nil
         updateState(.stopped)
     }
 
-    public func switchProfile(_ newProfile: SyncProfile) async throws {
-        self.config.profile = newProfile
-        try config.writeToDisk()
-        onLogMessage?("[CONFIG] Switched sync profile to \(newProfile.type.rawValue). Configuration written to disk.")
+    /// Apply the selected profile and storage atomically: one graceful restart,
+    /// one config write, no concurrent profile/storage racing or swallowed errors.
+    @MainActor public func applyConfiguration(
+        profile newProfile: SyncProfile,
+        storageMode newMode: StorageMode
+    ) async throws -> String {
+        guard !settingsInFlight else {
+            throw RPCClientError.serializationError("A node configuration change is already in progress.")
+        }
+        settingsInFlight = true
+        defer { settingsInFlight = false }
 
-        if case .running = state {
-            onLogMessage?("[CONFIG] Restarting node daemon to apply updated profile parameters...")
+        switch newMode {
+        case .compact(let mb):
+            guard mb >= StorageMode.minimumPruneMB else {
+                throw StorageValidationError.belowMinimumPruneSize(mb)
+            }
+        case .archival:
+            throw RPCClientError.serializationError(
+                "A pruned node cannot become archival by changing prune=0. " +
+                "A verified full-history re-download and wallet-safe migration are required."
+            )
+        }
+        guard (1...8).contains(newProfile.parThreads),
+              (128...4096).contains(newProfile.dbCacheMB),
+              (1...64).contains(newProfile.maxConnections) else {
+            throw RPCClientError.serializationError("Invalid resource profile limits.")
+        }
+
+        if config.profile == newProfile && config.storageMode == newMode {
+            return "Settings are already configured."
+        }
+        let previous = config
+        let wasRunning: Bool
+        switch state {
+        case .running:
+            wasRunning = true
+        case .stopped, .error:
+            wasRunning = false
+        case .starting, .stopping:
+            throw RPCClientError.serializationError("Wait for the node to finish starting or stopping.")
+        }
+
+        if wasRunning {
+            guard process != nil else {
+                throw RPCClientError.serializationError(
+                    "Node is running but its process was not started by this app session. " +
+                    "The app will not stop an unverified adopted daemon to apply settings."
+                )
+            }
             await stop()
-            try start()
+            guard state == .stopped else {
+                throw RPCClientError.serializationError("Knots did not finish its graceful shutdown.")
+            }
+        }
+
+        config.profile = newProfile
+        config.storageMode = newMode
+        do {
+            try config.writeToDisk()
+            if wasRunning {
+                try start()
+                try await waitForRPCReadiness(timeoutSeconds: 90)
+            }
+            let status = wasRunning ? "Applied after clean restart and verified RPC connectivity." :
+                "Saved. Settings will take effect on the next node startup."
+            onLogMessage?("[CONFIG] \(newProfile.type.rawValue) par=\(newProfile.parThreads) " +
+                          "dbcache=\(newProfile.dbCacheMB) maxconnections=\(newProfile.maxConnections). " + status)
+            return status
+        } catch {
+            // Restore last known configuration on any failed change. Never erase wallet/chain.
+            config = previous
+            try? config.writeToDisk()
+            if wasRunning, case .stopped = state { try? start() }
+            throw error
         }
     }
 
-    public func switchStorageMode(_ newStorageMode: StorageMode) async throws {
-        self.config.storageMode = newStorageMode
-        try config.writeToDisk()
-        onLogMessage?("[STORAGE] Switched storage mode to \(newStorageMode.isPruned ? "Compact Pruned (\(newStorageMode.pruneMB) MiB)" : "Full History / Archival").")
+    @MainActor public func switchProfile(_ newProfile: SyncProfile) async throws {
+        _ = try await applyConfiguration(profile: newProfile, storageMode: config.storageMode)
+    }
 
-        if case .running = state {
-            onLogMessage?("[STORAGE] Restarting node daemon to apply updated storage mode...")
-            await stop()
-            try start()
-        }
+    @MainActor public func switchStorageMode(_ newMode: StorageMode) async throws {
+        _ = try await applyConfiguration(profile: config.profile, storageMode: newMode)
     }
 
     private func startMonitoring() {
@@ -245,26 +325,11 @@ public final class NodeManager: @unchecked Sendable {
         throw RPCClientError.networkError("Timed out waiting for bitcoind RPC server to respond after \(Int(timeoutSeconds))s.")
     }
 
+    /// Only use the app-bundled, release-manifest-verified Knots daemon.
+    /// Never silently substitute arbitrary global/homebrew bitcoind or another chain.
     public func findBitcoindBinary() -> URL? {
-        var candidates: [String] = []
-
-        candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind").path)
-
-        if let execURL = Bundle.main.executableURL {
-            candidates.append(execURL.deletingLastPathComponent().appendingPathComponent("bitcoind").path)
-        }
-
-        candidates.append("/Users/computer/Developer/NodePocketBTCB2/.cache/bitcoin-29.4.3.knots20260508/bin/bitcoind")
-        candidates.append("/opt/homebrew/bin/bitcoind")
-        candidates.append("/usr/local/bin/bitcoind")
-
-        let fm = FileManager.default
-        for path in candidates {
-            if fm.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path)
-            }
-        }
-        return nil
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind")
+        return FileManager.default.isExecutableFile(atPath: bundled.path) ? bundled : nil
     }
 
     private func caseMatchesError(_ state: NodeState) -> Bool {

@@ -19,7 +19,7 @@ public struct CoinbaseMaturityCalculator: Sendable {
     /// Activation height of the 25,920-block (~180-day) maturity epoch
     public static let deepEpochStartHeight: Int = 979919
     /// Median Time Past (MTP) expiry timestamp: 2027-09-01 00:00:00 UTC (1,820,016,000 Unix seconds)
-    public static let expiryMTPTimestamp: Int64 = 1820016000
+    public static let expiryMTPTimestamp: Int64 = 1819756800
 
     /// Evaluates the consensus epoch for a coinbase reward based on its origin block height and MTP.
     /// Invariant: Once minted, a reward's maturity requirement is immutable and fixed to its creation epoch.

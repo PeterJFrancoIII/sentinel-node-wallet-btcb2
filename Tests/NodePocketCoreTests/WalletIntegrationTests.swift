@@ -3,6 +3,11 @@ import XCTest
 
 final class WalletIntegrationTests: XCTestCase {
     func testKeychainPassphraseLifecycle() throws {
+        // Protected Keychain items require real macOS user presence.
+        // Never silently make authentication tests pass in headless CI.
+        guard ProcessInfo.processInfo.environment["RUN_INTERACTIVE_KEYCHAIN_TESTS"] == "1" else {
+            throw XCTSkip("Opt in on a real Mac with RUN_INTERACTIVE_KEYCHAIN_TESTS=1; manual device-owner approval required.")
+        }
         let testAccount = "ephemeral_test_wallet_\(UUID().uuidString.prefix(8))"
         let testPassphrase = "EphemeralPassphrase123!#$"
 

@@ -32,7 +32,7 @@ REQUIRED_DOCS = [
     "README.md", "AGENTS.md", "GOVERNANCE.md", "SECURITY.md",
     "CONTRIBUTING.md", "NOTICE.md", "docs/ARCHITECTURE.md",
     "TEST_AND_RELEASE_MATRIX.md", "GEMINI_COMPLETION_HANDOFF.md",
-    "docs/WALLET_MANAGER_V7.md"
+    "docs/WALLET_MANAGER_V7.md", "docs/SYNC_AND_KEYCHAIN_FIX.md"
 ]
 
 def check_secrets_and_forbidden():
@@ -95,7 +95,7 @@ def main():
     if missing_docs:
         print(f"WARNING: The following documentation files need to be created/updated: {missing_docs}")
     else:
-        print("✓ All 9 governance and architecture documentation files exist.")
+        print(f"✓ All {len(REQUIRED_DOCS)} governance and architecture documentation files exist.")
 
     print("=== Governance Verification Complete ===")
 

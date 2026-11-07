@@ -58,8 +58,39 @@ public struct NodeConfig: Sendable {
         self.rpcUser = user
         self.rpcPassword = pass
         self.p2pPort = p2pPort
-        self.profile = profile
+        // Use the last effective on-disk settings, not a new Quiet/Balance default
+        // that would silently overwrite the profile selected in a prior session.
+        self.profile = Self.persistedProfile(at: dir.appendingPathComponent("bitcoin.conf"), fallback: profile)
         self.storageMode = storageMode
+    }
+
+    /// Recover the persisted profile selection and operational resource limits.
+    /// This is deliberately restricted to known numeric options; the node does
+    /// not execute arbitrary settings from this parser.
+    private static func persistedProfile(at url: URL, fallback: SyncProfile) -> SyncProfile {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return fallback }
+        var found: [String: Int] = [:]
+        var type = fallback.type
+        for raw in text.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            let prefix = "# Sync Profile Settings ("
+            if line.hasPrefix(prefix), line.hasSuffix(")") {
+                let label = String(line.dropFirst(prefix.count).dropLast())
+                if let parsed = SyncProfileType(rawValue: label) { type = parsed }
+            }
+            for key in ["par", "dbcache", "maxconnections", "maxuploadtarget"] {
+                if line.hasPrefix(key + "="), let value = Int(line.dropFirst(key.count + 1)) {
+                    found[key] = value
+                }
+            }
+        }
+        var output = SyncProfile.preset(for: type)
+        output.parThreads = (1...8).contains(found["par"] ?? -1) ? found["par"]! : fallback.parThreads
+        output.dbCacheMB = (128...4096).contains(found["dbcache"] ?? -1) ? found["dbcache"]! : fallback.dbCacheMB
+        output.maxConnections = (1...64).contains(found["maxconnections"] ?? -1) ? found["maxconnections"]! : fallback.maxConnections
+        output.maxUploadTargetMB = (1...20_000).contains(found["maxuploadtarget"] ?? -1) ? found["maxuploadtarget"]! : fallback.maxUploadTargetMB
+        output.pruneMB = fallback.pruneMB
+        return output
     }
 
     /// Renders safe bitcoin.conf contents with strict localhost binding and profile options.

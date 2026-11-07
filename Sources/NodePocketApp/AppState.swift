@@ -18,6 +18,8 @@ public final class AppState: ObservableObject {
     @Published public var addressBook: AddressBook
     @Published public var systemHealth: SystemHealthSnapshot?
     @Published public var selectedProfileType: SyncProfileType = .quiet
+    @Published public var isApplyingNodeSettings = false
+    @Published public var appliedSettingsStatus: String = "Not yet verified"
     @Published public var storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB)
     @Published public var receiveAddress: String = ""
     @Published public var logs: [String] = []
@@ -27,6 +29,7 @@ public final class AppState: ObservableObject {
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
     private var healthTimer: AnyCancellable?
+    private var gaveBatteryFastWarning = false
     private let timeFormatter: DateFormatter
 
     public init() {
@@ -39,6 +42,7 @@ public final class AppState: ObservableObject {
         self.nodeManager = NodeManager(config: config)
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book)
         self.storageMode = config.storageMode
+        self.selectedProfileType = config.profile.type
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
@@ -83,10 +87,12 @@ public final class AppState: ObservableObject {
             let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
             self.systemHealth = snapshot
 
-            // Dynamic throttling: If on battery and in Fast profile, auto-adjust to Balanced
-            if snapshot.isOnBattery && self.selectedProfileType == .fast {
-                self.appendLog("[SYSTEM] Detected battery operation; auto-adjusting to Balanced profile to conserve power.")
-                self.applyProfile(.balanced)
+            // User-selected sync profiles must not be silently overridden.
+            if snapshot.isOnBattery && self.selectedProfileType == .fast && !self.gaveBatteryFastWarning {
+                self.gaveBatteryFastWarning = true
+                self.appendLog("[POWER] Fast mode on battery may use more energy. Change profile manually if desired.")
+            } else if !snapshot.isOnBattery {
+                self.gaveBatteryFastWarning = false
             }
 
             // Storage safety guard: graceful pause if free space <= 10GB
@@ -170,37 +176,29 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func applyStorageMode(_ newMode: StorageMode) {
-        // Validate storage constraints
-        do {
-            switch newMode {
-            case .compact(let mb):
-                guard mb >= StorageMode.minimumPruneMB else {
-                    throw StorageValidationError.belowMinimumPruneSize(mb)
-                }
-            case .archival(let externalURL):
-                // Disk gate: check available space on target volume
-                let freeGB = (systemHealth?.freeDiskGB ?? 50.0)
-                // If on internal drive, refuse archival
-                let isInternal = externalURL.path.hasPrefix("/Users") || externalURL.path.hasPrefix("/System")
-                if isInternal && freeGB < 800.0 {
-                    throw StorageValidationError.internalDriveArchivalProhibited(freeGB: freeGB)
-                }
-            }
+    /// Single state-owned path for node resource and pruning settings.
+    /// UI updates only after configuration succeeds. Errors are never hidden.
+    public func applyNodeSettings(profile: SyncProfile, storageMode mode: StorageMode) async throws {
+        guard !isApplyingNodeSettings else {
+            throw RPCClientError.serializationError("Another settings change is already in progress.")
+        }
+        isApplyingNodeSettings = true
+        defer { isApplyingNodeSettings = false }
+        let status = try await nodeManager.applyConfiguration(profile: profile, storageMode: mode)
+        selectedProfileType = profile.type
+        storageMode = mode
+        appliedSettingsStatus = status
+        appendLog("[CONFIG] \(profile.type.rawValue): \(status)")
+    }
 
-            self.storageMode = newMode
-            Task {
-                do {
-                    try await nodeManager.switchStorageMode(newMode)
-                    appendLog("[CONFIG] Successfully applied storage mode: \(newMode.isPruned ? "Compact (\(newMode.pruneMB) MiB)" : "Full History / Archival").")
-                } catch {
-                    alertMessage = "Failed to switch storage mode: \(error.localizedDescription)"
-                    showAlert = true
-                }
+    public func applyStorageMode(_ newMode: StorageMode) {
+        Task {
+            do {
+                try await applyNodeSettings(profile: nodeManager.config.profile, storageMode: newMode)
+            } catch {
+                alertMessage = "Storage mode not changed: \(error.localizedDescription)"
+                showAlert = true
             }
-        } catch {
-            alertMessage = error.localizedDescription
-            showAlert = true
         }
     }
 
@@ -272,16 +270,13 @@ public final class AppState: ObservableObject {
     }
 
     public func applyProfile(_ profileType: SyncProfileType) {
-        selectedProfileType = profileType
         var profile = SyncProfile.preset(for: profileType)
-        // Preserve user's configured prune setting across profiles
         profile.pruneMB = storageMode.pruneMB
         Task {
             do {
-                try await nodeManager.switchProfile(profile)
-                appendLog("[CONFIG] Successfully applied \(profileType.rawValue) sync profile.")
+                try await applyNodeSettings(profile: profile, storageMode: storageMode)
             } catch {
-                alertMessage = "Failed to switch profile: \(error.localizedDescription)"
+                alertMessage = "Sync profile not changed: \(error.localizedDescription)"
                 showAlert = true
             }
         }
