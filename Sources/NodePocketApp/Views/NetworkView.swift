@@ -106,6 +106,38 @@ public struct NetworkView: View {
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
+                // Peer Topology & Capacity Details
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Image(systemName: "network")
+                            .foregroundColor(.purple)
+                        Text("P2P Network Topology & Peer Capacity")
+                            .font(.headline)
+                        Spacer()
+                        let conns = state.networkInfo?.connections ?? 0
+                        let maxConns = state.nodeManager.config.profile.maxConnections
+                        Text("\(conns) / \(maxConns) Max Peers")
+                            .font(.caption)
+                            .bold()
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.purple.opacity(0.15)))
+                    }
+
+                    HStack(spacing: 24) {
+                        statPill(label: "Total Connected", value: "\(state.networkInfo?.connections ?? 0)")
+                        statPill(label: "Outbound Peers", value: "\(state.networkInfo?.connections_out ?? 0)")
+                        statPill(label: "Inbound Peers", value: "\(state.networkInfo?.connections_in ?? 0)")
+                        statPill(label: "Max Configured Cap", value: "\(state.nodeManager.config.profile.maxConnections)")
+                    }
+
+                    Text("Note: -maxconnections sets an upper limit on peer connections. Without inbound port forwarding / NAT traversal, Bitcoin Knots establishes ~10–11 outbound connections (8 full-relay + 2 block-relay-only + feelers) by design. Inbound connections require explicit local firewall & router port forwarding.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+
                 // BIP-110 Mathematical & Consensus Details
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {

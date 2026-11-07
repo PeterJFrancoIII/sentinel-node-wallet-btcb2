@@ -94,9 +94,10 @@ public final class KeychainHelper: Sendable {
         ]
 
         var status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecParam {
+        if status == errSecParam || status == errSecMissingEntitlement || status == -34018 {
             // On macOS without data-protection keychain entitlements (e.g. local ad-hoc binary builds),
-            // SecAccessControl fails with errSecParam (-50). Fall back cleanly to kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+            // SecAccessControl fails with errSecParam (-50) or errSecMissingEntitlement (-34018).
+            // Fall back cleanly to kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
             let fallbackQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,
@@ -125,7 +126,16 @@ public final class KeychainHelper: Sendable {
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
 
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        var status = SecItemCopyMatching(query as CFDictionary, nil)
+        if status == errSecParam || status == errSecMissingEntitlement || status == -34018 {
+            let fallbackQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceName,
+                kSecAttrAccount as String: account,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            status = SecItemCopyMatching(fallbackQuery as CFDictionary, nil)
+        }
         return status == errSecSuccess || status == errSecInteractionNotAllowed || status == errSecAuthFailed
     }
 
@@ -144,7 +154,7 @@ public final class KeychainHelper: Sendable {
 
         var dataTypeRef: AnyObject?
         var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
-        if status == errSecParam {
+        if status == errSecParam || status == errSecMissingEntitlement || status == -34018 {
             let fallbackQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,

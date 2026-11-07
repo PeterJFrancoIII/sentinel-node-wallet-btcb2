@@ -270,6 +270,14 @@ public final class AppState: ObservableObject {
         appendLog("[WALLET] Existing wallet '\(name)' loaded.")
     }
 
+    /// Enumerates loaded and on-disk wallets discovered in the node datadir.
+    public func fetchAvailableWallets() async -> (loaded: [String], onDisk: [String]) {
+        let loaded = (try? await walletManager.rpcClient.listWallets()) ?? []
+        let dir = (try? await walletManager.rpcClient.listWalletDir())
+        let onDisk = dir?.wallets.map { $0.name } ?? []
+        return (loaded: loaded, onDisk: onDisk)
+    }
+
     public func stopNode() {
         Task {
             await nodeManager.stop()

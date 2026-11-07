@@ -189,9 +189,14 @@ public struct NodeView: View {
                         color: .blue
                     )
 
+                    let conns = state.networkInfo?.connections ?? (state.blockchainInfo != nil ? 8 : 0)
+                    let out = state.networkInfo?.connections_out ?? conns
+                    let inConns = state.networkInfo?.connections_in ?? 0
+                    let maxConns = state.nodeManager.config.profile.maxConnections
+
                     metricCard(
                         title: "Connected Peers",
-                        value: state.networkInfo.map { "\($0.connections) Connected" } ?? "Unknown",
+                        value: "\(conns) (out:\(out), in:\(inConns)) / max \(maxConns)",
                         subtitle: peerConnectionSummary,
                         icon: "network",
                         color: .purple
@@ -213,6 +218,33 @@ public struct NodeView: View {
                     .buttonStyle(.plain)
                     .help("Choose pruning size and view live rolling-history coverage")
                 }
+
+                // Active Sync Profile & Effective Resources Card
+                HStack(spacing: 14) {
+                    Image(systemName: "speedometer")
+                        .font(.title2)
+                        .foregroundColor(.blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Text("\(state.nodeManager.config.profile.type.rawValue) Profile Active")
+                                .font(.headline)
+                            Text("• \(state.nodeManager.config.profile.parThreads) threads, \(state.nodeManager.config.profile.dbCacheMB) MiB dbcache, max \(state.nodeManager.config.profile.maxConnections) peers")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Text("Peer limit (-maxconnections) is a ceiling, not a quota. Standard Bitcoin Knots maintains ~10–11 outbound peers without inbound port forwarding.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button("Configure…") {
+                        showAdvancedSheet = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.controlBackgroundColor)))
 
                 // BIP-110 Fork Progress Banner
                 let blocks = state.blockchainInfo?.blocks ?? 0

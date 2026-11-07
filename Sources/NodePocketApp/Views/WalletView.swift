@@ -30,10 +30,15 @@ public struct WalletView: View {
     @State private var newRecipientAddress = ""
     @State private var addressBookError: String?
 
-    // Restore Wallet Fields
-    @State private var showRestoreModal = false
+    // Open / Restore Wallet Fields
+    @State private var showOpenRestoreModal = false
+    @State private var availableOnDiskWallets: [String] = []
+    @State private var availableLoadedWallets: [String] = []
+    @State private var selectedWalletToOpen: String = ""
     @State private var restoreFileURL: URL?
     @State private var restoreWalletName = "restored_wallet"
+    @State private var isPerformingWalletAction = false
+    @State private var hasConfirmedOfflinePassphrase = false
 
     // Transaction Filter
     @State private var selectedTxFilter: String = "all"
@@ -64,6 +69,33 @@ public struct WalletView: View {
                     }
                     Spacer()
                     chainIdentityBadge
+                }
+
+                if state.walletSnapshot == nil {
+                    HStack(spacing: 12) {
+                        Image(systemName: "wallet.pass")
+                            .font(.system(size: 24))
+                            .foregroundColor(.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("No Encrypted Wallet Loaded")
+                                .font(.headline)
+                            Text("Create a new encrypted descriptor wallet or open an existing wallet database to begin using BTCB2.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Button("Create New Wallet") {
+                            showCreateModal = true
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Open / Restore") {
+                            showOpenRestoreModal = true
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.08)))
                 }
 
                 // Balance Card
@@ -420,17 +452,9 @@ public struct WalletView: View {
                     .buttonStyle(.bordered)
 
                     Button(action: {
-                        let openPanel = NSOpenPanel()
-                        openPanel.title = "Select Wallet Backup File"
-                        openPanel.canChooseFiles = true
-                        openPanel.canChooseDirectories = false
-                        openPanel.allowsMultipleSelection = false
-                        if openPanel.runModal() == .OK, let fileURL = openPanel.url {
-                            self.restoreFileURL = fileURL
-                            self.showRestoreModal = true
-                        }
+                        showOpenRestoreModal = true
                     }) {
-                        Label("Restore Wallet", systemImage: "arrow.up.doc.fill")
+                        Label("Open / Restore", systemImage: "folder.badge.gearshape")
                     }
                     .buttonStyle(.bordered)
 
@@ -461,8 +485,8 @@ public struct WalletView: View {
         .sheet(isPresented: $showCreateModal) {
             createWalletSheet
         }
-        .sheet(isPresented: $showRestoreModal) {
-            restoreWalletSheet
+        .sheet(isPresented: $showOpenRestoreModal) {
+            openOrRestoreWalletSheet
         }
     }
 
@@ -1011,6 +1035,12 @@ public struct WalletView: View {
             Toggle("Save in macOS Keychain (requires Mac user authentication)", isOn: $storeInKeychain)
                 .font(.caption)
 
+            if !storeInKeychain {
+                Toggle("I have securely saved my passphrase and understand the node cannot unlock this wallet without it", isOn: $hasConfirmedOfflinePassphrase)
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+
             Text("This saves the wallet name and passphrase to app-protected macOS Keychain, NOT necessarily to Apple's Passwords app. ThisDeviceOnly protection does not sync to a new Mac. Keep a separate encrypted wallet backup.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
@@ -1026,25 +1056,14 @@ public struct WalletView: View {
                     passphraseInput = ""
                     passphraseConfirmInput = ""
                     showWalletPassphrase = false
+                    hasConfirmedOfflinePassphrase = false
                     showCreateModal = false
                 }
                 .buttonStyle(.bordered)
 
-                Button("Load Existing") {
-                    let name = walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
-                    Task { @MainActor in
-                        do {
-                            try await state.loadExistingWallet(name: name)
-                            showCreateModal = false
-                            passphraseInput = ""
-                            passphraseConfirmInput = ""
-                            state.alertMessage = "Existing encrypted wallet loaded. No new wallet was created."
-                            state.showAlert = true
-                        } catch {
-                            state.alertMessage = "Cannot load existing wallet: \(error.localizedDescription)"
-                            state.showAlert = true
-                        }
-                    }
+                Button("Open / Restore Existing Wallet…") {
+                    showCreateModal = false
+                    showOpenRestoreModal = true
                 }
                 .disabled(isCreatingWallet || !isNodeReadyForWallet)
                 .buttonStyle(.bordered)
@@ -1075,10 +1094,11 @@ public struct WalletView: View {
                             passphraseInput = ""
                             passphraseConfirmInput = ""
                             showWalletPassphrase = false
+                            hasConfirmedOfflinePassphrase = false
                             state.alertMessage = "Encrypted descriptor wallet created and verified. Back up the wallet database before receiving substantial funds. Its passphrase alone cannot restore the wallet."
                             state.showAlert = true
                         } catch {
-                            state.alertMessage = "Wallet creation was not confirmed: \(error.localizedDescription)"
+                            state.alertMessage = "Wallet creation was not confirmed: \(error.localizedDescription)\n\nIf Keychain storage is unavailable on this build, you may uncheck 'Save in macOS Keychain' to proceed without Keychain storage after securely recording your passphrase."
                             state.showAlert = true
                         }
                     }
@@ -1087,7 +1107,8 @@ public struct WalletView: View {
                 .tint(.green)
                 .disabled(
                     isCreatingWallet || !isNodeReadyForWallet ||
-                    passphraseInput.isEmpty || passphraseInput != passphraseConfirmInput
+                    passphraseInput.isEmpty || passphraseInput != passphraseConfirmInput ||
+                    (!storeInKeychain && !hasConfirmedOfflinePassphrase)
                 )
             }
             if isCreatingWallet {
@@ -1096,55 +1117,192 @@ public struct WalletView: View {
             }
         }
         .padding(24)
-        .frame(width: 520, height: 470)
+        .frame(width: 520, height: 490)
     }
 
-    private var restoreWalletSheet: some View {
-        VStack(spacing: 16) {
-            Text("Restore Wallet from Backup")
-                .font(.headline)
-
-            Text("Select a previously exported wallet database (.dat). The wallet will be loaded and rescanned.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-
-            if let url = restoreFileURL {
-                Text("Selected: \(url.lastPathComponent)")
-                    .font(.caption)
-                    .bold()
+    private var openOrRestoreWalletSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Open or Restore Wallet")
+                        .font(.title2)
+                        .bold()
+                    Text("Load an existing wallet from this Mac or restore from an encrypted backup file.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Done") {
+                    showOpenRestoreModal = false
+                }
             }
 
-            TextField("Restored Wallet Name", text: $restoreWalletName)
-                .textFieldStyle(.roundedBorder)
+            Divider()
 
-            HStack {
-                Button("Cancel") { showRestoreModal = false }
-                    .buttonStyle(.bordered)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    // Option 1: Open Local Wallet on this Mac
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Image(systemName: "folder.fill")
+                                .foregroundColor(.blue)
+                            Text("Open Existing Wallet on this Mac")
+                                .font(.headline)
+                        }
 
-                Button("Restore Wallet") {
-                    if let fileURL = restoreFileURL {
-                        Task {
-                            do {
-                                let name = try await state.restoreWallet(name: restoreWalletName, backupFile: fileURL)
-                                await MainActor.run {
-                                    showRestoreModal = false
-                                    state.appendLog("[WALLET] Successfully restored '\(name)'")
+                        let allWallets = Array(Set(availableOnDiskWallets + availableLoadedWallets)).sorted()
+                        if allWallets.isEmpty {
+                            Text("No wallet directories discovered in the node datadir.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        } else {
+                            Picker("Discovered Wallets:", selection: $selectedWalletToOpen) {
+                                ForEach(allWallets, id: \.self) { w in
+                                    let isLoaded = availableLoadedWallets.contains(w)
+                                    Text("\(w) \(isLoaded ? "(Currently Loaded)" : "(On Disk)")").tag(w)
                                 }
-                            } catch {
-                                await MainActor.run {
-                                    state.alertMessage = "Restore failed: \(error.localizedDescription)"
-                                    state.showAlert = true
+                            }
+                            .pickerStyle(.menu)
+
+                            HStack {
+                                Spacer()
+                                Button("Open Selected Wallet") {
+                                    guard !selectedWalletToOpen.isEmpty else { return }
+                                    isPerformingWalletAction = true
+                                    Task { @MainActor in
+                                        defer { isPerformingWalletAction = false }
+                                        do {
+                                            try await state.loadExistingWallet(name: selectedWalletToOpen)
+                                            showOpenRestoreModal = false
+                                            state.alertMessage = "Wallet '\(selectedWalletToOpen)' loaded successfully."
+                                            state.showAlert = true
+                                        } catch {
+                                            state.alertMessage = "Failed to load wallet: \(error.localizedDescription)"
+                                            state.showAlert = true
+                                        }
+                                    }
                                 }
+                                .disabled(selectedWalletToOpen.isEmpty || isPerformingWalletAction || !isNodeReadyForWallet)
+                                .buttonStyle(.borderedProminent)
                             }
                         }
                     }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+
+                    // Option 2: Restore from Backup File (.dat)
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Image(systemName: "arrow.counterclockwise.circle.fill")
+                                .foregroundColor(.green)
+                            Text("Restore from Backup File (.dat)")
+                                .font(.headline)
+                        }
+
+                        Text("Select a previously exported encrypted Knots wallet database (.dat). The wallet will be safely staged and verified.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            Button("Choose Backup File…") {
+                                let panel = NSOpenPanel()
+                                panel.allowsMultipleSelection = false
+                                panel.canChooseDirectories = false
+                                panel.canChooseFiles = true
+                                panel.allowedContentTypes = [.data]
+                                if panel.runModal() == .OK, let url = panel.url {
+                                    restoreFileURL = url
+                                    let base = url.deletingPathExtension().lastPathComponent
+                                    if WalletManager.isValidWalletName(base) {
+                                        restoreWalletName = base
+                                    }
+                                }
+                            }
+                            .buttonStyle(.bordered)
+
+                            if let url = restoreFileURL {
+                                Text(url.lastPathComponent)
+                                    .font(.caption)
+                                    .bold()
+                            } else {
+                                Text("No file chosen")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        TextField("Target Wallet Name", text: $restoreWalletName)
+                            .textFieldStyle(.roundedBorder)
+
+                        HStack {
+                            Spacer()
+                            Button("Restore Wallet") {
+                                guard let fileURL = restoreFileURL else { return }
+                                let targetName = restoreWalletName.trimmingCharacters(in: .whitespacesAndNewlines)
+                                guard WalletManager.isValidWalletName(targetName) else {
+                                    state.alertMessage = "Enter a valid alphanumeric wallet name."
+                                    state.showAlert = true
+                                    return
+                                }
+                                isPerformingWalletAction = true
+                                Task { @MainActor in
+                                    defer { isPerformingWalletAction = false }
+                                    do {
+                                        let name = try await state.restoreWallet(name: targetName, backupFile: fileURL)
+                                        showOpenRestoreModal = false
+                                        state.alertMessage = "Successfully restored wallet '\(name)' from \(fileURL.lastPathComponent)."
+                                        state.showAlert = true
+                                    } catch {
+                                        state.alertMessage = "Restore failed: \(error.localizedDescription)"
+                                        state.showAlert = true
+                                    }
+                                }
+                            }
+                            .disabled(restoreFileURL == nil || restoreWalletName.isEmpty || isPerformingWalletAction || !isNodeReadyForWallet)
+                            .buttonStyle(.borderedProminent)
+                            .tint(.green)
+                        }
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+
+                    // Option 3: Explanation regarding QR Codes and Recovery
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundColor(.orange)
+                            Text("Why Address QR Codes Cannot Restore a Wallet")
+                                .font(.headline)
+                        }
+                        Text("A QR code of a receiving address or transaction only contains a public address or payment URI. It does NOT contain private keys or descriptors. To restore spendable funds, an encrypted wallet database backup (.dat) is required. Never paste private keys into untrusted external tools.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.blue)
+            }
+
+            if isPerformingWalletAction {
+                ProgressView("Processing wallet operation…")
+                    .controlSize(.small)
             }
         }
         .padding(24)
-        .frame(width: 440, height: 260)
+        .frame(width: 540, height: 520)
+        .task {
+            await refreshDiscoveredWallets()
+        }
+    }
+
+    private func refreshDiscoveredWallets() async {
+        let (loaded, onDisk) = await state.fetchAvailableWallets()
+        await MainActor.run {
+            self.availableLoadedWallets = loaded
+            self.availableOnDiskWallets = onDisk
+            if selectedWalletToOpen.isEmpty {
+                selectedWalletToOpen = loaded.first ?? onDisk.first ?? ""
+            }
+        }
     }
 }

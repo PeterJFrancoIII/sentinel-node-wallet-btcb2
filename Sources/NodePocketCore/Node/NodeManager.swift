@@ -16,6 +16,7 @@ public final class NodeManager: @unchecked Sendable {
     public let etaEngine: AdaptiveETAEngine
 
     private var process: Process?
+    public private(set) var adoptedPid: Int32?
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private let stateLock = NSLock()
@@ -38,8 +39,33 @@ public final class NodeManager: @unchecked Sendable {
         self.etaEngine = AdaptiveETAEngine()
     }
 
+    public func readPidFile() -> Int32? {
+        let pidFile = config.dataDirectory.appendingPathComponent("bitcoind.pid")
+        guard let content = try? String(contentsOf: pidFile, encoding: .utf8),
+              let pid = Int32(content.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
+    public func verifyAdoptedDaemon() async -> Bool {
+        guard FileManager.default.fileExists(atPath: config.dataDirectory.path) else { return false }
+        let cookieFile = config.dataDirectory.appendingPathComponent(".cookie")
+        guard FileManager.default.fileExists(atPath: cookieFile.path) else { return false }
+        guard let binfo = try? await rpcClient.getBlockchainInfo(), binfo.chain == "main" else {
+            return false
+        }
+        if let pid = readPidFile() {
+            guard kill(pid, 0) == 0 else { return false }
+        }
+        return true
+    }
+
     public func adoptRunningDaemon(pid: Int32 = 0) {
-        updateState(.running(pid: pid))
+        let resolvedPid = pid > 0 ? pid : (readPidFile() ?? 0)
+        self.adoptedPid = resolvedPid > 0 ? resolvedPid : nil
+        updateState(.running(pid: resolvedPid))
         startMonitoring()
     }
 
@@ -162,12 +188,20 @@ public final class NodeManager: @unchecked Sendable {
         }
 
         let deadline = Date().addingTimeInterval(120)
+        let pidToCheck = adoptedPid ?? readPidFile()
         while Date() < deadline {
             if let owned = process {
                 if !owned.isRunning { break }
             } else {
-                // Adopted daemons do not have a Process handle; wait until RPC closes.
-                if (try? await rpcClient.getBlockchainInfo()) == nil { break }
+                // Adopted daemons do not have a Process handle; wait until RPC closes and PID exits.
+                let rpcAlive = (try? await rpcClient.getBlockchainInfo()) != nil
+                if !rpcAlive {
+                    if let pid = pidToCheck, pid > 0 {
+                        if kill(pid, 0) != 0 { break }
+                    } else {
+                        break
+                    }
+                }
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
@@ -182,6 +216,7 @@ public final class NodeManager: @unchecked Sendable {
         }
 
         process = nil
+        adoptedPid = nil
         stdoutPipe = nil
         stderrPipe = nil
         updateState(.stopped)
@@ -231,15 +266,24 @@ public final class NodeManager: @unchecked Sendable {
         }
 
         if wasRunning {
-            guard process != nil else {
-                throw RPCClientError.serializationError(
-                    "Node is running but its process was not started by this app session. " +
-                    "The app will not stop an unverified adopted daemon to apply settings."
-                )
-            }
-            await stop()
-            guard state == .stopped else {
-                throw RPCClientError.serializationError("Knots did not finish its graceful shutdown.")
+            if process != nil {
+                await stop()
+                guard state == .stopped else {
+                    throw RPCClientError.serializationError("Knots did not finish its graceful shutdown.")
+                }
+            } else {
+                let isVerified = await verifyAdoptedDaemon()
+                guard isVerified else {
+                    throw RPCClientError.serializationError(
+                        "Cannot safely apply settings: running node daemon is unverified. " +
+                        "Stop the background node manually and relaunch Sentinel Node Wallet."
+                    )
+                }
+                onLogMessage?("[CONFIG] Safely shutting down verified adopted Knots daemon to apply profile...")
+                await stop()
+                guard state == .stopped else {
+                    throw RPCClientError.serializationError("Adopted Knots daemon did not finish its graceful shutdown.")
+                }
             }
         }
 
