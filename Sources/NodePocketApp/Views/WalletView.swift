@@ -61,6 +61,7 @@ public struct WalletView: View {
     @State private var enrollUsername: String = ""
     @State private var enrollPassword: String = ""
     @State private var showEnrollmentPassword: Bool = false
+    @State private var hasStoredRecoveryCodesOffline: Bool = false
     @State private var enrollTotpCode: String = ""
     @State private var isAuthActionInProgress: Bool = false
     @State private var authLocalError: String? = nil
@@ -700,6 +701,11 @@ public struct WalletView: View {
                     .padding(8)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.08)))
 
+                    Toggle("I saved my recovery codes somewhere separate from this Mac", isOn: $hasStoredRecoveryCodesOffline)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .accessibilityIdentifier("user-enroll-recovery-confirmed")
+
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Enter 6-Digit Authenticator Code to Confirm").font(.caption).bold()
                         TextField("000000", text: $enrollTotpCode)
@@ -730,6 +736,10 @@ public struct WalletView: View {
                     defer { isAuthActionInProgress = false }
                     do {
                         try await state.enrollUser(password: enrollPassword, totpCode: enrollTotpCode)
+                        enrollPassword = ""
+                        enrollTotpCode = ""
+                        showEnrollmentPassword = false
+                        hasStoredRecoveryCodesOffline = false
                     } catch {
                         authLocalError = error.localizedDescription
                     }
@@ -742,7 +752,7 @@ public struct WalletView: View {
                 }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(state.generatedEnrollmentData == nil || enrollTotpCode.count != 6 || isAuthActionInProgress)
+            .disabled(state.generatedEnrollmentData == nil || enrollTotpCode.count != 6 || !hasStoredRecoveryCodesOffline || isAuthActionInProgress)
         }
         .padding(20)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.windowBackgroundColor)))
