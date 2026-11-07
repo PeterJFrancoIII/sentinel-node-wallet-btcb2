@@ -38,6 +38,12 @@ The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,64
 
 A hot wallet on a fully compromised Mac cannot promise perfect protection. Enable FileVault, keep macOS updated, protect login credentials and consider an offline/hardware signer for high-value funds.
 
+## Sync modes and generated wallet encryption passphrases (candidate fix)
+
+Quiet / Balanced / Fast change verification threads, database-cache size and peer limits; they do **not** change the selected pruning amount. Settings are saved and, when this app owns the daemon, applied after one graceful restart. Failed application must be visible; an unverified adopted node is never force-stopped. **These changes still require native macOS acceptance tests.**
+
+The Create Encrypted Wallet dialog offers **Generate Strong Passphrase** (256-bit system entropy) and optional **Save in macOS Keychain**, with wallet name and user-presence-protected retrieval. **Use Saved Passphrase** allows owner-authorized entry later. This is an **encryption passphrase, not a recovery seed**, and a separate wallet-file backup is essential. The macOS **Keychain** is not the same as Apple's **Passwords** app: generic native Keychain items are not guaranteed to appear as website logins or receive Passwords autofill. See [sync and Keychain fix tests](docs/SYNC_AND_KEYCHAIN_FIX.md).
+
 ## Installation and development
 
 **Target:** Apple Silicon macOS 13+; existing internal app identifier/data paths may remain under the former development name to protect existing wallet and sync state. Branding changes must never initialize a new wallet or delete old blockchain files.
