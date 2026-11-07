@@ -65,9 +65,9 @@ public final class NodeManager: @unchecked Sendable {
         try config.writeToDisk()
 
         guard let executableURL = binaryURL ?? findBitcoindBinary() else {
-            onLogMessage?("[INFO] bitcoind binary not found on local PATH. Ready for standalone integration or mock RPC.")
-            updateState(.stopped)
-            return
+            let message = "Verified app-bundled Knots bitcoind is unavailable. Refusing system-wide fallback."
+            updateState(.error(message))
+            throw RPCClientError.serializationError(message)
         }
 
         let proc = Process()
@@ -139,33 +139,50 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
+    /// Graceful shutdown is mandatory for a node writing chainstate.
+    /// Never SIGKILL the owned bitcoind on an ordinary stop or upgrade.
     public func stop() async {
         updateState(.stopping)
         monitorTask?.cancel()
         monitorTask = nil
 
-        // Attempt RPC stop first
         do {
             _ = try await rpcClient.stopNode()
-            onLogMessage?("[NODE] Sent RPC stop signal to bitcoind.")
+            onLogMessage?("[NODE] Requested graceful Knots shutdown; waiting for clean exit.")
         } catch {
-            onLogMessage?("[NODE] RPC stop call returned: \(error.localizedDescription); proceeding with process termination.")
+            // If RPC is unavailable, do not assume that force terminating a process is safe.
+            if let owned = process, !owned.isRunning {
+                process = nil
+                updateState(.stopped)
+                return
+            }
+            updateState(.error("Cannot confirm graceful node shutdown: \\(error.localizedDescription)"))
+            return
         }
 
-        if let proc = process, proc.isRunning {
-            proc.terminate()
-            for _ in 0..<10 {
-                if !proc.isRunning { break }
-                try? await Task.sleep(nanoseconds: 500_000_000)
+        let deadline = Date().addingTimeInterval(120)
+        while Date() < deadline {
+            if let owned = process {
+                if !owned.isRunning { break }
+            } else {
+                // Adopted daemons do not have a Process handle; wait until RPC closes.
+                if (try? await rpcClient.getBlockchainInfo()) == nil { break }
             }
-            if proc.isRunning {
-                kill(proc.processIdentifier, SIGKILL)
-            }
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
-        self.process = nil
-        self.stdoutPipe = nil
-        self.stderrPipe = nil
+        if let owned = process, owned.isRunning {
+            updateState(.error("Knots is still shutting down. No force-kill was issued; inspect its logs before retrying."))
+            return
+        }
+        if process == nil, (try? await rpcClient.getBlockchainInfo()) != nil {
+            updateState(.error("Adopted Knots daemon is still responding; shutdown not yet confirmed."))
+            return
+        }
+
+        process = nil
+        stdoutPipe = nil
+        stderrPipe = nil
         updateState(.stopped)
     }
 
@@ -182,13 +199,22 @@ public final class NodeManager: @unchecked Sendable {
     }
 
     public func switchStorageMode(_ newStorageMode: StorageMode) async throws {
+        if case .archival = newStorageMode {
+            // Changing prune=0 on an already pruned data directory is NOT a valid
+            // full-history conversion; it requires staged fresh IBD or -reindex.
+            // Preserve the pruned wallet/chain until backup and rollback are verified.
+            throw RPCClientError.serializationError(
+                "Full History conversion is locked pending verified external storage, wallet backup, complete historical re-download and safe cutover. Compact mode remains available."
+            )
+        }
         self.config.storageMode = newStorageMode
         try config.writeToDisk()
-        onLogMessage?("[STORAGE] Switched storage mode to \(newStorageMode.isPruned ? "Compact Pruned (\(newStorageMode.pruneMB) MiB)" : "Full History / Archival").")
-
+        onLogMessage?("[STORAGE] Requested compact pruning at \\(newStorageMode.pruneMB) MiB.")
         if case .running = state {
-            onLogMessage?("[STORAGE] Restarting node daemon to apply updated storage mode...")
             await stop()
+            guard state == .stopped else {
+                throw RPCClientError.serializationError("Knots did not shut down cleanly; pruning restart aborted.")
+            }
             try start()
         }
     }
@@ -245,26 +271,11 @@ public final class NodeManager: @unchecked Sendable {
         throw RPCClientError.networkError("Timed out waiting for bitcoind RPC server to respond after \(Int(timeoutSeconds))s.")
     }
 
+    /// Only use the app-bundled, release-manifest-verified Knots daemon.
+    /// Never silently substitute arbitrary global/homebrew bitcoind or another chain.
     public func findBitcoindBinary() -> URL? {
-        var candidates: [String] = []
-
-        candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind").path)
-
-        if let execURL = Bundle.main.executableURL {
-            candidates.append(execURL.deletingLastPathComponent().appendingPathComponent("bitcoind").path)
-        }
-
-        candidates.append("/Users/computer/Developer/NodePocketBTCB2/.cache/bitcoin-29.4.3.knots20260508/bin/bitcoind")
-        candidates.append("/opt/homebrew/bin/bitcoind")
-        candidates.append("/usr/local/bin/bitcoind")
-
-        let fm = FileManager.default
-        for path in candidates {
-            if fm.isExecutableFile(atPath: path) {
-                return URL(fileURLWithPath: path)
-            }
-        }
-        return nil
+        let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind")
+        return FileManager.default.isExecutableFile(atPath: bundled.path) ? bundled : nil
     }
 
     private func caseMatchesError(_ state: NodeState) -> Bool {
