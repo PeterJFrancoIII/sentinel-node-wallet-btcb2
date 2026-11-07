@@ -45,7 +45,7 @@ final class AppleSavedPasswordCoordinator: NSObject,
     ) {
         defer { authorizationController = nil }
         let nsError = error as NSError
-        if nsError.domain == ASAuthorizationError.errorDomain,
+        if nsError.domain == ASAuthorizationErrorDomain,
            nsError.code == ASAuthorizationError.canceled.rawValue {
             return // User dismissed the system credential picker.
         }
