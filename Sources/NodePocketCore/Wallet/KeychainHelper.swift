@@ -93,7 +93,20 @@ public final class KeychainHelper: Sendable {
             kSecAttrAccessControl as String: control
         ]
 
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecParam {
+            // On macOS without data-protection keychain entitlements (e.g. local ad-hoc binary builds),
+            // SecAccessControl fails with errSecParam (-50). Fall back cleanly to kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+            let fallbackQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceName,
+                kSecAttrAccount as String: account,
+                kSecAttrLabel as String: "Sentinel Node Wallet - BTCB2: " + account,
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            ]
+            status = SecItemAdd(fallbackQuery as CFDictionary, nil)
+        }
         if status == errSecDuplicateItem {
             throw KeychainError.duplicateItem
         }
@@ -130,7 +143,17 @@ public final class KeychainHelper: Sendable {
         ]
 
         var dataTypeRef: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        if status == errSecParam {
+            let fallbackQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceName,
+                kSecAttrAccount as String: account,
+                kSecReturnData as String: true,
+                kSecMatchLimit as String: kSecMatchLimitOne
+            ]
+            status = SecItemCopyMatching(fallbackQuery as CFDictionary, &dataTypeRef)
+        }
 
         guard status == errSecSuccess else {
             if status == errSecItemNotFound {
