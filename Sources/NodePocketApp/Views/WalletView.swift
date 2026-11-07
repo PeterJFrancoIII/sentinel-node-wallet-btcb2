@@ -147,7 +147,31 @@ public struct WalletView: View {
                 }
             }
 
-                if state.walletSnapshot == nil {
+            // Migration transparency banner
+            if state.isMigrationPending {
+                HStack(spacing: 12) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.yellow)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Legacy Authenticator Migration Pending")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.yellow)
+                        Text("Legacy authenticator migration pending — protected Keychain unavailable. Credential will automatically migrate upon verified login.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.12)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
+                )
+            }
+
+            if state.walletSnapshot == nil {
                     HStack(spacing: 12) {
                         Image(systemName: "wallet.pass")
                             .font(.system(size: 24))
@@ -593,6 +617,31 @@ public struct WalletView: View {
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
             .frame(maxWidth: 480)
+
+            if state.isMigrationPending {
+                HStack(spacing: 10) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.yellow)
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Legacy Authenticator Migration Pending")
+                            .font(.caption)
+                            .bold()
+                            .foregroundColor(.yellow)
+                        Text("Legacy authenticator migration pending — protected Keychain unavailable. Device-owner authentication required to authorize unmigrated login.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.yellow.opacity(0.12)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
+                )
+                .frame(maxWidth: 480)
+            }
 
             if !state.isAuthEnrolled {
                 enrollmentCard

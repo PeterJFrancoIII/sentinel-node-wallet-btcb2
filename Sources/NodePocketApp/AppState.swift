@@ -49,6 +49,7 @@ public final class AppState: ObservableObject {
     @Published public var isAuthEnrolled: Bool = false
     @Published public var enrolledUsername: String? = nil
     @Published public var isWalletTabUnlocked: Bool = false
+    @Published public var isMigrationPending: Bool = false
     @Published public var authErrorMessage: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
 
@@ -279,6 +280,7 @@ public final class AppState: ObservableObject {
         Task { @MainActor in
             self.isAuthEnrolled = await authCoordinator.isEnrolled
             self.enrolledUsername = await authCoordinator.enrolledUsername
+            self.isMigrationPending = await authCoordinator.isMigrationPending
             if let cur = await authCoordinator.currentSession {
                 self.authSession = cur
                 self.isWalletTabUnlocked = true
@@ -314,6 +316,7 @@ public final class AppState: ObservableObject {
         self.isAuthEnrolled = true
         self.enrolledUsername = session.username
         self.isWalletTabUnlocked = true
+        self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
         // The TOTP provisioning URI and recovery codes are secret setup material.
         // Once enrollment succeeds, discard the app's transient onboarding copy.
@@ -326,6 +329,7 @@ public final class AppState: ObservableObject {
         let session = try await authCoordinator.login(username: username, password: password, totpCode: totpCode)
         self.authSession = session
         self.isWalletTabUnlocked = true
+        self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
         self.appendLog("[AUTH] Operator logged in. Wallet Manager unlocked.")
         self.refreshWallet()
@@ -335,6 +339,7 @@ public final class AppState: ObservableObject {
         let session = try await authCoordinator.loginWithRecoveryCode(username: username, code: code)
         self.authSession = session
         self.isWalletTabUnlocked = true
+        self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
         self.appendLog("[AUTH] Operator logged in via recovery code. Wallet Manager unlocked.")
         self.refreshWallet()
@@ -345,6 +350,7 @@ public final class AppState: ObservableObject {
             await authCoordinator.invalidateSession()
             self.authSession = nil
             self.isWalletTabUnlocked = false
+            self.isMigrationPending = await authCoordinator.isMigrationPending
             self.walletSnapshot = nil
             self.receiveAddress = ""
             self.transactions = []

@@ -206,6 +206,8 @@ public actor WalletAuthCoordinator {
     private let registryURL: URL
     private var record: AuthRegistryRecord?
     private var activeSession: WalletAuthCapability?
+    private var isAuthInFlight: Bool = false
+    private var recordGeneration: UInt64 = 0
     public static let sessionDurationSeconds: TimeInterval = 15 * 60 // 15 minutes
 
     // P0-3: Private registry of unforgeable, single-use high-risk approvals
@@ -350,6 +352,9 @@ public actor WalletAuthCoordinator {
         totpCode: String,
         recoveryCodes: [String]
     ) throws -> WalletAuthCapability {
+        guard !isAuthInFlight else {
+            throw WalletAuthError.rateLimited(secondsRemaining: 2)
+        }
         guard record == nil else {
             throw WalletAuthError.alreadyEnrolled
         }
@@ -396,6 +401,7 @@ public actor WalletAuthCoordinator {
             version: 2
         )
 
+        self.recordGeneration += 1
         self.record = newRecord
         try saveRecord()
 
@@ -415,6 +421,12 @@ public actor WalletAuthCoordinator {
         totpCode: String,
         time: TimeInterval = Date().timeIntervalSince1970
     ) async throws -> WalletAuthCapability {
+        guard !isAuthInFlight else {
+            throw WalletAuthError.rateLimited(secondsRemaining: 2)
+        }
+        isAuthInFlight = true
+        defer { isAuthInFlight = false }
+
         guard var rec = record else {
             throw WalletAuthError.notEnrolled
         }
@@ -489,32 +501,44 @@ public actor WalletAuthCoordinator {
             }
         }
         let (valid, timeStep) = Self.verifyTOTP(secret: secret, code: totpCode, time: time)
-        guard valid else {
-            throw registerFailedAttempt(&rec)
+
+        // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
+        guard var freshRec = self.record, freshRec.username.lowercased() == cleanUser.lowercased() else {
+            throw WalletAuthError.notEnrolled
         }
 
-        guard timeStep > rec.lastUsedTimeStep else {
+        if let lockDate = freshRec.lockedUntil, lockDate > Date() {
+            let remaining = Int(lockDate.timeIntervalSince(Date()))
+            throw WalletAuthError.rateLimited(secondsRemaining: remaining)
+        }
+
+        guard valid else {
+            throw registerFailedAttempt(&freshRec)
+        }
+
+        guard timeStep > freshRec.lastUsedTimeStep else {
             throw WalletAuthError.replayedTOTPTimestep
         }
 
         // Audit 033 / 035: If login used unmigrated legacy secret, attempt immediate protected Keychain save and purge plaintext
-        if rec.legacyTotpSecretBase32 != nil {
-            if (try? Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: secret)) != nil {
-                if let verified = try? Self.loadTOTPSecretFromKeychain(username: rec.username), verified == secret {
-                    rec.legacyTotpSecretBase32 = nil
-                    rec.isTotpInKeychain = true
+        if freshRec.legacyTotpSecretBase32 != nil {
+            if (try? Self.saveTOTPSecretToKeychain(username: freshRec.username, secretBase32: secret)) != nil {
+                if let verified = try? Self.loadTOTPSecretFromKeychain(username: freshRec.username), verified == secret {
+                    freshRec.legacyTotpSecretBase32 = nil
+                    freshRec.isTotpInKeychain = true
                 }
             }
         }
 
-        rec.lastUsedTimeStep = timeStep
-        rec.failedAttempts = 0
-        rec.lockedUntil = nil
-        self.record = rec
+        self.recordGeneration += 1
+        freshRec.lastUsedTimeStep = timeStep
+        freshRec.failedAttempts = 0
+        freshRec.lockedUntil = nil
+        self.record = freshRec
         try saveRecord()
 
         let session = WalletAuthCapability(
-            username: rec.username,
+            username: freshRec.username,
             expiresAt: Date().addingTimeInterval(Self.sessionDurationSeconds)
         )
         self.activeSession = session
@@ -526,6 +550,12 @@ public actor WalletAuthCoordinator {
         code: String,
         deviceOwnerReason: String = "Authorize emergency account recovery with recovery code"
     ) async throws -> WalletAuthCapability {
+        guard !isAuthInFlight else {
+            throw WalletAuthError.rateLimited(secondsRemaining: 2)
+        }
+        isAuthInFlight = true
+        defer { isAuthInFlight = false }
+
         guard var rec = record else {
             throw WalletAuthError.notEnrolled
         }
@@ -604,17 +634,31 @@ public actor WalletAuthCoordinator {
             }
         }
 
+        // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
+        guard var freshRec = self.record, freshRec.username.lowercased() == cleanUser.lowercased() else {
+            throw WalletAuthError.notEnrolled
+        }
+
+        if let lockDate = freshRec.lockedUntil, lockDate > Date() {
+            let remaining = Int(lockDate.timeIntervalSince(Date()))
+            throw WalletAuthError.rateLimited(secondsRemaining: remaining)
+        }
+
         // Single-use durable consumption
         if match >= 0 {
-            rec.recoveryCodes.remove(at: match)
+            guard match < freshRec.recoveryCodes.count else {
+                throw WalletAuthError.invalidCredentials
+            }
+            freshRec.recoveryCodes.remove(at: match)
         }
-        rec.failedAttempts = 0
-        rec.lockedUntil = nil
-        self.record = rec
+        self.recordGeneration += 1
+        freshRec.failedAttempts = 0
+        freshRec.lockedUntil = nil
+        self.record = freshRec
         try saveRecord()
 
         let session = WalletAuthCapability(
-            username: rec.username,
+            username: freshRec.username,
             expiresAt: Date().addingTimeInterval(Self.sessionDurationSeconds)
         )
         self.activeSession = session
@@ -628,6 +672,7 @@ public actor WalletAuthCoordinator {
     }
 
     public func invalidateSession() {
+        self.recordGeneration += 1
         self.activeSession = nil
         self.activeApprovals.removeAll()
     }
@@ -754,6 +799,7 @@ public actor WalletAuthCoordinator {
     // MARK: - Cryptographic Helpers
 
     private func registerFailedAttempt(_ rec: inout AuthRegistryRecord) -> WalletAuthError {
+        self.recordGeneration += 1
         rec.failedAttempts += 1
         if rec.failedAttempts >= 5 {
             let penaltySeconds = min(300, Int(pow(2.0, Double(rec.failedAttempts - 4))) * 10)

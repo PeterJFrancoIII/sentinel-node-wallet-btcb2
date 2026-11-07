@@ -476,4 +476,79 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             XCTAssertEqual(err, .unauthenticated)
         }
     }
+
+    func testConcurrentLoginSerializationAndReentrancy() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_concurrent_login_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "concurrency_user")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: Date().timeIntervalSince1970)
+
+        _ = try await coordinator.enroll(
+            username: "concurrency_user",
+            password: "StrongPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Generate valid TOTP code for a future timestamp to ensure clean timestep
+        let testTime = Date().timeIntervalSince1970 + 60
+        let validCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: testTime)
+
+        // Launch concurrent login attempts with the identical TOTP code and timestamp
+        let taskA = Task {
+            try await coordinator.login(
+                username: "concurrency_user",
+                password: "StrongPassword123!@#",
+                totpCode: validCode,
+                time: testTime
+            )
+        }
+        let taskB = Task {
+            try await coordinator.login(
+                username: "concurrency_user",
+                password: "StrongPassword123!@#",
+                totpCode: validCode,
+                time: testTime
+            )
+        }
+
+        let results = [
+            await taskA.result,
+            await taskB.result
+        ]
+
+        var successCount = 0
+        var serializedOrReplayRejections = 0
+
+        for res in results {
+            switch res {
+            case .success(let cap):
+                XCTAssertEqual(cap.username, "concurrency_user")
+                successCount += 1
+            case .failure(let err as WalletAuthError):
+                switch err {
+                case .rateLimited, .replayedTOTPTimestep:
+                    serializedOrReplayRejections += 1
+                default:
+                    XCTFail("Unexpected auth error in concurrent login: \(err)")
+                }
+            case .failure(let err):
+                XCTFail("Unexpected non-auth error: \(err)")
+            }
+        }
+
+        XCTAssertEqual(successCount, 1, "Exactly one concurrent login attempt must succeed")
+        XCTAssertEqual(serializedOrReplayRejections, 1, "The competing attempt must fail closed (rateLimited or replayedTOTPTimestep)")
+    }
 }
