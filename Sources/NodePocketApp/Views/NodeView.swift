@@ -31,7 +31,16 @@ public struct NodeView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    nodeStateBadge
+                    HStack(spacing: 10) {
+                        nodeStateBadge
+                        Button(action: { showAdvancedSheet = true }) {
+                            Image(systemName: "gearshape")
+                                .font(.system(size: 14, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("node-settings-button")
+                        .help("Open Node and Pruning Settings")
+                    }
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.windowBackgroundColor)))
@@ -115,11 +124,6 @@ public struct NodeView: View {
                         .buttonStyle(.bordered)
 
                         Spacer()
-
-                        Button(action: { showAdvancedSheet = true }) {
-                            Label("Advanced Settings", systemImage: "slider.horizontal.3")
-                        }
-                        .buttonStyle(.bordered)
                     }
                 }
 
@@ -202,46 +206,37 @@ public struct NodeView: View {
                         color: .purple
                     )
 
-                    Button {
-                        showAdvancedSheet = true
-                    } label: {
-                        metricCard(
-                            title: "Storage Footprint",
-                            value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
-                            subtitle: state.storageMode.isArchival
-                                ? "Full-history archive (when fully synced)"
-                                : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
-                            icon: "internaldrive.fill",
-                            color: .green
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help("Choose pruning size and view live rolling-history coverage")
+                    metricCard(
+                        title: "Storage Footprint",
+                        value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
+                        subtitle: state.storageMode.isArchival
+                            ? "Full-history archive (when fully synced)"
+                            : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
+                        icon: "internaldrive.fill",
+                        color: .green
+                    )
                 }
 
                 // Active Sync Profile & Effective Resources Card
                 HStack(spacing: 14) {
-                    Image(systemName: "speedometer")
+                    Image(systemName: state.isUltraActive ? "bolt.shield.fill" : "speedometer")
                         .font(.title2)
-                        .foregroundColor(.blue)
+                        .foregroundColor(state.isUltraActive ? .orange : .blue)
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 8) {
-                            Text("\(state.nodeManager.config.profile.type.rawValue) Profile Active")
+                            Text(state.ultraStatusTitle)
                                 .font(.headline)
-                            Text("• \(state.nodeManager.config.profile.parThreads) threads, \(state.nodeManager.config.profile.dbCacheMB) MiB dbcache, max \(state.nodeManager.config.profile.maxConnections) peers")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                            if !state.isUltraActive {
+                                Text("• \(state.nodeManager.config.profile.parThreads) threads, \(state.nodeManager.config.profile.dbCacheMB) MiB dbcache, max \(state.nodeManager.config.profile.maxConnections) peers")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
                         }
-                        Text("Peer limit (-maxconnections) is a ceiling, not a quota. Standard Bitcoin Knots maintains ~10–11 outbound peers without inbound port forwarding.")
+                        Text(state.ultraStatusSubtitle)
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                     Spacer()
-                    Button("Configure…") {
-                        showAdvancedSheet = true
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.controlBackgroundColor)))

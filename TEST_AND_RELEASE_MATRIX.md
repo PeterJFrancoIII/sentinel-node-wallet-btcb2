@@ -22,6 +22,21 @@
 
 **No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
 
+## v12 Ultra Power Policy, All-Wallet Inventory & Single Settings UI
+
+| Scenario | Required proof | Current status |
+| --- | --- | --- |
+| IOKit power state classification | Battery, Charging, AC Not Charging, Unknown, Low Power Mode | **PASS** (Swift + Python tests) |
+| Ephemeral Ultra resource bounds | `par=1`, `dbcache=128MiB`, `maxconnections=12`, `maxuploadtarget=128MiB`, `prune=2048` | **PASS** (Swift + Python tests) |
+| Preferred profile preservation | User-selected Quiet/Balanced/Fast saved; resumes on stable AC | **PASS** (Swift + Python tests) |
+| Multi-wallet discovery & per-wallet isolation | Knots `listwalletdir` + `listwallets`, `/wallet/<name>` RPC calls | **PASS** (Swift + Python tests) |
+| Unloaded wallet stale/unavailable labeling | Shows timestamped last known or `Unavailable — Load to refresh` (never 0) | **PASS** (Swift + Python tests) |
+| Reversible archive semantics | `unloadwallet` closes wallet; registry preserves DB/Keychain credentials | **PASS** (Swift + Python tests) |
+| Fail-closed wallet deletion gating | Refuses if spendable > 0, pending > 0, immature > 0, or unverified | **PASS** (Swift + Python tests) |
+| Mandatory pre-delete backup verification | Requires verified non-empty `.dat` backup before file operation | **PASS** (Swift + Python tests) |
+| Reversible macOS Trash deletion | Uses `FileManager.trashItem`; `rm -rf` strictly forbidden | **PASS** (Swift + Python tests) |
+| Single Settings UI button | Exactly 1 `showAdvancedSheet = true` call site in `NodeView.swift`; read-only Storage Footprint | **PASS** (Swift + Python tests) |
+
 ## v11 live rolling-history coverage
 
 | Scenario | Required proof | Current status |

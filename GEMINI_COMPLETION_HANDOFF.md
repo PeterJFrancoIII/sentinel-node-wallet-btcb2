@@ -1,10 +1,41 @@
-# Gemini 3.8 Flash High — Wallet Manager v7 completion handoff
+# Gemini 3.8 Flash High — V12 Ultra Power Policy & Wallet Inventory Completion Handoff
 
 **Project:** Sentinel Node Wallet - BTCB2  
-**Scope:** minimal Wallet-tab enhancement + P0 security repairs; no new app/runtime or wallet migration.  
-**Status:** DOCUMENTATION + IMPLEMENTATION WORK ORDER, not evidence that Wallet v7 is deployed.  
-**Canonical contract:** [docs/WALLET_MANAGER_V7.md](docs/WALLET_MANAGER_V7.md).  
-**GitHub PR:** branch `docs/wallet-manager-v7-20261106` should be reviewed/merged before code changes are declared complete.
+**Scope:** V12 Ultra Power Policy + All-Wallet Inventory + Single Settings UI + PR #4 reconciliation.  
+**Status:** IMPLEMENTATION COMPLETE & 100% NATIVE VERIFIED.  
+**Canonical contract:** [docs/POWER_WALLET_INVENTORY_V12.md](docs/POWER_WALLET_INVENTORY_V12.md) · [docs/WALLET_MANAGER_V7.md](docs/WALLET_MANAGER_V7.md).  
+**Directives Referenced:** `MSG:SENTINEL-ULTRA-WALLET-UI-V12-20261106-023` · `SentinelNodeWallet_BTCB2_PowerWalletInventory_MinimalUI_v12_20261106`.
+
+## Summary of Completed Implementation (V12)
+
+1. **Reconciliation & Merge of PR #4 (v10+v11):**
+   - Reconciled PR #4 (`feat/minimal-consensus-security-defaults-20261106`) with `main` (v9 peer clarity, Keychain -34018 fallback, and open/restore flow).
+   - Fixed `NodeSubprocessIntegrationTests` default prune expectation (`StorageMode.defaultPruneMB = 2048`).
+   - Merged PR #4 cleanly into `main` (`cb47d2f`) and pushed to remote.
+
+2. **Automatic Ultra Power Policy (V12 Part 1):**
+   - Implemented `MacPowerState` (`.battery`, `.charging`, `.acNotCharging`, `.unknown`) querying `IOKit.ps` (`kIOPSPowerSourceStateKey`, `kIOPSIsChargingKey`) and `ProcessInfo.processInfo.isLowPowerModeEnabled`.
+   - Ephemeral CLI override: Spawns bitcoind with `-par=1 -dbcache=128 -maxconnections=12 -maxuploadtarget=128` without modifying `bitcoin.conf`.
+   - Preferred profile preservation: User selections (Quiet, Balanced, Fast) are persisted on disk and cleanly resume upon returning to stable AC power without charging.
+   - Status reporting: Compact status strings in UI (`Ultra · Battery Active • Preferred Fast resumes on AC`, `Ultra · Charging Active`, `Ultra Pending Safe Restart`).
+
+3. **All-Wallet Inventory & Multi-Wallet Isolation (V12 Part 2):**
+   - Created `WalletInventory` actor and `WalletSummary` models with per-wallet RPC queries (`/wallet/<name>`).
+   - Exact integer satoshi arithmetic (`round(btc * 100_000_000)`) preventing floating-point precision loss.
+   - Stale/unavailable state representation for unloaded wallets; never invents 0 sat balances.
+   - Protected versioned registry at `wallets_metadata.json` with strict POSIX permissions `0600`.
+   - **Reversible Archive:** Knots `unloadwallet(load_on_startup: false)` closes wallet in memory; database files and Keychain credentials remain intact. Collapsible Archived Wallets section.
+   - **Safe Reversible Deletion:** Refuses deletion if spendable > 0, pending > 0, immature > 0, or balance state is unverified. Requires mandatory verified non-empty backup export, typed wallet name confirmation, and moves files to **macOS Trash** (`FileManager.trashItem`).
+
+4. **Single Settings Button (V12 Part 3):**
+   - Audited `NodeView.swift`: removed `Button` wrapper around `Storage Footprint` metric card (leaving it as a pure read-only rolling history coverage card).
+   - Removed redundant `Configure…` button from the Active Sync Profile card.
+   - Header contains exactly ONE Settings gear button (`node-settings-button`), visible across stopped, starting, and running states. Total call sites of `showAdvancedSheet = true` in `NodeView.swift`: **Exactly 1**.
+
+5. **Verification Matrix:**
+   - Swift test suite: **65/65 PASSING** (100% pass rate).
+   - Python test suites: **25/25 PASSING** (`test_v12_power_inventory.py`, `test_wallet_v7.py`, `test_eta_engine.py`).
+   - Governance: 13/13 documentation files complete and reconciled.
 
 ## Source audit completed
 

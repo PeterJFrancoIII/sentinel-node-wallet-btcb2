@@ -1,11 +1,11 @@
 # Agent instructions — Sentinel Node Wallet - BTCB2
 
-**Canonical current wallet contract:** [docs/WALLET_MANAGER_V7.md](docs/WALLET_MANAGER_V7.md)  
+**Canonical current wallet contract:** [docs/POWER_WALLET_INVENTORY_V12.md](docs/POWER_WALLET_INVENTORY_V12.md) · [docs/WALLET_MANAGER_V7.md](docs/WALLET_MANAGER_V7.md)  
 **Primary project:** Native SwiftUI macOS Bitcoin Knots **BTCB2 BLAKE2b/BIP-110 MainNet-only** validating node and non-custodial wallet.
 
 ## What is in scope
 
-Maintain exactly three main surfaces: **Node, Wallet, Network**, plus one small Advanced sheet. The Wallet surface must be mature/immature-aware, fee-aware, history-rich and secure. Python is permitted as a test/mocking and automation tool; **no Python runtime or web backend** is shipped to consumers.
+Maintain exactly three main surfaces: **Node, Wallet, Network**, plus one small Advanced sheet opened by a single header gear button. The Wallet surface must support All-Wallet Inventory, per-wallet isolation, reversible Archive, and fail-closed reversible Delete to macOS Trash. Automatic Ultra Power Policy monitors `IOKit.ps` for battery/charging and preserves preferred profiles. Python is permitted as a test/mocking and automation tool; **no Python runtime or web backend** is shipped to consumers.
 
 **No DATUM gateway in this release.** Future one-click DATUM support is roadmap-only. No Stratum, pool, rental, miner or remote-wallet integration now.
 

@@ -4,11 +4,12 @@
 
 ## Canonical documents
 
-1. [Wallet Manager v7](docs/WALLET_MANAGER_V7.md) is the authoritative wallet functional and security contract.
-2. [Security policy](SECURITY.md) defines hard release blockers and vulnerability reporting.
-3. [Test and release matrix](TEST_AND_RELEASE_MATRIX.md) demands reproducible evidence.
-4. [Gemini completion handoff](GEMINI_COMPLETION_HANDOFF.md) defines the next implementation order.
-5. README communicates current honest status; it must never overstate code coverage or notarization.
+1. [V12 Ultra Power Policy & All-Wallet Inventory](docs/POWER_WALLET_INVENTORY_V12.md) is the authoritative power management, multi-wallet inventory, and UI contract.
+2. [Wallet Manager v7](docs/WALLET_MANAGER_V7.md) is the authoritative wallet functional and security contract.
+3. [Security policy](SECURITY.md) defines hard release blockers and vulnerability reporting.
+4. [Test and release matrix](TEST_AND_RELEASE_MATRIX.md) demands reproducible evidence.
+5. [Gemini completion handoff](GEMINI_COMPLETION_HANDOFF.md) defines the next implementation order.
+6. README communicates current honest status; it must never overstate code coverage or notarization.
 
 ## Minimal engineering rules
 

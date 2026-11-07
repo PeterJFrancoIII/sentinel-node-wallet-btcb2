@@ -40,6 +40,15 @@ public struct WalletView: View {
     @State private var isPerformingWalletAction = false
     @State private var hasConfirmedOfflinePassphrase = false
 
+    // Multi-Wallet Inventory and Deletion
+    @State private var showDeleteConfirmationSheet: Bool = false
+    @State private var walletToDelete: WalletSummary? = nil
+    @State private var typedDeleteName: String = ""
+    @State private var deleteBackupPath: String = ""
+    @State private var isCreatingBackupBeforeDelete: Bool = false
+    @State private var deleteErrorMessage: String? = nil
+    @State private var showArchivedSection: Bool = false
+
     // Transaction Filter
     @State private var selectedTxFilter: String = "all"
 
@@ -97,6 +106,9 @@ public struct WalletView: View {
                     .padding()
                     .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.08)))
                 }
+
+                // All Discovered Wallets Inventory Section
+                walletInventorySection
 
                 // Balance Card
                 VStack(alignment: .leading, spacing: 14) {
@@ -475,6 +487,10 @@ public struct WalletView: View {
         .onAppear {
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
+            state.refreshWalletInventory()
+        }
+        .onChange(of: state.nodeState) { _ in
+            state.refreshWalletInventory()
         }
         .sheet(isPresented: $showPreviewSheet) {
             sendPreviewSheet
@@ -488,6 +504,314 @@ public struct WalletView: View {
         .sheet(isPresented: $showOpenRestoreModal) {
             openOrRestoreWalletSheet
         }
+        .sheet(isPresented: $showDeleteConfirmationSheet) {
+            deleteWalletSheet
+        }
+    }
+
+    private var walletInventorySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Image(systemName: "folder.badge.gearshape")
+                    .foregroundColor(.blue)
+                Text("All Created Wallets (\(state.walletSummaries.count))")
+                    .font(.headline)
+                Spacer()
+                if state.isRefreshingInventory {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Button("Refresh") {
+                    state.refreshWalletInventory()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                Button("+ Create") {
+                    showCreateModal = true
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+
+                Button("Open/Restore") {
+                    showOpenRestoreModal = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+
+            if state.walletSummaries.isEmpty {
+                Text("No local wallets discovered in datadir. Click '+ Create' to initialize an encrypted descriptor wallet.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .padding(.vertical, 4)
+            } else {
+                let activeWallets = state.walletSummaries.filter { !$0.isArchived }
+                let archivedWallets = state.walletSummaries.filter { $0.isArchived }
+
+                ForEach(activeWallets) { summary in
+                    walletRow(summary: summary)
+                }
+
+                if !archivedWallets.isEmpty {
+                    DisclosureGroup(
+                        isExpanded: $showArchivedSection,
+                        content: {
+                            VStack(spacing: 8) {
+                                ForEach(archivedWallets) { summary in
+                                    walletRow(summary: summary)
+                                }
+                            }
+                            .padding(.top, 6)
+                        },
+                        label: {
+                            HStack {
+                                Image(systemName: "archivebox")
+                                Text("Archived Wallets (\(archivedWallets.count))")
+                                    .font(.subheadline)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    )
+                }
+            }
+        }
+        .padding()
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+    }
+
+    private func walletRow(summary: WalletSummary) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(summary.name)
+                        .font(.headline)
+
+                    if state.walletSnapshot?.name == summary.name {
+                        Text("Active")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.blue.opacity(0.2)))
+                            .foregroundColor(.blue)
+                    }
+
+                    if summary.isLoaded {
+                        Text("Loaded")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.green.opacity(0.2)))
+                            .foregroundColor(.green)
+                    } else {
+                        Text("Unloaded")
+                            .font(.system(size: 10, weight: .medium))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.gray.opacity(0.2)))
+                            .foregroundColor(.secondary)
+                    }
+
+                    if summary.isArchived {
+                        Text("Archived")
+                            .font(.system(size: 10, weight: .bold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.orange.opacity(0.2)))
+                            .foregroundColor(.orange)
+                    }
+
+                    if summary.isEncrypted {
+                        Image(systemName: summary.isLocked ? "lock.fill" : "lock.open.fill")
+                            .font(.caption2)
+                            .foregroundColor(summary.isLocked ? .green : .orange)
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    if let status = summary.statusMessage {
+                        Text(status)
+                            .font(.caption2)
+                            .foregroundColor(summary.isStale ? .secondary : .primary)
+                    }
+                    Text("Total: \(summary.totalBTCB2) BTCB2 (\(SatoshiMath.formatSats(summary.totalSats)) sats)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Text("Spendable: \(summary.spendableBTCB2) • Pending: \(summary.pendingBTCB2) • Immature: \(summary.immatureBTCB2)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            // Row Action Buttons
+            HStack(spacing: 8) {
+                if summary.isLoaded && state.walletSnapshot?.name != summary.name {
+                    Button("Select") {
+                        state.selectWallet(name: summary.name)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else if !summary.isLoaded {
+                    Button("Load") {
+                        state.selectWallet(name: summary.name)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                if !summary.isArchived {
+                    Button("Archive") {
+                        state.archiveWallet(name: summary.name)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("Unload wallet from memory and collapse into Archived list. No files are deleted.")
+                } else {
+                    Button("Unarchive") {
+                        state.unarchiveWallet(name: summary.name)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                Button(action: {
+                    walletToDelete = summary
+                    typedDeleteName = ""
+                    deleteBackupPath = ""
+                    deleteErrorMessage = nil
+                    showDeleteConfirmationSheet = true
+                }) {
+                    Image(systemName: "trash")
+                        .foregroundColor(summary.canDeleteSafely ? .red : .gray)
+                }
+                .buttonStyle(.plain)
+                .controlSize(.small)
+                .disabled(!summary.canDeleteSafely)
+                .help(summary.canDeleteSafely
+                      ? "Safely move verified empty wallet to macOS Trash (reversible)"
+                      : "Cannot delete wallet with non-zero or unverified balance to prevent loss of funds. Use Archive instead.")
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor)))
+    }
+
+    private var deleteWalletSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "trash.circle.fill")
+                    .font(.title)
+                    .foregroundColor(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Delete Wallet from this Mac")
+                        .font(.headline)
+                    Text("Reversible macOS Trash Deletion for '\(walletToDelete?.name ?? "")'")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Cancel") {
+                    showDeleteConfirmationSheet = false
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Preflight Safety Verification")
+                    .font(.subheadline)
+                    .bold()
+                Text("• Balance must be verified 0 sats across spendable, pending, and immature balances.\n• Wallet will be unloaded from Knots and moved to your macOS Trash (reversible).\n• Important: If this wallet generated addresses in the past, someone could send funds to them in the future. A mandatory backup must be saved first.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+            .padding(10)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+
+            // Backup step
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Step 1: Mandatory Backup Verification")
+                    .font(.subheadline)
+                    .bold()
+                if deleteBackupPath.isEmpty {
+                    Button("Create Verified Backup to Downloads") {
+                        Task {
+                            guard let name = walletToDelete?.name else { return }
+                            isCreatingBackupBeforeDelete = true
+                            deleteErrorMessage = nil
+                            defer { isCreatingBackupBeforeDelete = false }
+                            do {
+                                let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
+                                let backupFile = downloads.appendingPathComponent("Sentinel_Backup_\(name)_\(Int(Date().timeIntervalSince1970)).dat")
+                                try await state.nodeManager.rpcClient.backupWallet(destinationPath: backupFile.path, walletName: name)
+                                if FileManager.default.fileExists(atPath: backupFile.path) {
+                                    deleteBackupPath = backupFile.path
+                                }
+                            } catch {
+                                deleteErrorMessage = "Backup failed: \(error.localizedDescription)"
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(isCreatingBackupBeforeDelete)
+                } else {
+                    HStack {
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("Backup verified: \(deleteBackupPath)")
+                            .font(.caption)
+                            .lineLimit(1)
+                    }
+                }
+            }
+
+            // Typed name step
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Step 2: Confirm by Typing Wallet Name")
+                    .font(.subheadline)
+                    .bold()
+                Text("Type '\(walletToDelete?.name ?? "")' exactly to confirm:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                TextField("Wallet Name", text: $typedDeleteName)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            if let err = deleteErrorMessage {
+                Text(err)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showDeleteConfirmationSheet = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Move to macOS Trash") {
+                    guard let name = walletToDelete?.name else { return }
+                    state.deleteWallet(
+                        name: name,
+                        typedConfirmation: typedDeleteName,
+                        verifiedBackupPath: deleteBackupPath
+                    )
+                    showDeleteConfirmationSheet = false
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+                .disabled(typedDeleteName != (walletToDelete?.name ?? "") || deleteBackupPath.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
     }
 
     private var chainIdentityBadge: some View {

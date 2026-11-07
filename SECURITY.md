@@ -18,6 +18,13 @@ Assume hostile websites, malicious browser extensions, clipboard substitution, c
 - Authenticate and rate-limit spend flow against double-click/replay and unsolicited local IPC. Require a short-lived one-time approval token tied to immutable transaction details. Lock wallet immediately after use, on error and on cancel; avoid relying only on fire-and-forget asynchronous `defer Task` for lock.
 - Log minimal redacted financial events; never export seeds/passphrases/address books to public CI, markdown, issue comments, telemetry, or Shared Cognitive Memory. No automatic background contact sync or explorer lookup.
 - Bounded backup/restore workflows: verify backup readability, application wallet ownership, source chain identity and pruned history warnings; restore must not overwrite an existing wallet or corrupt encryption state.
+- All-Wallet Inventory and Safe Deletion (V12):
+  - Wallet Archive is strictly in-memory deactivation (`unloadwallet(name, load_on_startup=false)`). Wallet databases, descriptors, private keys, and Keychain credentials are fully preserved.
+  - Wallet Deletion ('Delete from this Mac') enforces fail-closed safeguards: deletion is strictly blocked if spendable, pending, or immature balances are non-zero, or if balance state is unverified.
+  - Deletion requires mandatory export of a verified non-empty backup file before any file movement.
+  - Requires user presence and typing the exact full wallet name to confirm.
+  - Execution uses macOS `FileManager.trashItem` (reversible Trash); `rm -rf` or unrecoverable deletion is prohibited.
+  - Keychain credentials remain intact for disaster recovery.
 
 ## Explorer privacy
 

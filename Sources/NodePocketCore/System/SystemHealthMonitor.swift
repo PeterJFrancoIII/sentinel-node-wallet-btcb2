@@ -1,11 +1,60 @@
 import Foundation
 import IOKit.ps
 
+public enum MacPowerState: String, Codable, Sendable, Equatable {
+    case battery = "Battery"
+    case charging = "Charging"
+    case acNotCharging = "AC"
+    case unknown = "Unknown"
+
+    public var isUltraRequired: Bool {
+        switch self {
+        case .battery, .charging:
+            return true
+        case .acNotCharging, .unknown:
+            return false
+        }
+    }
+
+    public var displayLabel: String {
+        switch self {
+        case .battery: return "Battery"
+        case .charging: return "Charging"
+        case .acNotCharging: return "AC Power"
+        case .unknown: return "Unknown Power"
+        }
+    }
+}
+
 public struct SystemHealthSnapshot: Sendable {
     public let thermalState: ProcessInfo.ThermalState
     public let freeDiskBytes: Int64
-    public let isOnBattery: Bool
+    public let powerState: MacPowerState
     public let isLowPowerMode: Bool
+
+    public init(
+        thermalState: ProcessInfo.ThermalState,
+        freeDiskBytes: Int64,
+        powerState: MacPowerState,
+        isLowPowerMode: Bool
+    ) {
+        self.thermalState = thermalState
+        self.freeDiskBytes = freeDiskBytes
+        self.powerState = powerState
+        self.isLowPowerMode = isLowPowerMode
+    }
+
+    public var isOnBattery: Bool {
+        powerState == .battery
+    }
+
+    public var isCharging: Bool {
+        powerState == .charging
+    }
+
+    public var requiresUltraPower: Bool {
+        powerState.isUltraRequired || isLowPowerMode
+    }
 
     public var freeDiskGB: Double {
         Double(freeDiskBytes) / (1024.0 * 1024.0 * 1024.0)
@@ -45,32 +94,48 @@ public final class SystemHealthMonitor: @unchecked Sendable {
         }
 
         // Power source
-        let isOnBattery = checkIsOnBattery()
+        let powerState = checkPowerState()
 
         return SystemHealthSnapshot(
             thermalState: thermal,
             freeDiskBytes: freeBytes,
-            isOnBattery: isOnBattery,
+            powerState: powerState,
             isLowPowerMode: isLowPower
         )
     }
 
-    private func checkIsOnBattery() -> Bool {
+    public func checkPowerState() -> MacPowerState {
         guard let snapshot = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
               let sources = IOPSCopyPowerSourcesList(snapshot)?.takeRetainedValue() as? [CFTypeRef] else {
-            return false
+            return .unknown
+        }
+
+        if sources.isEmpty {
+            // Desktop Macs without internal batteries connected to AC
+            return .acNotCharging
         }
 
         for source in sources {
             guard let desc = IOPSGetPowerSourceDescription(snapshot, source)?.takeUnretainedValue() as? [String: Any] else {
                 continue
             }
+
             if let state = desc[kIOPSPowerSourceStateKey as String] as? String {
                 if state == (kIOPSBatteryPowerValue as String) {
-                    return true
+                    return .battery
+                }
+                if state == (kIOPSACPowerValue as String) {
+                    // Check if actively charging
+                    if let isCharging = desc[kIOPSIsChargingKey as String] as? Bool, isCharging {
+                        return .charging
+                    }
+                    if let isChargingNum = desc[kIOPSIsChargingKey as String] as? NSNumber, isChargingNum.boolValue {
+                        return .charging
+                    }
+                    return .acNotCharging
                 }
             }
         }
-        return false
+        return .unknown
     }
 }

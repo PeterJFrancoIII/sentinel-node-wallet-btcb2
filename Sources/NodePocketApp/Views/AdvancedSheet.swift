@@ -125,7 +125,7 @@ public struct AdvancedSheet: View {
                             .font(.headline)
 
                         Picker("Profile", selection: $selectedProfile) {
-                            ForEach(SyncProfileType.allCases, id: \.self) { p in
+                            ForEach(SyncProfileType.userSelectableCases, id: \.self) { p in
                                 Text(p.rawValue).tag(p)
                             }
                         }
@@ -140,6 +140,18 @@ public struct AdvancedSheet: View {
                         Text(selectedProfile.description)
                             .font(.caption)
                             .foregroundColor(.secondary)
+
+                        if state.isUltraActive {
+                            HStack {
+                                Image(systemName: "bolt.shield.fill")
+                                    .foregroundColor(.orange)
+                                Text("Ultra Power Saving is automatically active because your Mac is running on battery or actively charging. Your selected profile (\(selectedProfile.rawValue)) will resume when on stable AC power.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+                        }
                     }
 
                     Divider()

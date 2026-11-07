@@ -167,6 +167,10 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "loadwallet", params: [name])
     }
 
+    public func unloadWallet(name: String, loadOnStartup: Bool = false) async throws -> UnloadWalletResponse {
+        try await call(method: "unloadwallet", params: [name, loadOnStartup])
+    }
+
     public func restoreWallet(name: String, backupFile: String) async throws -> LoadWalletResponse {
         try await call(method: "restorewallet", params: [name, backupFile])
     }

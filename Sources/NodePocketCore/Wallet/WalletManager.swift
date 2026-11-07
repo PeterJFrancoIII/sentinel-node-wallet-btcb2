@@ -257,6 +257,11 @@ public actor WalletManager {
         _ = try await refreshWalletInfo()
     }
 
+    /// Selects an existing wallet by name (alias for loadWallet).
+    public func selectWallet(name: String) async throws {
+        try await loadWallet(name: name)
+    }
+
     /// Fetches latest balances and encryption status for the active wallet.
     public func refreshWalletInfo() async throws -> WalletSnapshot {
         let info = try await rpcClient.getWalletInfo(walletName: currentWalletName)

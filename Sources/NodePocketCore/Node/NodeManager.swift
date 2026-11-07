@@ -6,6 +6,11 @@ public enum NodeState: Equatable, Sendable {
     case running(pid: Int32)
     case stopping
     case error(String)
+
+    public var isRunning: Bool {
+        if case .running = self { return true }
+        return false
+    }
 }
 
 public final class NodeManager: @unchecked Sendable {
@@ -23,6 +28,7 @@ public final class NodeManager: @unchecked Sendable {
     @MainActor private var settingsInFlight = false
     private var monitorTask: Task<Void, Never>?
 
+    public private(set) var isUltraActive: Bool = false
     public var onStateChange: (@Sendable (NodeState) -> Void)?
     public var onLogMessage: (@Sendable (String) -> Void)?
     public var onBlockchainUpdate: (@Sendable (BlockchainInfo, HashrateReport, NetworkInfo?, (state: ETAState, display: String)) -> Void)?
@@ -78,7 +84,7 @@ public final class NodeManager: @unchecked Sendable {
 
     /// Starts the node subprocess using the configured bitcoind binary or a simulator if not present.
     /// Strictly pinned to BTCB2 BIP-110 BLAKE2b MainNet.
-    public func start(binaryURL: URL? = nil) throws {
+    public func start(binaryURL: URL? = nil, ultraOverride: Bool = false) throws {
         stateLock.lock()
         guard state == .stopped || caseMatchesError(state) else {
             stateLock.unlock()
@@ -100,10 +106,21 @@ public final class NodeManager: @unchecked Sendable {
         let proc = Process()
         proc.executableURL = executableURL
         // Strictly MainNet arguments only
-        let arguments = [
+        var arguments = [
             "-conf=\(config.configFileURL.path)",
             "-datadir=\(config.dataDirectory.path)"
         ]
+        if ultraOverride {
+            self.isUltraActive = true
+            arguments.append(contentsOf: [
+                "-par=1",
+                "-dbcache=128",
+                "-maxconnections=12",
+                "-maxuploadtarget=128"
+            ])
+        } else {
+            self.isUltraActive = false
+        }
         proc.arguments = arguments
 
         let outPipe = Pipe()
@@ -292,7 +309,7 @@ public final class NodeManager: @unchecked Sendable {
         do {
             try config.writeToDisk()
             if wasRunning {
-                try start()
+                try start(ultraOverride: isUltraActive)
                 try await waitForRPCReadiness(timeoutSeconds: 90)
             }
             let status = wasRunning ? "Applied after clean restart and verified RPC connectivity." :
@@ -304,9 +321,33 @@ public final class NodeManager: @unchecked Sendable {
             // Restore last known configuration on any failed change. Never erase wallet/chain.
             config = previous
             try? config.writeToDisk()
-            if wasRunning, case .stopped = state { try? start() }
+            if wasRunning, case .stopped = state { try? start(ultraOverride: isUltraActive) }
             throw error
         }
+    }
+
+    @MainActor public func applyUltraMode(active: Bool) async throws -> Bool {
+        guard isUltraActive != active else { return true }
+        let wasRunning = state.isRunning
+
+        if wasRunning {
+            if process == nil && adoptedPid != nil {
+                let verified = await verifyAdoptedDaemon()
+                guard verified else {
+                    return false
+                }
+            }
+            await stop()
+            for _ in 0..<20 {
+                if state == .stopped { break }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            try start(ultraOverride: active)
+            try await waitForRPCReadiness(timeoutSeconds: 30)
+        } else {
+            self.isUltraActive = active
+        }
+        return true
     }
 
     @MainActor public func switchProfile(_ newProfile: SyncProfile) async throws {

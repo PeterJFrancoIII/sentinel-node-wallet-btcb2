@@ -148,6 +148,10 @@ public struct LoadWalletResponse: Codable, Sendable {
     public let warning: String?
 }
 
+public struct UnloadWalletResponse: Codable, Sendable {
+    public let warning: String?
+}
+
 public struct ValidateAddressResponse: Codable, Sendable {
     public let isvalid: Bool
     public let address: String?

@@ -98,7 +98,7 @@ public struct ContentView: View {
                         .foregroundColor(profileColor)
                         .font(.caption2)
                     Picker("Profile", selection: $state.selectedProfileType) {
-                        ForEach(SyncProfileType.allCases, id: \.self) { p in
+                        ForEach(SyncProfileType.userSelectableCases, id: \.self) { p in
                             Text(p.rawValue).tag(p)
                         }
                     }
@@ -158,6 +158,7 @@ public struct ContentView: View {
 
     private var profileColor: Color {
         switch state.selectedProfileType {
+        case .ultra: return .orange
         case .quiet: return .green
         case .balanced: return .blue
         case .fast: return .orange

@@ -28,6 +28,21 @@ public final class AppState: ObservableObject {
     @Published public var alertMessage: String?
     @Published public var showAlert: Bool = false
 
+    // Ultra Power Management
+    @Published public var powerState: MacPowerState = .unknown
+    @Published public var isUltraActive: Bool = false
+    @Published public var ultraStatusTitle: String = "Balanced Profile Active"
+    @Published public var ultraStatusSubtitle: String = "2 threads, 512 MiB dbcache, max 24 peers"
+    @Published public var userPreferredProfile: SyncProfileType = .balanced
+    private var lastPowerTransitionTime: Date = Date()
+    private var isEvaluatingPower: Bool = false
+
+    // Multi-Wallet Inventory
+    public let walletInventory: WalletInventory
+    @Published public var walletSummaries: [WalletSummary] = []
+    @Published public var isRefreshingInventory: Bool = false
+    @Published public var inventoryError: String? = nil
+
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
     private var healthTimer: AnyCancellable?
@@ -45,8 +60,10 @@ public final class AppState: ObservableObject {
         self.addressBook = book
         self.nodeManager = NodeManager(config: config)
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book)
+        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
+        self.userPreferredProfile = config.profile.type
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
@@ -157,14 +174,7 @@ public final class AppState: ObservableObject {
             guard let self = self else { return }
             let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
             self.systemHealth = snapshot
-
-            // User-selected sync profiles must not be silently overridden.
-            if snapshot.isOnBattery && self.selectedProfileType == .fast && !self.gaveBatteryFastWarning {
-                self.gaveBatteryFastWarning = true
-                self.appendLog("[POWER] Fast mode on battery may use more energy. Change profile manually if desired.")
-            } else if !snapshot.isOnBattery {
-                self.gaveBatteryFastWarning = false
-            }
+            self.evaluatePowerStateAndUltraPolicy(snapshot: snapshot)
 
             // Storage safety guard: graceful pause if free space <= 10GB
             if snapshot.freeDiskGB <= 10.0 && self.nodeState != .stopped {
@@ -174,7 +184,73 @@ public final class AppState: ObservableObject {
                 self.showAlert = true
             }
         }
-        self.systemHealth = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
+        let initial = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
+        self.systemHealth = initial
+        self.evaluatePowerStateAndUltraPolicy(snapshot: initial)
+    }
+
+    public func evaluatePowerStateAndUltraPolicy(snapshot: SystemHealthSnapshot) {
+        self.powerState = snapshot.powerState
+        let requiresUltra = snapshot.requiresUltraPower
+
+        if requiresUltra {
+            if !isUltraActive {
+                ultraStatusTitle = "Ultra · \(snapshot.powerState.displayLabel)"
+                ultraStatusSubtitle = "Ultra active: 1 thread, 128 MiB dbcache, max 12 peers • Preferred \(userPreferredProfile.rawValue) resumes on AC"
+                Task { @MainActor in
+                    guard !self.isEvaluatingPower else { return }
+                    self.isEvaluatingPower = true
+                    defer { self.isEvaluatingPower = false }
+
+                    do {
+                        let applied = try await self.nodeManager.applyUltraMode(active: true)
+                        if applied {
+                            self.isUltraActive = true
+                            self.ultraStatusTitle = "Ultra · \(snapshot.powerState.displayLabel) Active"
+                            self.ultraStatusSubtitle = "1 thread, 128 MiB dbcache, max 12 peers • Preferred \(self.userPreferredProfile.rawValue) resumes on AC"
+                            self.appendLog("[POWER] Ultra power mode applied (\(snapshot.powerState.displayLabel)). Preferred profile: \(self.userPreferredProfile.rawValue)")
+                        } else {
+                            self.ultraStatusTitle = "Ultra Pending Safe Restart"
+                            self.ultraStatusSubtitle = "External or unverified daemon. Safe restart pending verification."
+                        }
+                    } catch {
+                        self.ultraStatusTitle = "Ultra Mode Error"
+                        self.ultraStatusSubtitle = error.localizedDescription
+                    }
+                }
+            } else {
+                ultraStatusTitle = "Ultra · \(snapshot.powerState.displayLabel) Active"
+                ultraStatusSubtitle = "1 thread, 128 MiB dbcache, max 12 peers • Preferred \(userPreferredProfile.rawValue) resumes on AC"
+            }
+        } else {
+            // Stable AC
+            if isUltraActive {
+                ultraStatusTitle = "\(userPreferredProfile.rawValue) Profile Resuming"
+                ultraStatusSubtitle = "Restoring preferred profile on stable AC power…"
+                Task { @MainActor in
+                    guard !self.isEvaluatingPower else { return }
+                    self.isEvaluatingPower = true
+                    defer { self.isEvaluatingPower = false }
+
+                    do {
+                        let applied = try await self.nodeManager.applyUltraMode(active: false)
+                        if applied {
+                            self.isUltraActive = false
+                            let pref = SyncProfile.preset(for: self.userPreferredProfile)
+                            self.ultraStatusTitle = "\(self.userPreferredProfile.rawValue) Profile Active"
+                            self.ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
+                            self.appendLog("[POWER] Restored preferred profile \(self.userPreferredProfile.rawValue) on stable AC power.")
+                        }
+                    } catch {
+                        self.appendLog("[POWER] Failed to restore profile: \(error.localizedDescription)")
+                    }
+                }
+            } else {
+                let pref = SyncProfile.preset(for: userPreferredProfile)
+                ultraStatusTitle = "\(userPreferredProfile.rawValue) Profile Active"
+                ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
+            }
+        }
     }
 
     public func appendLog(_ log: String) {
@@ -379,13 +455,105 @@ public final class AppState: ObservableObject {
     }
 
     public func applyProfile(_ profileType: SyncProfileType) {
+        self.userPreferredProfile = profileType
+        self.selectedProfileType = profileType
         var profile = SyncProfile.preset(for: profileType)
         profile.pruneMB = storageMode.pruneMB
+
+        if isUltraActive {
+            appendLog("[POWER] Saved preferred profile \(profileType.rawValue). Ultra power mode remains active until Mac is on stable AC power.")
+            ultraStatusSubtitle = "Preferred \(profileType.rawValue) resumes when fully AC / not charging"
+            return
+        }
+
         Task {
             do {
                 try await applyNodeSettings(profile: profile, storageMode: storageMode)
             } catch {
                 alertMessage = "Sync profile not changed: \(error.localizedDescription)"
+                showAlert = true
+            }
+        }
+    }
+
+    public func selectWallet(name: String) {
+        Task { @MainActor in
+            do {
+                try await walletManager.selectWallet(name: name)
+                self.walletSnapshot = try? await walletManager.refreshWalletInfo()
+                self.receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                self.refreshCoinbaseRewards()
+                self.refreshFeeQuotes()
+                self.refreshWalletInventory()
+            } catch {
+                self.alertMessage = "Failed to select wallet: \(error.localizedDescription)"
+                self.showAlert = true
+            }
+        }
+    }
+
+    public func refreshWalletInventory() {
+        guard case .running = nodeState else { return }
+        Task { @MainActor in
+            guard !isRefreshingInventory else { return }
+            isRefreshingInventory = true
+            defer { isRefreshingInventory = false }
+            do {
+                let height = blockchainInfo?.blocks ?? 0
+                let summaries = try await walletInventory.refreshInventory(currentBlockHeight: height)
+                self.walletSummaries = summaries
+                self.inventoryError = nil
+            } catch {
+                self.inventoryError = error.localizedDescription
+            }
+        }
+    }
+
+    public func archiveWallet(name: String) {
+        Task { @MainActor in
+            do {
+                try await walletInventory.archiveWallet(name: name)
+                appendLog("[WALLET] Archived wallet: \(name)")
+                refreshWalletInventory()
+                if walletSnapshot?.name == name {
+                    walletSnapshot = nil
+                }
+            } catch {
+                alertMessage = "Failed to archive wallet: \(error.localizedDescription)"
+                showAlert = true
+            }
+        }
+    }
+
+    public func unarchiveWallet(name: String) {
+        Task { @MainActor in
+            do {
+                try await walletInventory.unarchiveWallet(name: name)
+                appendLog("[WALLET] Unarchived wallet: \(name)")
+                refreshWalletInventory()
+            } catch {
+                alertMessage = "Failed to unarchive wallet: \(error.localizedDescription)"
+                showAlert = true
+            }
+        }
+    }
+
+    public func deleteWallet(name: String, typedConfirmation: String, verifiedBackupPath: String) {
+        Task { @MainActor in
+            do {
+                try await walletInventory.deleteWalletFromMac(
+                    name: name,
+                    typedConfirmation: typedConfirmation,
+                    verifiedBackupPath: verifiedBackupPath
+                )
+                appendLog("[WALLET] Safely trashed wallet '\(name)' with verified backup at \(verifiedBackupPath)")
+                refreshWalletInventory()
+                if walletSnapshot?.name == name {
+                    walletSnapshot = nil
+                }
+            } catch {
+                alertMessage = "Wallet deletion refused or failed: \(error.localizedDescription)"
                 showAlert = true
             }
         }

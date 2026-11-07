@@ -1,26 +1,33 @@
 # Sentinel Node Wallet - BTCB2
 
-> **Minimal, self-custodial BTCB2 BLAKE2b MainNet wallet and validating Bitcoin Knots node for macOS.** Active pruning by default, optional archival history, network hashrate, dynamic synchronization ETA, and a secure native Wallet Manager.
+> **Minimal, self-custodial BTCB2 BLAKE2b MainNet wallet and validating Bitcoin Knots node for macOS.** Active pruning by default, automatic Ultra power management on battery/charging, All-Wallet inventory with reversible archive and safe trash deletion, dynamic rolling historical coverage, network hashrate, and a secure native Wallet Manager.
 
-**Development status — not approved for real funds or public binary distribution.** Swift/Python test receipts document development progress, not independent wallet-security certification. Apple Developer ID signing, notarization, secured auto-updates, full wallet recovery and an independent security review are release gates. [Security policy](SECURITY.md) · [Release matrix](TEST_AND_RELEASE_MATRIX.md).
+**Development status — not approved for real funds or public binary distribution.** Swift/Python test receipts document development progress, not independent wallet-security certification. Apple Developer ID signing, notarization, secured auto-updates, full wallet recovery and an independent security review are release gates. [Security policy](SECURITY.md) · [Release matrix](TEST_AND_RELEASE_MATRIX.md) · [V12 Specification](docs/POWER_WALLET_INVENTORY_V12.md).
 
 ## Three screens. No unnecessary services.
 
 | Screen | Purpose |
 | --- | --- |
-| **Node** | Verified BTCB2 BLAKE2b MainNet sync, node health, adaptive time remaining, disk safety, Quiet/Balanced/Fast profiles and storage options. |
-| **Wallet** | Local encrypted descriptor wallet, receive QR, balances, coinbase maturity countdown, fee-aware sending, named trusted recipients and full transaction history. See [Wallet Manager v7](docs/WALLET_MANAGER_V7.md) for planned security requirements and implementation status. |
-| **Network** | Locally derived BLAKE2b network hashrate, 30/120-block trends, freshness and difficulty. |
+| **Node** | Verified BTCB2 BLAKE2b MainNet sync, node health, adaptive time remaining, disk safety, single Settings gear, read-only Storage Footprint rolling history, Quiet/Balanced/Fast profiles with automatic **Ultra Power Saving** when on battery or charging. |
+| **Wallet** | All-Wallet Inventory listing all local wallets with per-wallet balances, reversible **Archive**, safe **Delete from this Mac** via macOS Trash, local encrypted descriptor wallet, receive QR, coinbase maturity countdown, fee-aware sending, and full transaction history. See [V12 Specification](docs/POWER_WALLET_INVENTORY_V12.md) and [Wallet Manager v7](docs/WALLET_MANAGER_V7.md). |
+| **Network** | Locally derived BLAKE2b network hashrate, 30/120-block trends, freshness, P2P peer topology, and difficulty. |
 
 One native **SwiftUI** application supervises one official, verified fork-compatible **Bitcoin Knots** node. Its dedicated app data and Keychain items are isolated from external mining pools, admin consoles, enterprise networks, ASIC firmware and all other projects. No Electron, Docker, hosted wallet, miner, gateway or analytics service.
 
-### BTCB2 MainNet, not ordinary BTC
+### Automatic Ultra Power Policy (V12)
+- **Continuous IOKit Monitoring:** Queries `IOPSCopyPowerSourcesInfo` for battery power, active charging, and macOS Low Power Mode.
+- **Ephemeral Resource Clamps:** When on battery or actively charging, Knots automatically applies lightweight parameters (`par=1`, `dbcache=128MiB`, `maxconnections=12`, `maxuploadtarget=128MiB`) ephemerally without modifying `bitcoin.conf`.
+- **Preferred Profile Preservation:** User's preferred Quiet/Balanced/Fast profile remains safely stored and automatically resumes when the Mac returns to stable AC power without charging.
 
-The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,640**. Ordinary Bitcoin Core, standard SHA-256d Bitcoin MainNet and the same-looking `bc1` addresses are **not proof of this chain**. Every sensitive wallet operation must verify the BLAKE2b block at that height, subsequent trusted chain evidence and a current synchronized tip. Only BTCB2 MainNet is shipped: no TestNet, RegTest, Signet or network selector.
+### All-Wallet Inventory & Multi-Wallet Safety (V12)
+- **Per-Wallet Isolation:** Individual RPC calls (`/wallet/<name>`) for each loaded wallet prevent cross-wiring. Integer satoshi math guarantees zero precision loss.
+- **Multi-Wallet Discovery:** Enumerate all created wallets on disk via `listwalletdir` and `listwallets`. Unloaded wallets display cached timestamps or `Unavailable — Load to refresh`.
+- **Reversible Archive:** Unloads wallet from memory (`unloadwallet`) and collapses into Archived section without modifying files or deleting Keychain credentials.
+- **Safe Reversible Deletion:** Refuses deletion if balance > 0, pending > 0, immature > 0, or balance state is unknown. Requires mandatory fresh backup export, user presence, typed wallet name confirmation, and moves files to **macOS Trash** (`FileManager.trashItem`).
 
 ### Disk space: pruned by default
 
-**Live rolling history:** Clicking **Storage Footprint** opens the existing pruning selector and displays approximately how far back its **currently retained historical blocks** reach, plus a live-data forecast for the selected 550 MiB/1/2/4 GiB/custom budget. Units automatically switch between years, months, weeks, days and hours (up to two meaningful units). The estimate uses Knots' `pruneheight`, first-retained and tip header times, and measured block/undo bytes; it recalibrates during initial sync or after pruning changes. It is **not** financial insurance, a guaranteed reorg window or a wallet backup. [Rolling historical coverage specification](docs/ROLLING_HISTORY_COVERAGE_V11.md).
+**Live rolling history:** Storage Footprint displays approximately how far back its **currently retained historical blocks** reach, plus a live-data forecast for the selected 550 MiB/1/2/4 GiB/custom budget. Units automatically switch between years, months, weeks, days and hours. [Rolling historical coverage specification](docs/ROLLING_HISTORY_COVERAGE_V11.md).
 
 
 
