@@ -20,6 +20,23 @@
 | Development docs + secrets | Swift+Python deterministic tests, clean CI scan, source/vendor/license review | NOT RUN v7 |
 | Public release | Apple Developer ID for app+bitcoind; notarization/staple/Gatekeeper; signed updates; independent wallet audit | BLOCKED |
 
+## Final v13 authentication + complete production freeze gates (NOT RUN)
+
+| Surface / gate | Actual proof | Status |
+| --- | --- | --- |
+| Local username/password/TOTP enrollment and login | No default, hashed verifier, accepted/rejected/replayed/expired OTP and rate limit; core denies direct unauthenticated RPC | NOT RUN — P0 |
+| Apple Passwords on real signed macOS | Owner-approved AASA/domain & Team ID; system-mediated save, relaunch autofill, verification-code entry; entitlement fail-safe | NOT RUN — P0 |
+| Step-up and recovery | Touch ID/device-owner approval and deny/cancel for backup/send/deletion/recipient edits; short session, lock on sleep; recovery codes don't replace wallet backup | NOT RUN — P0 |
+| Wallet encryption and Keychain | -34018/-50 without weakening item; legacy migration preserves secrets; no plaintext fallback | NOT RUN — P0 |
+| Binary/updater provenance | Actual signed Knots checksums+fingerprints (not shell label), pinned BTCB2 fork; Developer ID/notary and signed release updating | NOT RUN — P0 |
+| Prior v12 Ultra correction | Battery/charging effective 4 peers, listen=0, par=1 and low process CPU/disk I/O priority, user prior mode restored | NOT RUN — P0 |
+| Wallets/backup/data safety | All-wallet read/lock/archive/delete/restore on empty test-only data, never funded user wallet | NOT RUN — P0 |
+| Malicious/nonessential code audit | Entire source/dependency/network/launch agent/compiled bundle inventory, SBOM, static/dynamic trace, minimal audited removals, no unreviewed payload | NOT RUN — P0 |
+| All Node/Wallet/Network/settings surfaces | Cross-surface SwiftUI UI and native macOS tests, mainnet fork, pruned disk and energy, peer relay, historic coverage, fiat freshness and explorer privacy | NOT RUN |
+| Independent security signoff | Signed artifacts, license/notice, clean-room restore, Gatekeeper fresh Mac, no remaining P0, reviewer signoff | BLOCKED |
+
+See [v13 login contract](docs/FINAL_WALLET_AUTH_V13.md) and [full production security audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md). A mocked test pass or prior Gemini handoff is not proof of installed/macOS Apple Passwords behavior.
+
 **No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
 
 ## v12 Ultra Power Policy, All-Wallet Inventory & Single Settings UI

@@ -63,7 +63,15 @@ The standalone public `WalletManager.swift` is much smaller: only basic balances
 
 Before claiming the low-storage node finished, integrate and test [Rolling Historical Ledger Coverage](docs/ROLLING_HISTORY_COVERAGE_V11.md), already drafted in PR #4. Clicking Node → Storage Footprint opens the existing Advanced picker; display observed retained-history age and selected-prune projection (years/months/weeks/days/hours), using only local `getblockchaininfo` and first-retained/tip headers, with no false coverage guarantee, no archival default and no per-keystroke RPC. Run Swift and actual Mac tests; preserve users' existing 550/custom retention settings.
 
-## Rules that do not change
+## FINAL OWNER MODIFICATION — Wallet Auth v13, then production security sweep
+
+**Read current merged `main`, open PR #5 and the latest Shared Cognitive Memory V12 correction first.** PR #4 has merged into main; PR #5 remains open. Owner explicitly REPLACED Ultra Battery 12 peers with **4** and disabled inbound listening, with low-priority CPU/disk behavior while battery or actively charging. Reconcile the target Mac before claiming V12 complete.
+
+Implement [v13 Local Username + Password + TOTP and Apple Passwords specification](docs/FINAL_WALLET_AUTH_V13.md) in a *separate* minimal Swift PR after validated v12. macOS Apple Passwords save/autofill requires owner-approved associated domain, static AASA, Apple-signed bundle entitlements and user consent; preserve fallback local login without pretending generic Keychain equals Passwords. Protect Wallet tab and **core wallet RPC methods** with fresh auth and independent owner-presence for sensitive operations; Node/Network continue working locked. Recovery codes and separate wallet encryption/backup must survive login reset. Never upload login or TOTP secrets to a website.
+
+When v13 passes native Mac tests, FREEZE features and execute [full production security audit and removal plan](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md) over ALL source/CI/scripts/Knots/app binaries/dependencies/services/surfaces. Inspect and resolve concrete known issues: Keychain -34018 weaker fallback, swallowed walletpassphrase/walletlock errors, misleading Knots verification helper, ad-hoc build signing, dormant MainNet-unneeded RegTest RPC helpers, duplicate UI settings controls and any actual unneeded or hostile code supported by evidence. Do not delete wallet files, Keychain secrets or chainstate, or claim malware found without independent proof. Include complete PASS/FAIL/NOT RUN, signed/provenance receipts and independent review; do not publish or enable real-funds send while P0s remain.
+
+## Rules that do not change## Rules that do not change
 
 MainNet only; minimal native app; use new-install default 2048 MiB pruned recent-block retention (550 MiB during IBD), preserve older user selections, 50 GiB design objective, optional external SSD archival full-redownload; adaptive synchronization ETA; logo from owner-supplied JPG; strict pool and enterprise infrastructure isolation; wallet data stays at existing app-owned path until approved migration; noncustodial keys never leave device.
 

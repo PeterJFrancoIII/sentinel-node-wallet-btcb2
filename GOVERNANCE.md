@@ -48,6 +48,14 @@ The **Storage Footprint** selector must show two separate quantities: (1) the *o
 - Security regressions block new packaged distributions even when the prior development DMG launches successfully.
 - Avoid collecting private destination addresses, TXIDs, wallet passphrases or metadata in public issue descriptions, screenshots, CI logs or Shared Memory.
 
+## Final feature change and release freeze — v13
+
+The owner requires ONE final Wallet-tab authentication modification: username, strong password and RFC6238 TOTP on a completely local account, with truthful Apple Passwords save/autofill and fresh independent macOS owner-presence for sensitive actions. See [v13 implementation contract](docs/FINAL_WALLET_AUTH_V13.md). Keep Node and Network online without login. Generic Keychain access is not Apple Passwords and a password/TOTP gate does not cryptographically stop same-user/root malware or RPC access without core-level wallet protection.
+
+Following v13, no additional non-security features may be introduced before [all-surfaces production and code-reduction audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md). Require explicit signed app/embedded Knots provenance, wallet recovery, replay-safe signing, owner-approved license, source-to-binary audit and independent review. Prior v12 Ultra Battery correction is **4** max peers + `listen=0`, not Gemini's reported 12.
+
+Production signoff is evidence-driven, not unit-test-count-driven. An Apple Passwords account association requires an owner-authorized webcredentials domain, static AASA and valid signed Team ID/bundle ID; no unrelated business/pool website is used by default. A P0 entitlement or Keychain error cannot trigger a silent downgrade of wallet credential protection.
+
 ## Distribution gates
 
 Public wallet distribution requires valid upstream Knots binary provenance, actual fork/signing evidence, wallet creation/backup/restore security, independently reviewed transaction code, Apple Developer ID signatures on app and embedded binary, notarized/stapled DMG accepted by Gatekeeper, signed Sparkle/EdDSA updates and approved license/third-party notices. Otherwise label artifacts **development only — not suitable for real funds**.
