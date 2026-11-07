@@ -52,6 +52,18 @@ public struct WalletView: View {
     // Transaction Filter
     @State private var selectedTxFilter: String = "all"
 
+    // V13 Local Login & 2FA State
+    @State private var loginUsername: String = ""
+    @State private var loginPassword: String = ""
+    @State private var loginTotpCode: String = ""
+    @State private var loginRecoveryCode: String = ""
+    @State private var showRecoveryLogin: Bool = false
+    @State private var enrollUsername: String = ""
+    @State private var enrollPassword: String = ""
+    @State private var enrollTotpCode: String = ""
+    @State private var isAuthActionInProgress: Bool = false
+    @State private var authLocalError: String? = nil
+
     private var isNodeReadyForWallet: Bool {
         if case .running = state.nodeState { return true }
         return false
@@ -66,19 +78,72 @@ public struct WalletView: View {
 
     public var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                // Header with Chain Identity Verification
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Wallet Manager")
-                            .font(.system(size: 26, weight: .bold))
-                        Text("Encrypted Descriptor Wallet • Native SegWit Bech32 • Integer Satoshi Math")
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
+            if !state.isWalletTabUnlocked {
+                walletAuthLockedView
+            } else {
+                walletMainContentView
+            }
+        }
+        .onAppear {
+            state.refreshAuthState()
+            state.refreshFeeQuotes()
+            state.refreshCoinbaseRewards()
+            state.refreshWalletInventory()
+        }
+        .onChange(of: state.nodeState) { _ in
+            state.refreshWalletInventory()
+        }
+        .sheet(isPresented: $showPreviewSheet) {
+            sendPreviewSheet
+        }
+        .sheet(isPresented: $showAddressBookSheet) {
+            addressBookSheet
+        }
+        .sheet(isPresented: $showCreateModal) {
+            createWalletSheet
+        }
+        .sheet(isPresented: $showOpenRestoreModal) {
+            openOrRestoreWalletSheet
+        }
+        .sheet(isPresented: $showDeleteConfirmationSheet) {
+            deleteWalletSheet
+        }
+    }
+
+    private var walletMainContentView: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            // Header with Chain Identity Verification and Lock button
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Wallet Manager")
+                        .font(.system(size: 26, weight: .bold))
+                    Text("Encrypted Descriptor Wallet • Native SegWit Bech32 • Integer Satoshi Math")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                HStack(spacing: 12) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "person.badge.shield.checkmark.fill")
+                            .foregroundColor(.green)
+                        Text(state.enrolledUsername ?? "Operator")
+                            .font(.system(size: 12, weight: .semibold))
                     }
-                    Spacer()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.1)))
+
+                    Button(action: {
+                        state.lockWallet()
+                    }) {
+                        Label("Lock", systemImage: "lock.fill")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
                     chainIdentityBadge
                 }
+            }
 
                 if state.walletSnapshot == nil {
                     HStack(spacing: 12) {
@@ -484,29 +549,284 @@ public struct WalletView: View {
             }
             .padding(24)
         }
-        .onAppear {
-            state.refreshFeeQuotes()
-            state.refreshCoinbaseRewards()
-            state.refreshWalletInventory()
+
+    private var walletAuthLockedView: some View {
+        VStack(spacing: 24) {
+            HStack {
+                Spacer()
+                chainIdentityBadge
+            }
+
+            VStack(spacing: 12) {
+                Image(systemName: "lock.shield.fill")
+                    .font(.system(size: 52))
+                    .foregroundColor(.blue)
+
+                Text("Wallet Manager Locked")
+                    .font(.system(size: 24, weight: .bold))
+
+                Text("Operator username, strong password and 2-factor authentication (TOTP) are required to access wallets, balances, and keys.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 480)
+            }
+            .padding(.top, 20)
+
+            // Apple Passwords Honesty Callout
+            HStack(spacing: 10) {
+                Image(systemName: "key.horizontal")
+                    .font(.title3)
+                    .foregroundColor(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Apple Passwords Support Status")
+                        .font(.caption)
+                        .bold()
+                    Text("System-mediated Apple Passwords saving requires verified Developer ID associated-domain webcredentials AASA. Local manual login with standard authenticator app (RFC 6238) is active.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+            .frame(maxWidth: 480)
+
+            if !state.isAuthEnrolled {
+                enrollmentCard
+            } else {
+                loginCard
+            }
         }
-        .onChange(of: state.nodeState) { _ in
-            state.refreshWalletInventory()
+        .padding(32)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var enrollmentCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("First-Time Operator Setup")
+                .font(.headline)
+            Text("Create a unique local username and strong password (min 10 chars, uppercase, lowercase, number, special character).")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Username").font(.caption).bold()
+                TextField("operator", text: $enrollUsername)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("user-enroll-name")
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Password").font(.caption).bold()
+                SecureField("Strong Password", text: $enrollPassword)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("user-enroll-password")
+            }
+
+            if let data = state.generatedEnrollmentData {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("2-Factor Authenticator Setup (RFC 6238)").font(.caption).bold()
+                    Text("Scan or enter this key in your authenticator app (Apple Passwords, Google Authenticator, etc.):")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
+                    HStack {
+                        Text(data.secretBase32)
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .textSelection(.enabled)
+                        Spacer()
+                        Button("Copy Key") {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(data.secretBase32, forType: .string)
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.secondary.opacity(0.1)))
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Emergency Recovery Codes (Save these offline!)").font(.caption2).bold()
+                        Text(data.recoveryCodes.joined(separator: "  •  "))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.orange.opacity(0.08)))
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Enter 6-Digit Authenticator Code to Confirm").font(.caption).bold()
+                        TextField("000000", text: $enrollTotpCode)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 140)
+                            .accessibilityIdentifier("user-enroll-totp")
+                    }
+                }
+            } else {
+                Button("Generate 2FA Key & Emergency Codes") {
+                    state.prepareEnrollment(username: enrollUsername)
+                }
+                .buttonStyle(.bordered)
+                .disabled(enrollUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let err = authLocalError {
+                Text(err)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+
+            Button(action: {
+                Task {
+                    isAuthActionInProgress = true
+                    authLocalError = nil
+                    defer { isAuthActionInProgress = false }
+                    do {
+                        try await state.enrollUser(password: enrollPassword, totpCode: enrollTotpCode)
+                    } catch {
+                        authLocalError = error.localizedDescription
+                    }
+                }
+            }) {
+                if isAuthActionInProgress {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Text("Complete Enrollment & Unlock")
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(state.generatedEnrollmentData == nil || enrollTotpCode.count != 6 || isAuthActionInProgress)
         }
-        .sheet(isPresented: $showPreviewSheet) {
-            sendPreviewSheet
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.windowBackgroundColor)))
+        .frame(maxWidth: 480)
+    }
+
+    private var loginCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Operator Sign-In")
+                .font(.headline)
+
+            if !showRecoveryLogin {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Username").font(.caption).bold()
+                    TextField("Username", text: $loginUsername)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("user-login-name")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Password").font(.caption).bold()
+                    SecureField("Password", text: $loginPassword)
+                        .textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("user-login-password")
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("6-Digit 2FA Verification Code").font(.caption).bold()
+                    TextField("000000", text: $loginTotpCode)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 140)
+                        .accessibilityIdentifier("user-login-totp")
+                }
+
+                if let err = authLocalError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                HStack {
+                    Button(action: {
+                        Task {
+                            isAuthActionInProgress = true
+                            authLocalError = nil
+                            defer { isAuthActionInProgress = false }
+                            do {
+                                try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                            } catch {
+                                authLocalError = error.localizedDescription
+                            }
+                        }
+                    }) {
+                        if isAuthActionInProgress {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Unlock Wallet Manager")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("user-login-submit")
+                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || loginTotpCode.count != 6 || isAuthActionInProgress)
+
+                    Spacer()
+
+                    Button("Lost 2FA? Use Recovery Code") {
+                        showRecoveryLogin = true
+                        authLocalError = nil
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Username").font(.caption).bold()
+                    TextField("Username", text: $loginUsername)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Emergency One-Time Recovery Code").font(.caption).bold()
+                    TextField("8-character code", text: $loginRecoveryCode)
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                if let err = authLocalError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                HStack {
+                    Button(action: {
+                        Task {
+                            isAuthActionInProgress = true
+                            authLocalError = nil
+                            defer { isAuthActionInProgress = false }
+                            do {
+                                try await state.loginWithRecoveryCode(username: loginUsername, code: loginRecoveryCode)
+                            } catch {
+                                authLocalError = error.localizedDescription
+                            }
+                        }
+                    }) {
+                        if isAuthActionInProgress {
+                            ProgressView().controlSize(.small)
+                        } else {
+                            Text("Unlock with Recovery Code")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(loginUsername.isEmpty || loginRecoveryCode.isEmpty || isAuthActionInProgress)
+
+                    Spacer()
+
+                    Button("Back to Standard Login") {
+                        showRecoveryLogin = false
+                        authLocalError = nil
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption)
+                    .foregroundColor(.blue)
+                }
+            }
         }
-        .sheet(isPresented: $showAddressBookSheet) {
-            addressBookSheet
-        }
-        .sheet(isPresented: $showCreateModal) {
-            createWalletSheet
-        }
-        .sheet(isPresented: $showOpenRestoreModal) {
-            openOrRestoreWalletSheet
-        }
-        .sheet(isPresented: $showDeleteConfirmationSheet) {
-            deleteWalletSheet
-        }
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.windowBackgroundColor)))
+        .frame(maxWidth: 480)
     }
 
     private var walletInventorySection: some View {
@@ -664,14 +984,34 @@ public struct WalletView: View {
 
                 if !summary.isArchived {
                     Button("Archive") {
-                        state.archiveWallet(name: summary.name)
+                        Task {
+                            do {
+                                _ = try await state.requestHighRiskApproval(
+                                    action: "archive",
+                                    reason: "Authorize archiving wallet '\(summary.name)' from active memory"
+                                )
+                                state.archiveWallet(name: summary.name)
+                            } catch {
+                                // Cancelled or failed
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("Unload wallet from memory and collapse into Archived list. No files are deleted.")
                 } else {
                     Button("Unarchive") {
-                        state.unarchiveWallet(name: summary.name)
+                        Task {
+                            do {
+                                _ = try await state.requestHighRiskApproval(
+                                    action: "unarchive",
+                                    reason: "Authorize unarchiving wallet '\(summary.name)' to active memory"
+                                )
+                                state.unarchiveWallet(name: summary.name)
+                            } catch {
+                                // Cancelled or failed
+                            }
+                        }
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -798,12 +1138,22 @@ public struct WalletView: View {
 
                 Button("Move to macOS Trash") {
                     guard let name = walletToDelete?.name else { return }
-                    state.deleteWallet(
-                        name: name,
-                        typedConfirmation: typedDeleteName,
-                        verifiedBackupPath: deleteBackupPath
-                    )
-                    showDeleteConfirmationSheet = false
+                    Task {
+                        do {
+                            _ = try await state.requestHighRiskApproval(
+                                action: "delete",
+                                reason: "Authorize deletion of empty wallet '\(name)' to macOS Trash"
+                            )
+                            state.deleteWallet(
+                                name: name,
+                                typedConfirmation: typedDeleteName,
+                                verifiedBackupPath: deleteBackupPath
+                            )
+                            showDeleteConfirmationSheet = false
+                        } catch {
+                            deleteErrorMessage = "Device authorization failed: \(error.localizedDescription)"
+                        }
+                    }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)

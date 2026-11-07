@@ -127,6 +127,7 @@ public actor WalletManager {
     public let rpcClient: BitcoinRPCClient
     public let keychainHelper: KeychainHelper
     public let addressBook: AddressBook
+    public let authCoordinator: WalletAuthCoordinator?
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     private var isCreatingWallet = false
@@ -134,11 +135,18 @@ public actor WalletManager {
     public init(
         rpcClient: BitcoinRPCClient,
         keychainHelper: KeychainHelper = .shared,
-        addressBook: AddressBook = AddressBook()
+        addressBook: AddressBook = AddressBook(),
+        authCoordinator: WalletAuthCoordinator? = nil
     ) {
         self.rpcClient = rpcClient
         self.keychainHelper = keychainHelper
         self.addressBook = addressBook
+        self.authCoordinator = authCoordinator
+    }
+
+    public func ensureAuthenticated(capability: WalletAuthCapability?) async throws {
+        guard let coordinator = self.authCoordinator else { return }
+        try await coordinator.verifyCapability(capability)
     }
 
     /// Automatically loads an existing descriptor wallet on node startup.
@@ -189,8 +197,10 @@ public actor WalletManager {
     public func createEncryptedDescriptorWallet(
         name: String,
         passphrase: String,
-        storeInKeychain: Bool = false
+        storeInKeychain: Bool = false,
+        capability: WalletAuthCapability? = nil
     ) async throws {
+        try await ensureAuthenticated(capability: capability)
         guard Self.isValidWalletName(name) else {
             throw WalletSecurityError.invalidWalletName
         }
@@ -247,23 +257,25 @@ public actor WalletManager {
     }
 
     /// Loads an existing wallet by name.
-    public func loadWallet(name: String) async throws {
+    public func loadWallet(name: String, capability: WalletAuthCapability? = nil) async throws {
+        try await ensureAuthenticated(capability: capability)
         guard Self.isValidWalletName(name) else { throw WalletSecurityError.invalidWalletName }
         let loaded = try await rpcClient.listWallets()
         if !loaded.contains(name) {
             _ = try await rpcClient.loadWallet(name: name)
         }
         self.currentWalletName = name
-        _ = try await refreshWalletInfo()
+        _ = try await refreshWalletInfo(capability: capability)
     }
 
     /// Selects an existing wallet by name (alias for loadWallet).
-    public func selectWallet(name: String) async throws {
-        try await loadWallet(name: name)
+    public func selectWallet(name: String, capability: WalletAuthCapability? = nil) async throws {
+        try await loadWallet(name: name, capability: capability)
     }
 
     /// Fetches latest balances and encryption status for the active wallet.
-    public func refreshWalletInfo() async throws -> WalletSnapshot {
+    public func refreshWalletInfo(capability: WalletAuthCapability? = nil) async throws -> WalletSnapshot {
+        try await ensureAuthenticated(capability: capability)
         let info = try await rpcClient.getWalletInfo(walletName: currentWalletName)
         let balances = try await rpcClient.getBalances(walletName: currentWalletName)
 
@@ -357,13 +369,15 @@ public actor WalletManager {
     }
 
     /// Generates a new Bech32 (BIP-173 / native SegWit) receive address.
-    public func generateReceiveAddress(label: String = "") async throws -> String {
-        try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
+    public func generateReceiveAddress(label: String = "", capability: WalletAuthCapability? = nil) async throws -> String {
+        try await ensureAuthenticated(capability: capability)
+        return try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
     }
 
     /// Fetches recent wallet transactions (receive, send, coinbase).
-    public func fetchRecentTransactions(count: Int = 30) async throws -> [TransactionRecord] {
-        try await rpcClient.listTransactions(walletName: currentWalletName, count: count)
+    public func fetchRecentTransactions(count: Int = 30, capability: WalletAuthCapability? = nil) async throws -> [TransactionRecord] {
+        try await ensureAuthenticated(capability: capability)
+        return try await rpcClient.listTransactions(walletName: currentWalletName, count: count)
     }
 
     /// Prepares an immutable, non-signing funded transaction preview.
@@ -371,8 +385,10 @@ public actor WalletManager {
     public func prepareSendPreview(
         to destinationAddress: String,
         amountSats: Int64,
-        feeQuote: FeeQuote
+        feeQuote: FeeQuote,
+        capability: WalletAuthCapability? = nil
     ) async throws -> FundedTxPreview {
+        try await ensureAuthenticated(capability: capability)
         // Fail closed: v7's prior 141-vbyte estimate/empty selected inputs were NOT a funded preview.
         // A safe implementation must use the real Knots-funded PSBT and revalidate exact outputs,
         // selected UTXOs, change and policy before allowing one-time user authorization.
@@ -380,16 +396,12 @@ public actor WalletManager {
     }
 
     /// Authorizes and executes a validated transaction preview.
-    /// Strictly enforces:
-    /// 1. Token validity and expiration window (<60s)
-    /// 2. Immutable binding to destination address and amount
-    /// 3. Allowlist validation at signing time
-    /// 4. macOS user-presence biometric / device password challenge
-    /// 5. Temporary synchronous wallet unlock and guaranteed synchronous walletLock in defer
     public func executeAuthorizedSend(
         preview: FundedTxPreview,
-        explicitPassphrase: String? = nil
+        explicitPassphrase: String? = nil,
+        capability: WalletAuthCapability? = nil
     ) async throws -> String {
+        try await ensureAuthenticated(capability: capability)
         // No broadcast unless a verified BLAKE2b SIGHASH_UNIFIED transaction is signed with
         // fresh macOS user presence and immutable PSBT preview authorization.
         // This guard applies to ALL callers, not only the SwiftUI button.
@@ -397,26 +409,31 @@ public actor WalletManager {
     }
 
     /// Legacy compatibility send method with strict V7 guards.
-    public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
+    public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil, capability: WalletAuthCapability? = nil) async throws -> String {
+        try await ensureAuthenticated(capability: capability)
         // Legacy API must never bypass the audited signing gate.
         throw WalletSecurityError.signingPathUnverified
     }
 
     /// Restores a wallet from an existing backup file.
-    public func restoreWallet(name: String, backupFile: URL) async throws -> String {
+    public func restoreWallet(name: String, backupFile: URL, capability: WalletAuthCapability? = nil) async throws -> String {
+        try await ensureAuthenticated(capability: capability)
         let resp = try await rpcClient.restoreWallet(name: name, backupFile: backupFile.path)
         self.currentWalletName = resp.name
-        _ = try await refreshWalletInfo()
+        _ = try await refreshWalletInfo(capability: capability)
         return resp.name
     }
 
     /// Backs up the wallet database to an isolated, operator-specified path.
-    public func exportBackup(to fileURL: URL) async throws {
+    public func exportBackup(to fileURL: URL, capability: WalletAuthCapability? = nil) async throws {
+        try await ensureAuthenticated(capability: capability)
         try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: currentWalletName)
     }
 
-    /// Generates blocks to address (available on regtest for testing).
+    #if DEBUG
+    /// Development/Test only: regtest block generation helper. Strictly excluded from production release builds.
     public func generateRegtestBlocks(count: Int, address: String) async throws -> [String] {
         try await rpcClient.generateToAddress(blocks: count, address: address)
     }
+    #endif
 }

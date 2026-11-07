@@ -200,9 +200,12 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         return try await call(method: "createwallet", params: params)
     }
 
+    #if DEBUG
+    /// Development/Test only: regtest mining helper. Strictly excluded from production release builds.
     public func generateToAddress(blocks: Int, address: String) async throws -> [String] {
         try await call(method: "generatetoaddress", params: [blocks, address])
     }
+    #endif
 
     public func getWalletInfo(walletName: String? = nil) async throws -> WalletInfo {
         try await call(method: "getwalletinfo", walletName: walletName)

@@ -108,12 +108,6 @@ public struct ContentView: View {
                         state.applyProfile(newProfile)
                     }
                 }
-
-                Button(action: { showAdvancedSheet = true }) {
-                    Image(systemName: "gearshape.fill")
-                }
-                .buttonStyle(.plain)
-                .padding(.leading, 4)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)

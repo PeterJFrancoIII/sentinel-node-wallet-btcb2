@@ -43,6 +43,15 @@ public final class AppState: ObservableObject {
     @Published public var isRefreshingInventory: Bool = false
     @Published public var inventoryError: String? = nil
 
+    // V13 Authentication State
+    public let authCoordinator: WalletAuthCoordinator
+    @Published public var authSession: WalletAuthCapability? = nil
+    @Published public var isAuthEnrolled: Bool = false
+    @Published public var enrolledUsername: String? = nil
+    @Published public var isWalletTabUnlocked: Bool = false
+    @Published public var authErrorMessage: String? = nil
+    @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
+
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
     private var healthTimer: AnyCancellable?
@@ -59,7 +68,9 @@ public final class AppState: ObservableObject {
         let book = AddressBook()
         self.addressBook = book
         self.nodeManager = NodeManager(config: config)
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book)
+        let authCoord = WalletAuthCoordinator(dataDirectory: config.dataDirectory)
+        self.authCoordinator = authCoord
+        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book, authCoordinator: authCoord)
         self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
@@ -71,6 +82,7 @@ public final class AppState: ObservableObject {
 
         setupBindings()
         startHealthMonitoring()
+        refreshAuthState()
     }
 
     private func setupBindings() {
@@ -261,6 +273,89 @@ public final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - V13 Authentication Flow
+
+    public func refreshAuthState() {
+        Task { @MainActor in
+            self.isAuthEnrolled = await authCoordinator.isEnrolled
+            self.enrolledUsername = await authCoordinator.enrolledUsername
+            if let cur = await authCoordinator.currentSession {
+                self.authSession = cur
+                self.isWalletTabUnlocked = true
+            } else {
+                self.authSession = nil
+                self.isWalletTabUnlocked = false
+            }
+        }
+    }
+
+    public func prepareEnrollment(username: String) {
+        Task { @MainActor in
+            let clean = username.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !clean.isEmpty else { return }
+            self.enrolledUsername = clean
+            self.generatedEnrollmentData = await authCoordinator.generateEnrollmentSecret(username: clean)
+        }
+    }
+
+    public func enrollUser(password: String, totpCode: String) async throws {
+        guard let data = generatedEnrollmentData else {
+            throw WalletAuthError.invalidCredentials
+        }
+        let username = enrolledUsername ?? "operator"
+        let session = try await authCoordinator.enroll(
+            username: username,
+            password: password,
+            secretBase32: data.secretBase32,
+            totpCode: totpCode,
+            recoveryCodes: data.recoveryCodes
+        )
+        self.authSession = session
+        self.isAuthEnrolled = true
+        self.enrolledUsername = session.username
+        self.isWalletTabUnlocked = true
+        self.authErrorMessage = nil
+        self.appendLog("[AUTH] Operator enrolled and Wallet Manager unlocked.")
+        self.refreshWallet()
+    }
+
+    public func loginUser(username: String, password: String, totpCode: String) async throws {
+        let session = try await authCoordinator.login(username: username, password: password, totpCode: totpCode)
+        self.authSession = session
+        self.isWalletTabUnlocked = true
+        self.authErrorMessage = nil
+        self.appendLog("[AUTH] Operator logged in. Wallet Manager unlocked.")
+        self.refreshWallet()
+    }
+
+    public func loginWithRecoveryCode(username: String, code: String) async throws {
+        let session = try await authCoordinator.loginWithRecoveryCode(username: username, code: code)
+        self.authSession = session
+        self.isWalletTabUnlocked = true
+        self.authErrorMessage = nil
+        self.appendLog("[AUTH] Operator logged in via recovery code. Wallet Manager unlocked.")
+        self.refreshWallet()
+    }
+
+    public func lockWallet() {
+        Task { @MainActor in
+            await authCoordinator.invalidateSession()
+            self.authSession = nil
+            self.isWalletTabUnlocked = false
+            self.walletSnapshot = nil
+            self.receiveAddress = ""
+            self.transactions = []
+            self.appendLog("[AUTH] Wallet Manager locked.")
+        }
+    }
+
+    public func requestHighRiskApproval(action: String, reason: String) async throws -> HighRiskApproval {
+        guard let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        return try await authCoordinator.requestHighRiskApproval(capability: session, action: action, reason: reason)
+    }
+
     /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
     /// and encrypted descriptor wallet onboarding in a single integrated workflow.
     public func startNode() {
@@ -326,11 +421,11 @@ public final class AppState: ObservableObject {
         name: String, passphrase: String, storeInKeychain: Bool
     ) async throws {
         try await walletManager.createEncryptedDescriptorWallet(
-            name: name, passphrase: passphrase, storeInKeychain: storeInKeychain
+            name: name, passphrase: passphrase, storeInKeychain: storeInKeychain, capability: self.authSession
         )
-        walletSnapshot = try await walletManager.refreshWalletInfo()
-        receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-        transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
+        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         startupStatus = "Ready"
         appendLog("[WALLET] Encrypted descriptor wallet '\(name)' verified and ready.")
     }
@@ -338,10 +433,10 @@ public final class AppState: ObservableObject {
     /// A prior attempt may have succeeded before its response was lost.
     /// Load it safely instead of creating a second wallet over the same name.
     public func loadExistingWallet(name: String) async throws {
-        try await walletManager.loadWallet(name: name)
-        walletSnapshot = try await walletManager.refreshWalletInfo()
-        receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-        transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        try await walletManager.loadWallet(name: name, capability: self.authSession)
+        walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
+        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         startupStatus = "Ready"
         appendLog("[WALLET] Existing wallet '\(name)' loaded.")
     }
@@ -446,11 +541,11 @@ public final class AppState: ObservableObject {
     }
 
     public func restoreWallet(name: String, backupFile: URL) async throws -> String {
-        let restoredName = try await walletManager.restoreWallet(name: name, backupFile: backupFile)
+        let restoredName = try await walletManager.restoreWallet(name: name, backupFile: backupFile, capability: self.authSession)
         appendLog("[WALLET] Successfully restored wallet '\(restoredName)' from \(backupFile.lastPathComponent)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-        self.receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         return restoredName
     }
 
@@ -562,7 +657,7 @@ public final class AppState: ObservableObject {
     public func generateNewReceiveAddress() {
         Task {
             do {
-                let addr = try await walletManager.generateReceiveAddress()
+                let addr = try await walletManager.generateReceiveAddress(capability: self.authSession)
                 self.receiveAddress = addr
                 appendLog("[WALLET] Generated new receive address: \(addr)")
             } catch {
@@ -575,11 +670,12 @@ public final class AppState: ObservableObject {
     public func refreshWallet() {
         Task {
             do {
-                let snap = try await walletManager.refreshWalletInfo()
+                guard self.isWalletTabUnlocked else { return }
+                let snap = try await walletManager.refreshWalletInfo(capability: self.authSession)
                 self.walletSnapshot = snap
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
             } catch {
-                // Wallet may not be loaded yet
+                // Wallet may not be loaded yet or locked
             }
         }
     }

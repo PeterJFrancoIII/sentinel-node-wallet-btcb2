@@ -163,6 +163,23 @@ public final class KeychainHelper: Sendable {
                 kSecMatchLimit as String: kSecMatchLimitOne
             ]
             status = SecItemCopyMatching(fallbackQuery as CFDictionary, &dataTypeRef)
+            if status == errSecSuccess {
+                // When using fallback item where SecAccessControl.userPresence was not enforced at the OS Keychain level
+                // (e.g. ad-hoc signed development builds), enforce device-owner authentication explicitly via LAContext.
+                var authError: NSError?
+                if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) {
+                    var authSuccess = false
+                    let sema = DispatchSemaphore(value: 0)
+                    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Authorize access to BTCB2 wallet encryption key for " + account) { success, _ in
+                        authSuccess = success
+                        sema.signal()
+                    }
+                    _ = sema.wait(timeout: .now() + 60)
+                    guard authSuccess else {
+                        throw KeychainError.userPresenceCanceled
+                    }
+                }
+            }
         }
 
         guard status == errSecSuccess else {
