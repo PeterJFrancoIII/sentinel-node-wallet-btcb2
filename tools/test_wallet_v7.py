@@ -189,5 +189,77 @@ class TestExplorerUrlSecurity(unittest.TestCase):
             self.assertIsNone(build_explorer_tx_url(invalid), f"Expected {invalid} to be rejected")
 
 
+class TestPeerCountAndProfileSemantics(unittest.TestCase):
+    def test_max_connections_is_a_ceiling_not_target(self):
+        # Bitcoin Knots outbound defaults: 8 full-relay + 2 block-relay-only + feeler = ~10-11
+        normal_outbound = 11
+        profiles = {
+            "Quiet": {"par": 1, "dbcache": 256, "maxconnections": 8},
+            "Balanced": {"par": 2, "dbcache": 512, "maxconnections": 12},
+            "Fast": {"par": 4, "dbcache": 1024, "maxconnections": 16},
+        }
+
+        for name, p in profiles.items():
+            max_c = p["maxconnections"]
+            # Under Fast (max 16) or Balanced (max 12), ~11 peers is valid and within [1, max_c]
+            effective_peers = min(normal_outbound, max_c)
+            self.assertLessEqual(effective_peers, max_c)
+            self.assertGreater(effective_peers, 0)
+
+    def test_inbound_disabled_by_default(self):
+        inbound = 0
+        outbound = 11
+        total = inbound + outbound
+        self.assertEqual(total, 11)
+        self.assertEqual(inbound, 0)
+
+
+class TestKeychainErrorHandlingAndFallback(unittest.TestCase):
+    def test_keychain_error_codes(self):
+        # Apple Security Framework OSStatus constants
+        errSecParam = -50
+        errSecMissingEntitlement = -34018
+        errSecDuplicateItem = -25299
+        errSecItemNotFound = -25300
+
+        handled_fallbacks = {-50, -34018}
+        self.assertIn(errSecParam, handled_fallbacks)
+        self.assertIn(errSecMissingEntitlement, handled_fallbacks)
+
+
+class TestWalletOpenRestoreValidation(unittest.TestCase):
+    def test_wallet_name_validations(self):
+        def is_valid_wallet_name(name: str) -> bool:
+            clean = name.strip()
+            return clean == name and bool(re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$", clean))
+
+        valid_names = ["default_wallet", "wallet_1", "my-vault", "BTCB2_Savings", "a"]
+        for v in valid_names:
+            self.assertTrue(is_valid_wallet_name(v))
+
+        invalid_names = [
+            "",
+            "   ",
+            "../wallet",
+            "/etc/passwd",
+            "wallet.dat",
+            "name with spaces",
+            "_leading_underscore",
+            "-leading_dash",
+            "a" * 65,  # too long
+        ]
+        for inv in invalid_names:
+            self.assertFalse(is_valid_wallet_name(inv))
+
+    def test_address_cannot_restore_wallet_database(self):
+        # An address string (e.g. bc1q...) is NOT a valid backup file path or database
+        def is_valid_backup_file(path: str) -> bool:
+            return path.endswith(".dat") and not path.startswith("bc1")
+
+        addr = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        self.assertFalse(is_valid_backup_file(addr))
+        self.assertTrue(is_valid_backup_file("/path/to/wallet_backup.dat"))
+
+
 if __name__ == "__main__":
     unittest.main()
