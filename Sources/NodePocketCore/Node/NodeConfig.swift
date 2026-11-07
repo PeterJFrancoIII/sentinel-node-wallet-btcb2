@@ -73,11 +73,15 @@ public struct NodeConfig: Sendable {
         let values = text.components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { $0.hasPrefix("prune=") }
-        guard let line = values.last,
-              let target = Int(line.dropFirst("prune=".count)) else {
-            // Existing unknown legacy configuration: retain explicit caller
-            // setting and flag for Mac-side migration audit before launch.
-            return fallback
+        guard let line = values.last else {
+            // Older bitcoin.conf files without a prune option are archival by
+            // default. Never rewrite them as pruned on an app update.
+            return .archival(externalDataDir: url.deletingLastPathComponent())
+        }
+        guard let target = Int(line.dropFirst("prune=".count)) else {
+            // Malformed legacy config: do not reinterpret malformed retention
+            // rules as permission to delete historical blocks.
+            return .archival(externalDataDir: url.deletingLastPathComponent())
         }
         if target >= StorageMode.minimumPruneMB {
             return .compact(pruneMB: target)
