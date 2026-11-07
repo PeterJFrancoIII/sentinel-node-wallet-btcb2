@@ -16,6 +16,10 @@ public struct BlockchainInfo: Codable, Sendable {
     public let initialblockdownload: Bool
     public let pruned: Bool
     public let pruneheight: Int?
+    /// Estimated byte size of retained block and undo files (not chainstate or wallet).
+    public let size_on_disk: Int64?
+    /// Current automatic pruning target in BYTES, if supported.
+    public let prune_target_size: Int64?
 }
 
 public struct NetworkInfo: Codable, Sendable {

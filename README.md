@@ -20,13 +20,17 @@ The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,64
 
 ### Disk space: pruned by default
 
+**Live rolling history:** Clicking **Storage Footprint** opens the existing pruning selector and displays approximately how far back its **currently retained historical blocks** reach, plus a live-data forecast for the selected 550 MiB/1/2/4 GiB/custom budget. Units automatically switch between years, months, weeks, days and hours (up to two meaningful units). The estimate uses Knots' `pruneheight`, first-retained and tip header times, and measured block/undo bytes; it recalibrates during initial sync or after pruning changes. It is **not** financial insurance, a guaranteed reorg window or a wallet backup. [Rolling historical coverage specification](docs/ROLLING_HISTORY_COVERAGE_V11.md).
+
+
+
 | Mode | Policy |
 | --- | --- |
-| **Compact** (default) | `prune=550` and `pruneduringinit=550` MiB, beginning with initial sync; selectable 550 MiB, 1/2/4 GiB or validated custom value. |
+| **Compact** (default) | New installs use `prune=2048` MiB after initial sync and `pruneduringinit=550` MiB while syncing. Selectable 550 MiB minimum, 1/2/4 GiB or validated custom. Existing settings remain unchanged. |
 | **Storage protection** | Warn at 35 GiB app data; graceful pause by 40 GiB or around 10–12 GiB host free, preserving wallet data. Target **under 50 GiB total**, not a hard guarantee. |
 | **Full History** (explicit opt-in) | `prune=0`, complete historical redownload/reindex, sufficient capacity (typically a dedicated external SSD), verified backup and safe rollback. |
 
-**550 MiB limits retained block/undo files, not the entire node directory.** Chainstate, indexes, wallet files and temporary operations consume more space. Even a pruned node downloads and validates historical blocks before discarding them; it remains a **fully validating node**. Full History additionally stores and can serve historical blocks when reachable.
+**550 MiB during IBD and the 2048 MiB post-sync target limit retained block/undo files, not the entire node directory.** Chainstate, indexes, wallet files and temporary operations consume more space. Even a pruned node downloads and validates historical blocks before discarding them; it remains a **fully validating node**. Full History additionally stores and can serve historical blocks when reachable.
 
 ### Wallet Manager — target v7 parity with the Admin Console
 
@@ -37,6 +41,10 @@ The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,64
 - **Security first:** Keychain user presence, encrypted wallets only, replay-safe SIGHASH_UNIFIED signing verified on the actual fork, preview bound to the eventual broadcast, no plaintext secret fallback, no remote wallet RPC. **Sending is not approved until all v7 P0 gates are proven and tested.**
 
 A hot wallet on a fully compromised Mac cannot promise perfect protection. Enable FileVault, keep macOS updated, protect login credentials and consider an offline/hardware signer for high-value funds.
+
+## Minimal consensus-security node defaults
+
+The default is **Balanced**: 2 verification threads, 512 MiB database cache, a **24-peer ceiling**, and modest recent-block retention. Quiet allows 16 maximum peers and Fast 32; these are capacities, not guarantees of actual peer count. Around 10–11 automatically selected outbound peers can be normal across every profile. The node independently validates BTCB2 MainNet, relays blocks and transactions, and permits inbound P2P when reachable, but never automatically maps the router (`natpmp=0`, `upnp=0`). RPC stays on 127.0.0.1. Changes must not force a new wallet, reset sync, open router ports or modify an existing prune target. [Consensus security specification](docs/MINIMAL_CONSENSUS_SECURITY_V10.md).
 
 ## Sync modes and generated wallet encryption passphrases (candidate fix)
 

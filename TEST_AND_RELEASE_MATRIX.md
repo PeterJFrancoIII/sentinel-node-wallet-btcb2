@@ -16,11 +16,21 @@
 | Explorer link | Strict 64 lowercase/uppercase hex, `mempool.guide/tx/`, explicit click; no silent network request | NOT RUN |
 | Wallet backup/restore | Empty wallet + contacts backup, Keychain auth, prune birth-height warning, no overwrite/data loss | NOT RUN — P0 |
 | App isolation + minimalism | One node, three views, no DATUM/miner/cloud integration, no production alternate chains | TO REVERIFY |
-| Resource/storage | 550MiB prune from IBD, 35/40GiB disk warnings/stops, actual peak disk and CPU/RSS/energy | TO REVERIFY |
+| Resource/storage | New-install prune=2048 after IBD and pruneduringinit=550 while IBD; preserve older custom/550/archive config. 35/40 GiB disk guards, measured peak disk and CPU/RSS/energy | TO REVERIFY |
 | Development docs + secrets | Swift+Python deterministic tests, clean CI scan, source/vendor/license review | NOT RUN v7 |
 | Public release | Apple Developer ID for app+bitcoind; notarization/staple/Gatekeeper; signed updates; independent wallet audit | BLOCKED |
 
 **No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
+
+## v11 live rolling-history coverage
+
+| Scenario | Required proof | Current status |
+| --- | --- | --- |
+| Actual retained-history age | Compare `pruneheight`, first-retained block header, best tip header timestamps and block count with UI | NOT RUN on real Knots |
+| Selected-size projection | 550 MiB / 1 GiB / 2 GiB / 4 GiB / custom recomputes immediately from sampled block/undo byte density; no additional per-keystroke RPC | Swift tests authored, NOT RUN |
+| Automatic time units | Years/months/weeks/days/hours and combined two-unit bounds; invalid values fail safely | Swift tests authored, NOT RUN |
+| During IBD or missing data | Actual as-of current validated tip where possible, projected coverage displays Calibrating instead of false live-tip forecast | Swift tests authored, NOT RUN |
+| Non-invasive safety | No node restart until Apply, no wallet or chain writes, no extra service or unintended archival mode | NOT RUN on Mac |
 
 ## Candidate bug-fix acceptance (not yet Mac-validated)
 

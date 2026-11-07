@@ -26,7 +26,7 @@ final class NodeSubprocessIntegrationTests: XCTestCase {
 
         // 3. Verify content
         let content = try String(contentsOf: config.configFileURL, encoding: .utf8)
-        XCTAssertTrue(content.contains("prune=550"))
+        XCTAssertTrue(content.contains("prune=\(StorageMode.defaultPruneMB)"))
         XCTAssertTrue(content.contains("pruneduringinit=550"))
         XCTAssertTrue(content.contains("rpcbind=127.0.0.1"))
         XCTAssertTrue(content.contains("rpcallowip=127.0.0.1"))

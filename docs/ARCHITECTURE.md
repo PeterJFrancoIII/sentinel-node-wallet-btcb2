@@ -46,8 +46,8 @@ flowchart TD
 Sentinel Node Wallet implements a two-tier storage model tailored for constrained Apple Silicon laptops:
 
 ### A. Compact Pruned Mode (Default)
-- **Settings:** `prune=550` and `pruneduringinit=550` written directly to `bitcoin.conf`.
-- **Block Retention:** Keeps only the latest 550 MiB of raw block and undo files.
+- **Settings:** new-install `prune=2048` with `pruneduringinit=550` MiB; users can choose any >=550 MiB and legacy settings must not be overwritten.
+- **Block Retention:** New installations retain ~2 GiB raw block/undo files post-sync, and the 550 MiB minimum during initial sync; this is not total disk usage.
 - **Node Validation:** Full validation from genesis block; every transaction and script is validated locally before pruning older blocks.
 - **Safety Thresholds:**
   - Alert triggered when total datadir reaches 35 GB.
@@ -81,7 +81,14 @@ The verification time-remaining estimator continuously monitors initial block do
 
 ---
 
+## Rolling block-history observability (v11)
+
+Existing Storage Footprint card opens Advanced and provides live `pruneheight`-to-tip block time coverage. The selected pruning size previews a bounded projection using `getblockchaininfo.size_on_disk` and `prune_target_size`, not assumptions about the entire historical blockchain's density. Recalculate on every UI selection from cached sample, poll local headers at most every 120 seconds, and use logical year/month/week/day/hour units. Suppress misleading projection while IBD or when the buffer has not reached steady state. See [v11 rolling coverage](ROLLING_HISTORY_COVERAGE_V11.md).
+
 ## 4. BIP-110 / BLAKE2b Consensus Verification
+
+See [Minimal Consensus Security v10](MINIMAL_CONSENSUS_SECURITY_V10.md). A pruned node fully validates consensus and advertises limited block serving (BIP 159); archival retention is not required for independent verification. Node defaults permit normal outbound block/transaction relay and user-approved inbound P2P, but disable implicit NAT-PMP/UPnP router changes. New installs default to Balanced (2 threads, 512 MiB cache, 24 connection cap), while Quiet/Fast change resource limits only and retain the user's pruning choice.
+
 
 - **Hard Fork Height:** 961,640
 - **Activation Checkpoint Hash:** `0000000000000050c1e5f69672f459293be14f46e5a494e7a8c8541396f18eeb`

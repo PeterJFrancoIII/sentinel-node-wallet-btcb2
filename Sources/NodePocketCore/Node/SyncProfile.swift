@@ -48,27 +48,27 @@ public struct SyncProfile: Codable, Equatable, Sendable {
                 type: .quiet,
                 parThreads: 1,
                 dbCacheMB: 256,
-                maxConnections: 8,
-                maxUploadTargetMB: 100,
-                pruneMB: 2048
+                maxConnections: 16,
+                maxUploadTargetMB: 256,
+                pruneMB: StorageMode.defaultPruneMB
             )
         case .balanced:
             return SyncProfile(
                 type: .balanced,
                 parThreads: 2,
                 dbCacheMB: 512,
-                maxConnections: 12,
-                maxUploadTargetMB: 500,
-                pruneMB: 2048
+                maxConnections: 24,
+                maxUploadTargetMB: 512,
+                pruneMB: StorageMode.defaultPruneMB
             )
         case .fast:
             return SyncProfile(
                 type: .fast,
                 parThreads: 4,
                 dbCacheMB: 1024,
-                maxConnections: 16,
-                maxUploadTargetMB: 2000,
-                pruneMB: 10000
+                maxConnections: 32,
+                maxUploadTargetMB: 1024,
+                pruneMB: StorageMode.defaultPruneMB
             )
         }
     }

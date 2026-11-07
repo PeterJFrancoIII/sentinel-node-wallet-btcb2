@@ -5,6 +5,16 @@ public struct NodeView: View {
     @EnvironmentObject var state: AppState
     @Binding var showAdvancedSheet: Bool
 
+    private var peerConnectionSummary: String {
+        let maxPeers = state.nodeManager.config.profile.maxConnections
+        guard let info = state.networkInfo else {
+            return "Configured maximum: \(maxPeers) • Live P2P data unavailable"
+        }
+        let inbound = info.connections_in.map(String.init) ?? "?"
+        let outbound = info.connections_out.map(String.init) ?? "?"
+        return "\(outbound) outbound • \(inbound) inbound • max \(maxPeers) configured"
+    }
+
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -187,18 +197,26 @@ public struct NodeView: View {
                     metricCard(
                         title: "Connected Peers",
                         value: "\(conns) (out:\(out), in:\(inConns)) / max \(maxConns)",
-                        subtitle: "Outbound relay active (~10–11 normal) • Max cap \(maxConns)",
+                        subtitle: peerConnectionSummary,
                         icon: "network",
                         color: .purple
                     )
 
-                    metricCard(
-                        title: "Storage Footprint",
-                        value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
-                        subtitle: state.storageMode.isArchival ? "Full-History Mode (External)" : "Compact Pruned Limit",
-                        icon: "internaldrive.fill",
-                        color: .green
-                    )
+                    Button {
+                        showAdvancedSheet = true
+                    } label: {
+                        metricCard(
+                            title: "Storage Footprint",
+                            value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
+                            subtitle: state.storageMode.isArchival
+                                ? "Full-history archive (when fully synced)"
+                                : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
+                            icon: "internaldrive.fill",
+                            color: .green
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help("Choose pruning size and view live rolling-history coverage")
                 }
 
                 // Active Sync Profile & Effective Resources Card

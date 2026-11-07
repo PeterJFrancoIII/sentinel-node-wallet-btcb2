@@ -6,13 +6,13 @@ public struct AdvancedSheet: View {
     @Environment(\.dismiss) var dismiss
 
     @State private var storageSelection: Int = 0 // 0 = Compact, 1 = Archival
-    @State private var selectedPrunePreset: Int = 550
-    @State private var customPruneInput: String = "550"
+    @State private var selectedPrunePreset: Int = StorageMode.defaultPruneMB
+    @State private var customPruneInput: String = "\(StorageMode.defaultPruneMB)"
     @State private var externalArchivalPath: String = ""
-    @State private var selectedProfile: SyncProfileType = .quiet
-    @State private var dbCacheInput: String = "256"
-    @State private var parInput: String = "1"
-    @State private var maxConnectionsInput: String = "8"
+    @State private var selectedProfile: SyncProfileType = .balanced
+    @State private var dbCacheInput: String = "512"
+    @State private var parInput: String = "2"
+    @State private var maxConnectionsInput: String = "24"
     @State private var enableInboundP2P: Bool = false
 
     public var body: some View {
@@ -55,9 +55,9 @@ public struct AdvancedSheet: View {
                                     .foregroundColor(.secondary)
 
                                 HStack(spacing: 8) {
-                                    prunePresetButton(550, label: "550 MiB (Default)")
+                                    prunePresetButton(550, label: "550 MiB (Minimum)")
                                     prunePresetButton(1024, label: "1 GiB")
-                                    prunePresetButton(2048, label: "2 GiB")
+                                    prunePresetButton(2048, label: "2 GiB (Recommended)")
                                     prunePresetButton(4096, label: "4 GiB")
                                 }
 
@@ -69,6 +69,8 @@ public struct AdvancedSheet: View {
                                         .textFieldStyle(.roundedBorder)
                                         .frame(width: 90)
                                 }
+
+                                rollingHistorySelectionPreview
 
                                 Text("ℹ️ Note: Pruning limits apply to historical raw block files. A compact pruned node performs 100% cryptographic validation of all blocks and consensus rules.")
                                     .font(.caption2)
@@ -215,6 +217,40 @@ public struct AdvancedSheet: View {
         .onAppear {
             loadCurrentSettings()
         }
+    }
+
+    /// Instant recomputation from latest verified node measurements.
+    /// Editing the size NEVER changes running Knots settings until Apply.
+    private var rollingHistorySelectionPreview: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            Text("Rolling historical ledger coverage")
+                .font(.subheadline)
+                .bold()
+            if let coverage = state.rollingHistoryCoverage {
+                Text("Currently retained: \(coverage.actualDisplay) • \(coverage.retainedBlockCount) blocks")
+                    .font(.caption)
+                Text("At selected \(customPruneInput) MiB: \(coverage.projectedDisplay(forPruneMiB: Int(customPruneInput) ?? 0))")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                if coverage.initialBlockDownload {
+                    Text("Syncing historical blocks: projection calibrates near the live tip.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            } else {
+                Text(state.rollingHistoryStatus)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Text("A live forecast appears after Knots reports enough retained-history data.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+            Text("Approximate block history, not wallet insurance. Changing the target does not restore already-pruned blocks. Months and years use average calendar lengths.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private func prunePresetButton(_ mb: Int, label: String) -> some View {

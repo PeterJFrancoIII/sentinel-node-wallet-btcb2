@@ -4,7 +4,8 @@ public enum StorageMode: Codable, Equatable, Sendable {
     case compact(pruneMB: Int)
     case archival(externalDataDir: URL)
 
-    public static let defaultPruneMB: Int = 550
+    // New installations retain a modest recent-block buffer; users can still select 550 MiB.
+    public static let defaultPruneMB: Int = 2048
     public static let minimumPruneMB: Int = 550
 
     public var isPruned: Bool {

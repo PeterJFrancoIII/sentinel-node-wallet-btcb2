@@ -28,8 +28,12 @@ The standalone public `WalletManager.swift` is much smaller: only basic balances
 8. **Governance + delivery**: merge reviewed docs into main, update README feature-status truth, CI matrix, architecture and security disclosures; run secret/license scan; rebuild development-only DMG if safe and verify on Mac. Publish NO real-funds or public-ready claim unless independent signer, backup and Apple signing/notary/updater gates pass.
 9. **Final report to Shared Cognitive Memory**: exact source commit(s), PR merge, macOS/Knots version, current IBD, tests and redacted outputs, maturity cases, live local fee sample where permitted, per-send-auth proof, Core signing verification, sensitive storage scan, DMG hash, GitHub governance links and all PASS/FAIL/NOT RUN.
 
+## Latest addition: rolling historical coverage (v11)
+
+Before claiming the low-storage node finished, integrate and test [Rolling Historical Ledger Coverage](docs/ROLLING_HISTORY_COVERAGE_V11.md), already drafted in PR #4. Clicking Node → Storage Footprint opens the existing Advanced picker; display observed retained-history age and selected-prune projection (years/months/weeks/days/hours), using only local `getblockchaininfo` and first-retained/tip headers, with no false coverage guarantee, no archival default and no per-keystroke RPC. Run Swift and actual Mac tests; preserve users' existing 550/custom retention settings.
+
 ## Rules that do not change
 
-MainNet only; minimal native app; keep default 550 MiB active pruning with 50 GiB design objective, optional external SSD archival full-redownload; adaptive synchronization ETA; logo from owner-supplied JPG; strict pool and enterprise infrastructure isolation; wallet data stays at existing app-owned path until approved migration; noncustodial keys never leave device.
+MainNet only; minimal native app; use new-install default 2048 MiB pruned recent-block retention (550 MiB during IBD), preserve older user selections, 50 GiB design objective, optional external SSD archival full-redownload; adaptive synchronization ETA; logo from owner-supplied JPG; strict pool and enterprise infrastructure isolation; wallet data stays at existing app-owned path until approved migration; noncustodial keys never leave device.
 
 **Roadmap only:** one-click DATUM gateway provisioning **not today**. It requires its own permission, resource/battery, network/Stratum and security design before any future implementation.

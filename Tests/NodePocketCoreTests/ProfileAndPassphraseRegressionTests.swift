@@ -4,9 +4,9 @@ import XCTest
 final class ProfileAndPassphraseRegressionTests: XCTestCase {
     func testQuietBalancedFastRenderDistinctActualSettings() {
         let profiles: [(SyncProfileType, Int, Int, Int)] = [
-            (.quiet, 1, 256, 8),
-            (.balanced, 2, 512, 12),
-            (.fast, 4, 1024, 16)
+            (.quiet, 1, 256, 16),
+            (.balanced, 2, 512, 24),
+            (.fast, 4, 1024, 32)
         ]
         for (kind, threads, cache, peers) in profiles {
             let config = NodeConfig(
@@ -21,7 +21,7 @@ final class ProfileAndPassphraseRegressionTests: XCTestCase {
             XCTAssertTrue(text.contains("par=\(threads)"))
             XCTAssertTrue(text.contains("dbcache=\(cache)"))
             XCTAssertTrue(text.contains("maxconnections=\(peers)"))
-            XCTAssertTrue(text.contains("prune=550"))
+            XCTAssertTrue(text.contains("prune=2048"))
         }
     }
 
@@ -49,7 +49,7 @@ final class ProfileAndPassphraseRegressionTests: XCTestCase {
         XCTAssertEqual(reopened.profile.type, .fast)
         XCTAssertEqual(reopened.profile.parThreads, 4)
         XCTAssertEqual(reopened.profile.dbCacheMB, 1536)
-        XCTAssertEqual(reopened.profile.maxConnections, 16)
+        XCTAssertEqual(reopened.profile.maxConnections, 32)
         XCTAssertEqual(reopened.storageMode.pruneMB, 550)
     }
 
