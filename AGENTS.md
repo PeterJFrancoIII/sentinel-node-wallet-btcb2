@@ -21,6 +21,16 @@ Original private Admin Node Console Wallet Manager (`src/status_server.py` and `
 4. Add coinbase creation-height maturity schedule (100/6480/25920 blocks plus 2027-09-01 MTP rule), maturation countdown, transaction details, verified BTCB2 `mempool.guide` external links and named trusted recipients with secure edit controls.
 5. Add Swift/Python mock tests and real Security.framework consent/chain read-only tests; never spend real funds to test. Mark all v7 gates NOT RUN until evidenced.
 
+## LAST feature change before production test — Wallet Auth v13
+
+**Authority:** [Final Wallet Auth](docs/FINAL_WALLET_AUTH_V13.md), followed by [Production Security Audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md).
+
+Implement LOCAL username + strong password + RFC6238 TOTP, with Apple Passwords save/autofill only when properly signed/associated and owner-approved. No external identity server, default credentials, broad Keychain fallback, new UI tab or wallet-data migration. Node/Network continue while Wallet locked. Secure core `WalletAuthCoordinator` must guard every wallet RPC/action; fresh device-owner authentication for sending, export, recovery, recipient changes, archive and delete. Loss of login must not erase a self-custodial wallet or bypass its separate encryption.
+
+Reconcile v12 PR #5 before cutting v13 source. Owner Ultra correction requires **4 peers maximum** on battery/charging with `listen=0` and low process CPU/disk I/O priority; the prior Gemini receipt used 12 and must not be treated as current specification. Wallet creation Keychain -34018, binary signature provenance, funding/signing safety, full wallet restore and notarization are P0 gates.
+
+After v13 is implemented, **FREEZE new features**, inventory every source/binary dependency/process/endpoint and complete the independent review. Remove only code-evidenced unnecessary/malicious or unsafe shipped behavior with regression tests; do not bulk-delete runtime files or wallet/chain data. Report each test PASS/FAIL/NOT RUN with exact SHA, actual Mac/Apple Passwords proof, and signed release evidence. No production-ready declaration while any P0 remains.
+
 ## Release and reporting
 
 No public or real-funds-safe release before P0s, clean wallet restore, Apple Developer ID signing and notarization, Gatekeeper, secure updates and independent audit. Read [GOVERNANCE.md](GOVERNANCE.md), [SECURITY.md](SECURITY.md), [TEST_AND_RELEASE_MATRIX.md](TEST_AND_RELEASE_MATRIX.md) and [GEMINI_COMPLETION_HANDOFF.md](GEMINI_COMPLETION_HANDOFF.md).
