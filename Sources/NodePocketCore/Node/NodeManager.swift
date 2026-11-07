@@ -157,7 +157,7 @@ public final class NodeManager: @unchecked Sendable {
                 updateState(.stopped)
                 return
             }
-            updateState(.error("Cannot confirm graceful node shutdown: \\(error.localizedDescription)"))
+            updateState(.error("Cannot confirm graceful node shutdown: \(error.localizedDescription)"))
             return
         }
 
