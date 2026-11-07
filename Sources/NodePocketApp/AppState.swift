@@ -249,8 +249,8 @@ public final class AppState: ObservableObject {
                         let applied = try await self.nodeManager.applyUltraMode(active: false)
                         if applied {
                             self.isUltraActive = false
-                            let pref = SyncProfile.preset(for: self.userPreferredProfile)
-                            self.ultraStatusTitle = "\(self.userPreferredProfile.rawValue) Profile Active"
+                            let pref = self.nodeManager.config.profile
+                            self.ultraStatusTitle = "\(pref.type.rawValue) Profile Active"
                             self.ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
                             self.appendLog("[POWER] Restored preferred profile \(self.userPreferredProfile.rawValue) on stable AC power.")
                         }
@@ -259,8 +259,8 @@ public final class AppState: ObservableObject {
                     }
                 }
             } else {
-                let pref = SyncProfile.preset(for: userPreferredProfile)
-                ultraStatusTitle = "\(userPreferredProfile.rawValue) Profile Active"
+                let pref = nodeManager.config.profile
+                ultraStatusTitle = "\(pref.type.rawValue) Profile Active"
                 ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
             }
         }
@@ -473,16 +473,24 @@ public final class AppState: ObservableObject {
 
     /// Single state-owned path for node resource and pruning settings.
     /// UI updates only after configuration succeeds. Errors are never hidden.
-    public func applyNodeSettings(profile: SyncProfile, storageMode mode: StorageMode) async throws {
+    public func applyNodeSettings(profile: SyncProfile, storageMode mode: StorageMode, allowInboundP2P: Bool? = nil) async throws {
         guard !isApplyingNodeSettings else {
             throw RPCClientError.serializationError("Another settings change is already in progress.")
         }
         isApplyingNodeSettings = true
         defer { isApplyingNodeSettings = false }
-        let status = try await nodeManager.applyConfiguration(profile: profile, storageMode: mode)
+        let status = try await nodeManager.applyConfiguration(profile: profile, storageMode: mode, allowInboundP2P: allowInboundP2P)
         selectedProfileType = profile.type
+        userPreferredProfile = profile.type
         storageMode = mode
         appliedSettingsStatus = status
+        if !isUltraActive {
+            ultraStatusTitle = "\(profile.type.rawValue) Profile Active"
+            ultraStatusSubtitle = "\(profile.parThreads) threads, \(profile.dbCacheMB) MiB dbcache, max \(profile.maxConnections) peers"
+        } else {
+            ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
+            ultraStatusSubtitle = "Ultra enforced: max 4 peers. Preferred \(profile.type.rawValue) / \(profile.maxConnections)-peer setting queued until stable AC."
+        }
         appendLog("[CONFIG] \(profile.type.rawValue): \(status)")
     }
 
