@@ -20,6 +20,10 @@ The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,64
 
 ### Disk space: pruned by default
 
+**Live rolling history:** Clicking **Storage Footprint** opens the existing pruning selector and displays approximately how far back its **currently retained historical blocks** reach, plus a live-data forecast for the selected 550 MiB/1/2/4 GiB/custom budget. Units automatically switch between years, months, weeks, days and hours (up to two meaningful units). The estimate uses Knots' `pruneheight`, first-retained and tip header times, and measured block/undo bytes; it recalibrates during initial sync or after pruning changes. It is **not** financial insurance, a guaranteed reorg window or a wallet backup. [Rolling historical coverage specification](docs/ROLLING_HISTORY_COVERAGE_V11.md).
+
+
+
 | Mode | Policy |
 | --- | --- |
 | **Compact** (default) | New installs use `prune=2048` MiB after initial sync and `pruneduringinit=550` MiB while syncing. Selectable 550 MiB minimum, 1/2/4 GiB or validated custom. Existing settings remain unchanged. |
