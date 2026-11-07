@@ -146,25 +146,26 @@ public actor WalletManager {
     @discardableResult
     public func ensureDefaultWalletLoaded(preferredName: String = "default_wallet") async throws -> String {
         // 1. Check if any wallet is already loaded in memory
-        if let loaded = try? await rpcClient.listWallets(), let first = loaded.first, !first.isEmpty {
+        let loaded = try await rpcClient.listWallets()
+        if let first = loaded.first, !first.isEmpty {
             self.currentWalletName = first
             _ = try await refreshWalletInfo()
             return first
         }
 
-        // 2. Check if a wallet directory exists on disk
-        if let dir = try? await rpcClient.listWalletDir() {
-            if dir.wallets.contains(where: { $0.name == preferredName }) {
-                _ = try await rpcClient.loadWallet(name: preferredName)
-                self.currentWalletName = preferredName
-                _ = try await refreshWalletInfo()
-                return preferredName
-            } else if let firstDisk = dir.wallets.first {
-                _ = try await rpcClient.loadWallet(name: firstDisk.name)
-                self.currentWalletName = firstDisk.name
-                _ = try await refreshWalletInfo()
-                return firstDisk.name
-            }
+        // A failed RPC must be reported as a connectivity/permission failure,
+        // not incorrectly interpreted as "no wallet exists".
+        let dir = try await rpcClient.listWalletDir()
+        if dir.wallets.contains(where: { $0.name == preferredName }) {
+            _ = try await rpcClient.loadWallet(name: preferredName)
+            self.currentWalletName = preferredName
+            _ = try await refreshWalletInfo()
+            return preferredName
+        } else if let firstDisk = dir.wallets.first {
+            _ = try await rpcClient.loadWallet(name: firstDisk.name)
+            self.currentWalletName = firstDisk.name
+            _ = try await refreshWalletInfo()
+            return firstDisk.name
         }
 
         // First launch is an onboarding state, not a failed node startup.
