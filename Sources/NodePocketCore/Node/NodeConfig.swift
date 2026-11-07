@@ -5,6 +5,7 @@ public struct NodeConfig: Sendable {
     public let rpcUser: String
     public let rpcPassword: String
     public var p2pPort: Int
+    public var allowInboundP2P: Bool
     public var profile: SyncProfile
     public var storageMode: StorageMode
     public let dataDirectory: URL
@@ -18,6 +19,7 @@ public struct NodeConfig: Sendable {
         rpcUser: String? = nil,
         rpcPassword: String? = nil,
         p2pPort: Int = 8333,
+        allowInboundP2P: Bool = false,
         profile: SyncProfile = .preset(for: .balanced),
         storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB),
         dataDirectory: URL? = nil
@@ -58,6 +60,8 @@ public struct NodeConfig: Sendable {
         self.rpcUser = user
         self.rpcPassword = pass
         self.p2pPort = p2pPort
+        // Preserve explicit existing P2P listening policy when migrating older installations.
+        self.allowInboundP2P = Self.persistedInboundP2P(at: dir.appendingPathComponent("bitcoin.conf"), fallback: allowInboundP2P)
         // Use the last effective on-disk settings, not a new Quiet/Balance default
         // that would silently overwrite the profile selected in a prior session.
         self.profile = Self.persistedProfile(at: dir.appendingPathComponent("bitcoin.conf"), fallback: profile)
@@ -91,6 +95,19 @@ public struct NodeConfig: Sendable {
             return .archival(externalDataDir: url.deletingLastPathComponent())
         }
         return fallback
+    }
+
+    /// Preserve the operator's on-disk inbound P2P selection. New installs default OFF;
+    /// existing configs with listen=1 remain enabled until explicitly changed.
+    private static func persistedInboundP2P(at url: URL, fallback: Bool) -> Bool {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return fallback }
+        var enabled = fallback
+        for raw in contents.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line == "listen=1" { enabled = true }
+            if line == "listen=0" { enabled = false }
+        }
+        return enabled
     }
 
     /// Recover the persisted profile selection and operational resource limits.
@@ -129,7 +146,7 @@ public struct NodeConfig: Sendable {
         lines.append("# Sentinel Node Wallet - BTCB2 Autonomous Configuration")
         lines.append("# Strict Localhost RPC Enforcement - Zero Public Ingress")
         lines.append("server=1")
-        lines.append("listen=1")
+        lines.append("listen=\(allowInboundP2P ? 1 : 0)")
         // Never map a port on the user's router without their informed consent.
         lines.append("natpmp=0")
         lines.append("upnp=0")
