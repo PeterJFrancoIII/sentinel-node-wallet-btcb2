@@ -16,7 +16,7 @@
 | Explorer link | Strict 64 lowercase/uppercase hex, `mempool.guide/tx/`, explicit click; no silent network request | NOT RUN |
 | Wallet backup/restore | Empty wallet + contacts backup, Keychain auth, prune birth-height warning, no overwrite/data loss | NOT RUN — P0 |
 | App isolation + minimalism | One node, three views, no DATUM/miner/cloud integration, no production alternate chains | TO REVERIFY |
-| Resource/storage | 550MiB prune from IBD, 35/40GiB disk warnings/stops, actual peak disk and CPU/RSS/energy | TO REVERIFY |
+| Resource/storage | New-install prune=2048 after IBD and pruneduringinit=550 while IBD; preserve older custom/550/archive config. 35/40 GiB disk guards, measured peak disk and CPU/RSS/energy | TO REVERIFY |
 | Development docs + secrets | Swift+Python deterministic tests, clean CI scan, source/vendor/license review | NOT RUN v7 |
 | Public release | Apple Developer ID for app+bitcoind; notarization/staple/Gatekeeper; signed updates; independent wallet audit | BLOCKED |
 
