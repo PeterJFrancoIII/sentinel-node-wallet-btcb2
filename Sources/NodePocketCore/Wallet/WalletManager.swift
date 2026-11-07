@@ -76,6 +76,7 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case invalidMainnetAddress(String)
     case previewExpired
     case previewTampered
+    case signingPathUnverified
     case userPresenceFailed(String)
     case forkCheckpointUnverified(Int)
     case insufficientFunds(availableSats: Int64, requiredSats: Int64)
@@ -93,6 +94,8 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
             return "The transaction preview authorization has expired (60s lifetime). Please generate a fresh preview before signing."
         case .previewTampered:
             return "Transaction parameters changed between authorization preview and execution. Send aborted for operator safety."
+        case .signingPathUnverified:
+            return "Sending is disabled until the BTCB2 unified-signature path, funded fee preview, immutable transaction authorization and wallet re-lock have passed security testing. Receiving and balance/history remain available."
         case .userPresenceFailed(let reason):
             return "macOS user-presence authentication challenge failed: \(reason)"
         case .forkCheckpointUnverified(let height):
@@ -226,7 +229,10 @@ public actor WalletManager {
 
         let (resp24, resp6, resp2, memInfo) = await (fee24, fee6, fee2, mempoolInfo)
 
-        let relayFloorRate = memInfo?.mempoolminfee ?? 0.00001
+        let observedFloors = [memInfo?.mempoolminfee, memInfo?.minrelaytxfee].compactMap { $0 }.filter { $0.isFinite && $0 > 0 }
+        guard let relayFloorRate = observedFloors.max() else {
+            throw RPCClientError.serializationError("Live BTCB2 mempool relay fee policy unavailable; no fee quote can be trusted.")
+        }
         let relayFloorSat = FeeEngine.rateToSatPerVB(btcPerKB: relayFloorRate)
 
         let rate24 = resp24?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp24!.feerate!) : relayFloorSat
@@ -248,7 +254,8 @@ public actor WalletManager {
         var rewards: [CoinbaseRewardDetail] = []
 
         for tx in txs where tx.category == "generate" || tx.category == "immature" {
-            let originHeight = tx.blockheight ?? currentTipHeight
+            // A reward's creation height MUST be known. Never substitute the current tip.
+            guard let originHeight = tx.blockheight else { continue }
             let epoch = CoinbaseMaturityCalculator.epoch(forOriginHeight: originHeight)
             let matHeight = CoinbaseMaturityCalculator.maturityHeight(originHeight: originHeight)
             let remaining = CoinbaseMaturityCalculator.remainingBlocks(originHeight: originHeight, currentTipHeight: currentTipHeight)
@@ -294,47 +301,10 @@ public actor WalletManager {
         amountSats: Int64,
         feeQuote: FeeQuote
     ) async throws -> FundedTxPreview {
-        let clean = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
-
-        // 1. Strict address validation (MainNet Bech32 bc1... only)
-        guard AddressBook.isValidBTCB2MainnetAddress(clean) else {
-            throw WalletSecurityError.invalidMainnetAddress(clean)
-        }
-
-        // 2. Allowlist enforcement
-        guard addressBook.isAllowed(address: clean) else {
-            throw WalletSecurityError.allowlistBlocked(clean)
-        }
-
-        // 3. Amount sanity
-        guard amountSats > 0 else {
-            throw RPCClientError.serializationError("Send amount must be greater than zero.")
-        }
-
-        // 4. Estimate vsize and fee (141 vB baseline for Native SegWit 1-in-2-out P2WPKH)
-        let estimatedVSize = 141
-        let feeSats = Int64(feeQuote.satPerVB * estimatedVSize)
-        let totalRequired = amountSats + feeSats
-
-        // 5. Balance check
-        let spendableSats = latestSnapshot?.trustedBalanceSats ?? 0
-        if spendableSats < totalRequired {
-            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: totalRequired)
-        }
-
-        let changeSats = max(0, spendableSats - totalRequired)
-        let recipientName = addressBook.recipients.first(where: { $0.address.lowercased() == clean.lowercased() })?.name
-
-        return FundedTxPreview(
-            destinationAddress: clean,
-            recipientName: recipientName,
-            amountSats: amountSats,
-            feeSats: feeSats,
-            satPerVB: feeQuote.satPerVB,
-            estimatedVSize: estimatedVSize,
-            changeSats: changeSats,
-            selectedInputs: []
-        )
+        // Fail closed: v7's prior 141-vbyte estimate/empty selected inputs were NOT a funded preview.
+        // A safe implementation must use the real Knots-funded PSBT and revalidate exact outputs,
+        // selected UTXOs, change and policy before allowing one-time user authorization.
+        throw WalletSecurityError.signingPathUnverified
     }
 
     /// Authorizes and executes a validated transaction preview.
@@ -348,68 +318,16 @@ public actor WalletManager {
         preview: FundedTxPreview,
         explicitPassphrase: String? = nil
     ) async throws -> String {
-        // 1. Expiry check
-        guard !preview.isExpired else {
-            throw WalletSecurityError.previewExpired
-        }
-
-        // 2. Allowlist re-verification
-        guard addressBook.isAllowed(address: preview.destinationAddress) else {
-            throw WalletSecurityError.allowlistBlocked(preview.destinationAddress)
-        }
-
-        // 3. User-presence challenge
-        let authReason = "Authorize BTCB2 transfer of \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
-        let authenticated = try await keychainHelper.authenticateUserPresence(reason: authReason)
-        guard authenticated else {
-            throw WalletSecurityError.userPresenceFailed("Authentication was rejected or canceled.")
-        }
-
-        // 4. Retrieve passphrase
-        let isEncrypted = latestSnapshot?.isEncrypted ?? false
-        if isEncrypted {
-            let pass: String
-            if let explicit = explicitPassphrase, !explicit.isEmpty {
-                pass = explicit
-            } else if let kcPass = try? keychainHelper.retrievePassphrase(account: currentWalletName ?? "default_wallet"), !kcPass.isEmpty {
-                pass = kcPass
-            } else {
-                throw RPCClientError.serializationError("Wallet is encrypted. Passphrase required.")
-            }
-
-            // Unlock for 10 seconds only
-            try await rpcClient.walletPassphrase(passphrase: pass, timeout: 10, walletName: currentWalletName)
-        }
-
-        // Guaranteed synchronous relock
-        defer {
-            if isEncrypted {
-                Task {
-                    try? await self.rpcClient.walletLock(walletName: self.currentWalletName)
-                }
-            }
-        }
-
-        // 5. Broadcast transaction
-        let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
-        let txid = try await rpcClient.sendToAddress(
-            address: preview.destinationAddress,
-            amount: btcAmount,
-            comment: "Sentinel Node Wallet BTCB2 Transfer",
-            walletName: currentWalletName
-        )
-
-        // Refresh snapshot
-        _ = try await refreshWalletInfo()
-        return txid
+        // No broadcast unless a verified BLAKE2b SIGHASH_UNIFIED transaction is signed with
+        // fresh macOS user presence and immutable PSBT preview authorization.
+        // This guard applies to ALL callers, not only the SwiftUI button.
+        throw WalletSecurityError.signingPathUnverified
     }
 
     /// Legacy compatibility send method with strict V7 guards.
     public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
-        let sats = SatoshiMath.toSats(btc: amount)
-        let quote = FeeQuote(type: .normal, satPerVB: 2, targetBlocks: 6, estimatedMinutes: 60)
-        let preview = try await prepareSendPreview(to: destinationAddress, amountSats: sats, feeQuote: quote)
-        return try await executeAuthorizedSend(preview: preview, explicitPassphrase: passphrase)
+        // Legacy API must never bypass the audited signing gate.
+        throw WalletSecurityError.signingPathUnverified
     }
 
     /// Restores a wallet from an existing backup file.
