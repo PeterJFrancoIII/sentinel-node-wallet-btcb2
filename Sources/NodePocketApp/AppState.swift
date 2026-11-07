@@ -124,7 +124,10 @@ public final class AppState: ObservableObject {
                 async let oldest = self.nodeManager.rpcClient.getBlockHeader(hash: oldHash)
                 async let newest = self.nodeManager.rpcClient.getBlockHeader(hash: info.bestblockhash)
                 let (start, tip) = try await (oldest, newest)
+                guard case .running = self.nodeState else { return }
                 guard start.height == earliestHeight, tip.height == info.blocks,
+                      start.confirmations >= 0, tip.confirmations >= 0,
+                      tip.hash == info.bestblockhash,
                       let measured = RollingHistoryCoverage(
                         firstRetainedHeight: earliestHeight,
                         tipHeight: info.blocks,
