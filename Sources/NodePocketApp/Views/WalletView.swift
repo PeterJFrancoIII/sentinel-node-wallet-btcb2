@@ -649,6 +649,7 @@ public struct WalletView: View {
                 Button("Cancel") {
                     showPreviewSheet = false
                     activePreview = nil
+                    sendPassphraseInput = ""
                 }
                 .buttonStyle(.plain)
             }
@@ -718,6 +719,28 @@ public struct WalletView: View {
                             .foregroundColor(.red)
                     }
 
+                    HStack(spacing: 8) {
+                        SecureField("Wallet passphrase (if not using saved credential)", text: $sendPassphraseInput)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Use Saved Passphrase") {
+                            Task {
+                                do {
+                                    let keychain = KeychainHelper.shared
+                                    let name = state.walletSnapshot?.name ?? ""
+                                    guard !name.isEmpty else { return }
+                                    let authorized = try await keychain.authenticateUserPresence(
+                                        reason: "Fill saved BTCB2 wallet passphrase for " + name
+                                    )
+                                    guard authorized else { return }
+                                    sendPassphraseInput = try await keychain.retrievePassphraseInteractively(account: name)
+                                } catch {
+                                    sendErrorMessage = "Keychain fill denied: \\(error.localizedDescription)"
+                                }
+                            }
+                        }
+                        .disabled(state.walletSnapshot?.name == nil)
+                    }
+
                     HStack {
                         Image(systemName: "clock")
                             .font(.caption2)
@@ -735,6 +758,7 @@ public struct WalletView: View {
                     Button("Abort") {
                         showPreviewSheet = false
                         activePreview = nil
+                        sendPassphraseInput = ""
                     }
                     .buttonStyle(.bordered)
 
@@ -747,6 +771,7 @@ public struct WalletView: View {
                                     self.isBroadcasting = false
                                     self.showPreviewSheet = false
                                     self.activePreview = nil
+                                    self.sendPassphraseInput = ""
                                     self.sendAddressInput = ""
                                     self.sendAmountInput = ""
                                     self.state.alertMessage = "Transaction successfully broadcasted!\n\nTXID: \(txid)\n\nTrack on mempool.guide."
