@@ -19,6 +19,7 @@ public final class NodeManager: @unchecked Sendable {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private let stateLock = NSLock()
+    @MainActor private var settingsInFlight = false
     private var monitorTask: Task<Void, Never>?
 
     public var onStateChange: (@Sendable (NodeState) -> Void)?
@@ -186,37 +187,90 @@ public final class NodeManager: @unchecked Sendable {
         updateState(.stopped)
     }
 
-    public func switchProfile(_ newProfile: SyncProfile) async throws {
-        self.config.profile = newProfile
-        try config.writeToDisk()
-        onLogMessage?("[CONFIG] Switched sync profile to \(newProfile.type.rawValue). Configuration written to disk.")
+    /// Apply the selected profile and storage atomically: one graceful restart,
+    /// one config write, no concurrent profile/storage racing or swallowed errors.
+    @MainActor public func applyConfiguration(
+        profile newProfile: SyncProfile,
+        storageMode newMode: StorageMode
+    ) async throws -> String {
+        guard !settingsInFlight else {
+            throw RPCClientError.serializationError("A node configuration change is already in progress.")
+        }
+        settingsInFlight = true
+        defer { settingsInFlight = false }
 
-        if case .running = state {
-            onLogMessage?("[CONFIG] Restarting node daemon to apply updated profile parameters...")
+        switch newMode {
+        case .compact(let mb):
+            guard mb >= StorageMode.minimumPruneMB else {
+                throw StorageValidationError.belowMinimumPruneSize(mb)
+            }
+        case .archival:
+            throw RPCClientError.serializationError(
+                "A pruned node cannot become archival by changing prune=0. " +
+                "A verified full-history re-download and wallet-safe migration are required."
+            )
+        }
+        guard (1...8).contains(newProfile.parThreads),
+              (128...4096).contains(newProfile.dbCacheMB),
+              (1...64).contains(newProfile.maxConnections) else {
+            throw RPCClientError.serializationError("Invalid resource profile limits.")
+        }
+
+        if config.profile == newProfile && config.storageMode == newMode {
+            return "Settings are already configured."
+        }
+        let previous = config
+        let wasRunning: Bool
+        switch state {
+        case .running:
+            wasRunning = true
+        case .stopped, .error:
+            wasRunning = false
+        case .starting, .stopping:
+            throw RPCClientError.serializationError("Wait for the node to finish starting or stopping.")
+        }
+
+        if wasRunning {
+            guard process != nil else {
+                throw RPCClientError.serializationError(
+                    "Node is running but its process was not started by this app session. " +
+                    "The app will not stop an unverified adopted daemon to apply settings."
+                )
+            }
             await stop()
-            try start()
+            guard state == .stopped else {
+                throw RPCClientError.serializationError("Knots did not finish its graceful shutdown.")
+            }
+        }
+
+        config.profile = newProfile
+        config.storageMode = newMode
+        do {
+            try config.writeToDisk()
+            if wasRunning {
+                try start()
+                try await waitForRPCReadiness(timeoutSeconds: 90)
+            }
+            let status = wasRunning ? "Applied after clean restart and verified RPC connectivity." :
+                "Saved. Settings will take effect on the next node startup."
+            onLogMessage?("[CONFIG] \(newProfile.type.rawValue) par=\(newProfile.parThreads) " +
+                          "dbcache=\(newProfile.dbCacheMB) maxconnections=\(newProfile.maxConnections). " + status)
+            return status
+        } catch {
+            // Restore last known configuration on any failed change. Never erase wallet/chain.
+            config = previous
+            try? config.writeToDisk()
+            if wasRunning, case .stopped = state { try? start() }
+            throw error
         }
     }
 
-    public func switchStorageMode(_ newStorageMode: StorageMode) async throws {
-        if case .archival = newStorageMode {
-            // Changing prune=0 on an already pruned data directory is NOT a valid
-            // full-history conversion; it requires staged fresh IBD or -reindex.
-            // Preserve the pruned wallet/chain until backup and rollback are verified.
-            throw RPCClientError.serializationError(
-                "Full History conversion is locked pending verified external storage, wallet backup, complete historical re-download and safe cutover. Compact mode remains available."
-            )
-        }
-        self.config.storageMode = newStorageMode
-        try config.writeToDisk()
-        onLogMessage?("[STORAGE] Requested compact pruning at \\(newStorageMode.pruneMB) MiB.")
-        if case .running = state {
-            await stop()
-            guard state == .stopped else {
-                throw RPCClientError.serializationError("Knots did not shut down cleanly; pruning restart aborted.")
-            }
-            try start()
-        }
+    @MainActor public func switchProfile(_ newProfile: SyncProfile) async throws {
+        _ = try await applyConfiguration(profile: newProfile, storageMode: config.storageMode)
+    }
+
+    @MainActor public func switchStorageMode(_ newMode: StorageMode) async throws {
+        _ = try await applyConfiguration(profile: config.profile, storageMode: newMode)
     }
 
     private func startMonitoring() {
