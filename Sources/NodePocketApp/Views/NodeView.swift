@@ -200,7 +200,9 @@ public struct NodeView: View {
                     metricCard(
                         title: "Storage Footprint",
                         value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
-                        subtitle: state.storageMode.isArchival ? "Full-History Mode (External)" : "Compact Pruned Limit",
+                        subtitle: state.storageMode.isArchival
+                            ? "Full-history archive (when fully synced)"
+                            : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
                         icon: "internaldrive.fill",
                         color: .green
                     )
