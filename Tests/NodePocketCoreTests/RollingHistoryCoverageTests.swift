@@ -28,7 +28,7 @@ final class RollingHistoryCoverageTests: XCTestCase {
 
     func testYearsMonthsWeeksDaysHoursAutoSwitch() {
         let format = RollingHistoryDurationFormatter.string(from:)
-        XCTAssertEqual(format(732 * day), "2 years")
+        XCTAssertEqual(format(732 * day), "2 years, 1 day")
         XCTAssertEqual(format(65 * day), "2 months, 4 days")
         XCTAssertEqual(format(17 * day), "2 weeks, 3 days")
         XCTAssertEqual(format(3 * day + 7 * 3600), "3 days, 7 hours")
