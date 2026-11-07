@@ -13,7 +13,7 @@ final class OneClickIntegrationTests: XCTestCase {
             XCTAssertTrue(binfo.blocks > 200_000, "Node should have synced blocks past 200,000 (actual: \(binfo.blocks))")
             XCTAssertTrue(binfo.pruned, "Node must be in pruned storage mode")
 
-            let walletManager = WalletManager(rpcClient: nodeManager.rpcClient)
+            let walletManager = WalletManager(rpcClient: nodeManager.rpcClient, allowUnauthenticatedForTesting: true)
             let addr = try await walletManager.generateReceiveAddress()
             XCTAssertTrue(addr.starts(with: "bc1"), "Mainnet receive address must start with bc1: \(addr)")
         } catch {

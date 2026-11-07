@@ -16,6 +16,10 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
     case deviceOwnerAuthFailed(String)
     case deviceOwnerAuthCanceled
     case weakPassword(String)
+    case cryptographicError(String)
+    case storageError(String)
+    case unauthorizedHighRiskAction(String)
+    case approvalExpired
 
     public var errorDescription: String? {
         switch self {
@@ -43,6 +47,14 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
             return "macOS device-owner authentication was canceled."
         case .weakPassword(let reason):
             return "Password does not meet security requirements: \(reason)"
+        case .cryptographicError(let reason):
+            return "Cryptographic operation failed: \(reason)"
+        case .storageError(let reason):
+            return "Secure storage operation failed: \(reason)"
+        case .unauthorizedHighRiskAction(let reason):
+            return "High-risk action rejected: \(reason)"
+        case .approvalExpired:
+            return "High-risk approval authorization token has expired."
         }
     }
 }
@@ -63,15 +75,38 @@ public struct WalletAuthCapability: Sendable, Equatable, Identifiable, Codable {
     }
 }
 
-public struct HighRiskApproval: Sendable, Equatable {
-    public let approvalId: UUID
+public struct HighRiskApproval: Sendable, Equatable, Identifiable {
+    public let id: UUID
     public let action: String
-    public let timestamp: Date
+    public let target: String
+    public let issuedAt: Date
+    public let expiresAt: Date
+    public let token: String
 
-    public init(action: String) {
-        self.approvalId = UUID()
+    fileprivate init(
+        id: UUID = UUID(),
+        action: String,
+        target: String,
+        issuedAt: Date = Date(),
+        expiresAt: Date,
+        token: String
+    ) {
+        self.id = id
         self.action = action
-        self.timestamp = Date()
+        self.target = target
+        self.issuedAt = issuedAt
+        self.expiresAt = expiresAt
+        self.token = token
+    }
+}
+
+public struct RecoveryCodeRecord: Codable, Sendable, Equatable {
+    public let saltHex: String
+    public let verifierHex: String
+
+    public init(saltHex: String, verifierHex: String) {
+        self.saltHex = saltHex
+        self.verifierHex = verifierHex
     }
 }
 
@@ -79,33 +114,87 @@ public struct AuthRegistryRecord: Codable, Sendable {
     public var username: String
     public var saltHex: String
     public var passwordHashHex: String
-    public var totpSecretBase32: String
-    public var recoveryCodeHashes: [String]
+    public var isTotpInKeychain: Bool
+    public var legacyTotpSecretBase32: String?
+    public var recoveryCodes: [RecoveryCodeRecord]
+    public var legacyRecoveryCodeHashes: [String]?
     public var failedAttempts: Int
     public var lockedUntil: Date?
     public var lastUsedTimeStep: Int64
     public var version: Int
 
+    enum CodingKeys: String, CodingKey {
+        case username
+        case saltHex
+        case passwordHashHex
+        case isTotpInKeychain
+        case totpSecretBase32
+        case legacyTotpSecretBase32
+        case recoveryCodes
+        case recoveryCodeHashes
+        case legacyRecoveryCodeHashes
+        case failedAttempts
+        case lockedUntil
+        case lastUsedTimeStep
+        case version
+    }
+
     public init(
         username: String,
         saltHex: String,
         passwordHashHex: String,
-        totpSecretBase32: String,
-        recoveryCodeHashes: [String],
+        isTotpInKeychain: Bool = true,
+        legacyTotpSecretBase32: String? = nil,
+        recoveryCodes: [RecoveryCodeRecord],
+        legacyRecoveryCodeHashes: [String]? = nil,
         failedAttempts: Int = 0,
         lockedUntil: Date? = nil,
         lastUsedTimeStep: Int64 = 0,
-        version: Int = 1
+        version: Int = 2
     ) {
         self.username = username
         self.saltHex = saltHex
         self.passwordHashHex = passwordHashHex
-        self.totpSecretBase32 = totpSecretBase32
-        self.recoveryCodeHashes = recoveryCodeHashes
+        self.isTotpInKeychain = isTotpInKeychain
+        self.legacyTotpSecretBase32 = legacyTotpSecretBase32
+        self.recoveryCodes = recoveryCodes
+        self.legacyRecoveryCodeHashes = legacyRecoveryCodeHashes
         self.failedAttempts = failedAttempts
         self.lockedUntil = lockedUntil
         self.lastUsedTimeStep = lastUsedTimeStep
         self.version = version
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.username = try container.decode(String.self, forKey: .username)
+        self.saltHex = try container.decode(String.self, forKey: .saltHex)
+        self.passwordHashHex = try container.decode(String.self, forKey: .passwordHashHex)
+        self.isTotpInKeychain = try container.decodeIfPresent(Bool.self, forKey: .isTotpInKeychain) ?? false
+        self.legacyTotpSecretBase32 = try container.decodeIfPresent(String.self, forKey: .legacyTotpSecretBase32)
+            ?? container.decodeIfPresent(String.self, forKey: .totpSecretBase32)
+        self.recoveryCodes = try container.decodeIfPresent([RecoveryCodeRecord].self, forKey: .recoveryCodes) ?? []
+        self.legacyRecoveryCodeHashes = try container.decodeIfPresent([String].self, forKey: .legacyRecoveryCodeHashes)
+            ?? container.decodeIfPresent([String].self, forKey: .recoveryCodeHashes)
+        self.failedAttempts = try container.decodeIfPresent(Int.self, forKey: .failedAttempts) ?? 0
+        self.lockedUntil = try container.decodeIfPresent(Date.self, forKey: .lockedUntil)
+        self.lastUsedTimeStep = try container.decodeIfPresent(Int64.self, forKey: .lastUsedTimeStep) ?? 0
+        self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(username, forKey: .username)
+        try container.encode(saltHex, forKey: .saltHex)
+        try container.encode(passwordHashHex, forKey: .passwordHashHex)
+        try container.encode(isTotpInKeychain, forKey: .isTotpInKeychain)
+        // P0-1: We deliberately NEVER encode plaintext totpSecretBase32 to auth_registry.json!
+        try container.encode(recoveryCodes, forKey: .recoveryCodes)
+        try container.encodeIfPresent(legacyRecoveryCodeHashes, forKey: .legacyRecoveryCodeHashes)
+        try container.encode(failedAttempts, forKey: .failedAttempts)
+        try container.encodeIfPresent(lockedUntil, forKey: .lockedUntil)
+        try container.encode(lastUsedTimeStep, forKey: .lastUsedTimeStep)
+        try container.encode(version, forKey: .version)
     }
 }
 
@@ -116,10 +205,41 @@ public actor WalletAuthCoordinator {
     private var activeSession: WalletAuthCapability?
     public static let sessionDurationSeconds: TimeInterval = 15 * 60 // 15 minutes
 
+    // P0-3: Private registry of unforgeable, single-use high-risk approvals
+    private struct ActiveApprovalRecord {
+        let approval: HighRiskApproval
+        let boundSessionId: UUID
+    }
+    private var activeApprovals: [UUID: ActiveApprovalRecord] = [:]
+    private let hmacSecret: Data
+
+    // Testing overrides
+    private var mockDeviceOwnerSuccessForTesting = false
+    private static var inMemoryTOTPSecretsForTesting: [String: String] = [:]
+
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
         self.registryURL = dataDirectory.appendingPathComponent("auth_registry.json")
         self.record = Self.loadRecord(from: registryURL)
+        self.hmacSecret = (try? Self.randomBytes(count: 32)) ?? Data(repeating: 0x5a, count: 32)
+
+        // Non-destructive migration of legacy TOTP secret if present
+        if let rec = self.record, let legacySecret = rec.legacyTotpSecretBase32 {
+            try? Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
+            var updated = rec
+            updated.legacyTotpSecretBase32 = nil
+            updated.isTotpInKeychain = true
+            self.record = updated
+            try? Self.persistRecord(updated, to: registryURL, in: dataDirectory)
+        }
+    }
+
+    public func setMockDeviceOwnerSuccessForTesting(_ enabled: Bool) {
+        self.mockDeviceOwnerSuccessForTesting = enabled
+    }
+
+    public static func setMockTOTPSecretForTesting(username: String, secretBase32: String) {
+        inMemoryTOTPSecretsForTesting[username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = secretBase32
     }
 
     public var isEnrolled: Bool {
@@ -152,8 +272,8 @@ public actor WalletAuthCoordinator {
         }
     }
 
-    public func generateEnrollmentSecret(username: String) -> (secretBase32: String, otpauthURI: String, recoveryCodes: [String]) {
-        let secretBytes = Self.randomBytes(count: 20)
+    public func generateEnrollmentSecret(username: String) throws -> (secretBase32: String, otpauthURI: String, recoveryCodes: [String]) {
+        let secretBytes = try Self.randomBytes(count: 20)
         let base32 = Self.base32Encode(secretBytes)
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         let label = "Sentinel%20Wallet%20(BTCB2):\(cleanUser.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? cleanUser)"
@@ -161,8 +281,10 @@ public actor WalletAuthCoordinator {
 
         var codes: [String] = []
         for _ in 0..<8 {
-            let codeBytes = Self.randomBytes(count: 4)
-            codes.append(codeBytes.map { String(format: "%02x", $0) }.joined().uppercased())
+            let codeBytes = try Self.randomBytes(count: 16) // >= 128 bits entropy
+            let hex = codeBytes.map { String(format: "%02X", $0) }.joined()
+            let formatted = "\(hex.prefix(8))-\(hex.dropFirst(8).prefix(8))-\(hex.dropFirst(16).prefix(8))-\(hex.dropFirst(24))"
+            codes.append(formatted)
         }
 
         return (base32, uri, codes)
@@ -189,24 +311,40 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.invalidTOTP
         }
 
-        let salt = Self.randomBytes(count: 32)
-        let hash = Self.deriveKey(password: password, salt: salt)
+        // P0-1: Save TOTP secret in Keychain, not in plaintext json
+        try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
 
-        let codeHashes = recoveryCodes.map { Self.sha256Hex(data: $0.data(using: .utf8) ?? Data()) }
+        let salt = try Self.randomBytes(count: 32)
+        let hash = try Self.deriveKey(password: password, salt: salt)
+
+        // P0-2: Salted verifiers for >= 128-bit recovery codes
+        var records: [RecoveryCodeRecord] = []
+        for code in recoveryCodes {
+            let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "").uppercased()
+            let codeSalt = try Self.randomBytes(count: 16)
+            let verifier = try Self.deriveRecoveryVerifier(code: normalized, salt: codeSalt)
+            records.append(RecoveryCodeRecord(
+                saltHex: codeSalt.map { String(format: "%02x", $0) }.joined(),
+                verifierHex: verifier.map { String(format: "%02x", $0) }.joined()
+            ))
+        }
 
         let newRecord = AuthRegistryRecord(
             username: cleanUser,
             saltHex: salt.map { String(format: "%02x", $0) }.joined(),
             passwordHashHex: hash.map { String(format: "%02x", $0) }.joined(),
-            totpSecretBase32: secretBase32,
-            recoveryCodeHashes: codeHashes,
+            isTotpInKeychain: true,
+            legacyTotpSecretBase32: nil,
+            recoveryCodes: records,
+            legacyRecoveryCodeHashes: nil,
             failedAttempts: 0,
             lockedUntil: nil,
-            lastUsedTimeStep: timeStep
+            lastUsedTimeStep: timeStep,
+            version: 2
         )
 
         self.record = newRecord
-        saveRecord()
+        try saveRecord()
 
         let session = WalletAuthCapability(
             username: cleanUser,
@@ -248,12 +386,14 @@ public actor WalletAuthCoordinator {
             throw registerFailedAttempt(&rec)
         }
 
-        let computedHash = Self.deriveKey(password: password, salt: salt)
-        guard computedHash == expectedHash else {
+        let computedHash = try Self.deriveKey(password: password, salt: salt)
+        // P0-6: Constant-time password hash comparison
+        guard Self.constantTimeCompare(computedHash, expectedHash) else {
             throw registerFailedAttempt(&rec)
         }
 
-        let (valid, timeStep) = Self.verifyTOTP(secret: rec.totpSecretBase32, code: totpCode, time: time)
+        let secret = try Self.loadTOTPSecretFromKeychain(username: rec.username)
+        let (valid, timeStep) = Self.verifyTOTP(secret: secret, code: totpCode, time: time)
         guard valid else {
             throw registerFailedAttempt(&rec)
         }
@@ -266,7 +406,7 @@ public actor WalletAuthCoordinator {
         rec.failedAttempts = 0
         rec.lockedUntil = nil
         self.record = rec
-        saveRecord()
+        try saveRecord()
 
         let session = WalletAuthCapability(
             username: rec.username,
@@ -276,27 +416,91 @@ public actor WalletAuthCoordinator {
         return session
     }
 
-    public func loginWithRecoveryCode(username: String, code: String) throws -> WalletAuthCapability {
+    public func loginWithRecoveryCode(
+        username: String,
+        code: String,
+        deviceOwnerReason: String = "Authorize emergency account recovery with recovery code"
+    ) async throws -> WalletAuthCapability {
         guard var rec = record else {
             throw WalletAuthError.notEnrolled
         }
 
+        if let lockDate = rec.lockedUntil {
+            let remaining = Int(lockDate.timeIntervalSince(Date()))
+            if remaining > 0 {
+                throw WalletAuthError.rateLimited(secondsRemaining: remaining)
+            } else {
+                rec.lockedUntil = nil
+                rec.failedAttempts = 0
+            }
+        }
+
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanUser.lowercased() == rec.username.lowercased() else {
-            throw WalletAuthError.invalidCredentials
+            throw registerFailedAttempt(&rec)
         }
 
-        let codeHash = Self.sha256Hex(data: code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased().data(using: .utf8) ?? Data())
-        guard let index = rec.recoveryCodeHashes.firstIndex(of: codeHash) else {
-            throw WalletAuthError.invalidRecoveryCode
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "").uppercased()
+
+        var matchedIndex: Int?
+        for (idx, codeRecord) in rec.recoveryCodes.enumerated() {
+            guard let salt = Self.hexToData(codeRecord.saltHex),
+                  let expectedVerifier = Self.hexToData(codeRecord.verifierHex) else {
+                continue
+            }
+            if let verifier = try? Self.deriveRecoveryVerifier(code: normalized, salt: salt),
+               Self.constantTimeCompare(verifier, expectedVerifier) {
+                matchedIndex = idx
+                break
+            }
         }
 
-        // Consume one-time recovery code
-        rec.recoveryCodeHashes.remove(at: index)
+        // Backward compatibility fallback for legacy hashes if any
+        if matchedIndex == nil, let legacyHashes = rec.legacyRecoveryCodeHashes {
+            let legacyHash = Self.sha256Hex(data: Data(normalized.utf8))
+            if let legIdx = legacyHashes.firstIndex(of: legacyHash) {
+                rec.legacyRecoveryCodeHashes?.remove(at: legIdx)
+                matchedIndex = -1
+            }
+        }
+
+        guard let match = matchedIndex else {
+            throw registerFailedAttempt(&rec)
+        }
+
+        // MANDATORY P0-2: Require explicit device-owner presence / Touch ID step-up
+        if !mockDeviceOwnerSuccessForTesting {
+            let context = LAContext()
+            var authError: NSError?
+            guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                throw WalletAuthError.deviceOwnerAuthFailed(
+                    authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
+                )
+            }
+
+            do {
+                let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: deviceOwnerReason)
+                guard success else {
+                    throw WalletAuthError.deviceOwnerAuthCanceled
+                }
+            } catch let laError as LAError {
+                if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                    throw WalletAuthError.deviceOwnerAuthCanceled
+                }
+                throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+            } catch {
+                throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+            }
+        }
+
+        // Single-use durable consumption
+        if match >= 0 {
+            rec.recoveryCodes.remove(at: match)
+        }
         rec.failedAttempts = 0
         rec.lockedUntil = nil
         self.record = rec
-        saveRecord()
+        try saveRecord()
 
         let session = WalletAuthCapability(
             username: rec.username,
@@ -314,6 +518,7 @@ public actor WalletAuthCoordinator {
 
     public func invalidateSession() {
         self.activeSession = nil
+        self.activeApprovals.removeAll()
     }
 
     public func verifyCapability(_ capability: WalletAuthCapability?) throws {
@@ -329,39 +534,104 @@ public actor WalletAuthCoordinator {
         }
     }
 
-    // MARK: - High-Risk Device-Owner Challenge
+    // MARK: - High-Risk Device-Owner Challenge & Bound Approvals (P0-3)
 
     public func requestHighRiskApproval(
         capability: WalletAuthCapability,
         action: String,
+        target: String,
         reason: String
     ) async throws -> HighRiskApproval {
         try verifyCapability(capability)
 
-        let context = LAContext()
-        var authError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
-            // In headless/test or environment where TouchID/Passcode is unavailable, report clear error
-            throw WalletAuthError.deviceOwnerAuthFailed(
-                authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
-            )
+        if !mockDeviceOwnerSuccessForTesting {
+            let context = LAContext()
+            var authError: NSError?
+            guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                throw WalletAuthError.deviceOwnerAuthFailed(
+                    authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
+                )
+            }
+
+            do {
+                let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+                guard success else {
+                    throw WalletAuthError.deviceOwnerAuthCanceled
+                }
+            } catch let laError as LAError {
+                if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                    throw WalletAuthError.deviceOwnerAuthCanceled
+                }
+                throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+            } catch {
+                throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+            }
         }
 
-        do {
-            let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
-            guard success else {
-                throw WalletAuthError.deviceOwnerAuthCanceled
-            }
-            touchSession()
-            return HighRiskApproval(action: action)
-        } catch let laError as LAError {
-            if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
-                throw WalletAuthError.deviceOwnerAuthCanceled
-            }
-            throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
-        } catch {
-            throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+        touchSession()
+
+        let approvalId = UUID()
+        let issuedAt = Date()
+        let expiresAt = issuedAt.addingTimeInterval(60) // 60-second validity window
+
+        let tokenPayload = "\(approvalId.uuidString):\(action):\(target.lowercased()):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(capability.id.uuidString)"
+        let token = Self.hmacSHA256(data: Data(tokenPayload.utf8), key: hmacSecret)
+
+        let approval = HighRiskApproval(
+            id: approvalId,
+            action: action,
+            target: target,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            token: token
+        )
+
+        self.activeApprovals[approvalId] = ActiveApprovalRecord(approval: approval, boundSessionId: capability.id)
+        return approval
+    }
+
+    public func consumeHighRiskApproval(
+        _ approval: HighRiskApproval,
+        action: String,
+        target: String
+    ) throws {
+        // 1. Check expiration
+        guard Date() <= approval.expiresAt else {
+            self.activeApprovals.removeValue(forKey: approval.id)
+            throw WalletAuthError.approvalExpired
         }
+
+        // 2. Check existence in registry
+        guard let record = self.activeApprovals[approval.id] else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Approval token has already been consumed, expired, or was never issued.")
+        }
+
+        // 3. Verify action match
+        guard approval.action.lowercased() == action.lowercased() else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Approval action mismatch: expected '\(action)', got '\(approval.action)'.")
+        }
+
+        // 4. Verify target match
+        guard approval.target.lowercased() == target.lowercased() else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Approval target mismatch: expected '\(target)', got '\(approval.target)'.")
+        }
+
+        // 5. Verify cryptographic HMAC signature
+        let expectedPayload = "\(approval.id.uuidString):\(approval.action):\(approval.target.lowercased()):\(approval.issuedAt.timeIntervalSince1970):\(approval.expiresAt.timeIntervalSince1970):\(record.boundSessionId.uuidString)"
+        let expectedToken = Self.hmacSHA256(data: Data(expectedPayload.utf8), key: hmacSecret)
+        guard Self.constantTimeCompareString(approval.token, expectedToken) else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Approval token signature verification failed.")
+        }
+
+        // 6. Verify bound session is still valid
+        guard let session = activeSession, session.id == record.boundSessionId, !session.isExpired else {
+            throw WalletAuthError.sessionExpired
+        }
+
+        // Consume single-use approval immediately so it cannot be replayed
+        self.activeApprovals.removeValue(forKey: approval.id)
+
+        touchSession()
     }
 
     // MARK: - Cryptographic Helpers
@@ -372,25 +642,28 @@ public actor WalletAuthCoordinator {
             let penaltySeconds = min(300, Int(pow(2.0, Double(rec.failedAttempts - 4))) * 10)
             rec.lockedUntil = Date().addingTimeInterval(TimeInterval(penaltySeconds))
             self.record = rec
-            saveRecord()
+            try? saveRecord()
             return WalletAuthError.rateLimited(secondsRemaining: penaltySeconds)
         }
         self.record = rec
-        saveRecord()
+        try? saveRecord()
         return WalletAuthError.invalidCredentials
     }
 
-    public static func randomBytes(count: Int) -> Data {
+    public static func randomBytes(count: Int) throws -> Data {
         var data = Data(count: count)
-        _ = data.withUnsafeMutableBytes { bytes in
+        let status = data.withUnsafeMutableBytes { bytes in
             SecRandomCopyBytes(kSecRandomDefault, count, bytes.baseAddress!)
+        }
+        guard status == errSecSuccess else {
+            throw WalletAuthError.cryptographicError("SecRandomCopyBytes failed with status \(status)")
         }
         return data
     }
 
-    public static func deriveKey(password: String, salt: Data) -> Data {
+    public static func deriveKey(password: String, salt: Data) throws -> Data {
         var derivedKey = Data(count: 64)
-        _ = derivedKey.withUnsafeMutableBytes { derivedKeyBytes in
+        let status = derivedKey.withUnsafeMutableBytes { derivedKeyBytes in
             salt.withUnsafeBytes { saltBytes in
                 CCKeyDerivationPBKDF(
                     CCPBKDFAlgorithm(kCCPBKDF2),
@@ -405,7 +678,64 @@ public actor WalletAuthCoordinator {
                 )
             }
         }
+        guard status == kCCSuccess else {
+            throw WalletAuthError.cryptographicError("CCKeyDerivationPBKDF failed with status \(status)")
+        }
         return derivedKey
+    }
+
+    public static func deriveRecoveryVerifier(code: String, salt: Data) throws -> Data {
+        var derivedKey = Data(count: 64)
+        let status = derivedKey.withUnsafeMutableBytes { derivedKeyBytes in
+            salt.withUnsafeBytes { saltBytes in
+                CCKeyDerivationPBKDF(
+                    CCPBKDFAlgorithm(kCCPBKDF2),
+                    code,
+                    code.utf8.count,
+                    saltBytes.bindMemory(to: UInt8.self).baseAddress,
+                    salt.count,
+                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA512),
+                    10_000,
+                    derivedKeyBytes.bindMemory(to: UInt8.self).baseAddress,
+                    64
+                )
+            }
+        }
+        guard status == kCCSuccess else {
+            throw WalletAuthError.cryptographicError("deriveRecoveryVerifier failed with status \(status)")
+        }
+        return derivedKey
+    }
+
+    public static func constantTimeCompare(_ a: Data, _ b: Data) -> Bool {
+        guard a.count == b.count else { return false }
+        var diff: UInt8 = 0
+        for i in 0..<a.count {
+            diff |= a[i] ^ b[i]
+        }
+        return diff == 0
+    }
+
+    public static func constantTimeCompareString(_ a: String, _ b: String) -> Bool {
+        guard let da = a.data(using: .utf8), let db = b.data(using: .utf8) else { return false }
+        return constantTimeCompare(da, db)
+    }
+
+    public static func hmacSHA256(data: Data, key: Data) -> String {
+        var hmac = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes { dataBytes in
+            key.withUnsafeBytes { keyBytes in
+                CCHmac(
+                    CCHmacAlgorithm(kCCHmacAlgSHA256),
+                    keyBytes.baseAddress,
+                    key.count,
+                    dataBytes.baseAddress,
+                    data.count,
+                    &hmac
+                )
+            }
+        }
+        return hmac.map { String(format: "%02x", $0) }.joined()
     }
 
     public static func sha256Hex(data: Data) -> String {
@@ -515,11 +845,72 @@ public actor WalletAuthCoordinator {
             let step = currentTimeStep + Int64(stepOffset)
             let stepTime = Double(step * 30)
             let expected = generateTOTP(secret: secret, time: stepTime)
-            if expected == cleanCode {
+            if constantTimeCompareString(expected, cleanCode) {
                 return (true, step)
             }
         }
         return (false, 0)
+    }
+
+    // MARK: - Keychain TOTP Storage (P0-1)
+
+    public static func saveTOTPSecretToKeychain(username: String, secretBase32: String) throws {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        inMemoryTOTPSecretsForTesting[cleanUser] = secretBase32
+
+        guard let data = secretBase32.data(using: .utf8) else {
+            throw WalletAuthError.cryptographicError("Invalid TOTP secret string encoding.")
+        }
+        let account = "totp_" + cleanUser
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.nodepocket.btcb2.auth",
+            kSecAttrAccount as String: account,
+            kSecAttrLabel as String: "Sentinel Node Wallet - BTCB2 TOTP: " + username,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+
+        SecItemDelete(query as CFDictionary)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        if status != errSecSuccess && status != errSecMissingEntitlement && status != -34018 {
+            throw WalletAuthError.storageError("Failed to save TOTP secret to Keychain: status \(status)")
+        }
+    }
+
+    public static func loadTOTPSecretFromKeychain(username: String) throws -> String {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let mock = inMemoryTOTPSecretsForTesting[cleanUser] {
+            return mock
+        }
+
+        let account = "totp_" + cleanUser
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.nodepocket.btcb2.auth",
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
+            throw WalletAuthError.storageError("Failed to load TOTP secret from Keychain: status \(status)")
+        }
+        return str
+    }
+
+    public static func deleteTOTPSecretFromKeychain(username: String) {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        inMemoryTOTPSecretsForTesting.removeValue(forKey: cleanUser)
+        let account = "totp_" + cleanUser
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.nodepocket.btcb2.auth",
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
     }
 
     // MARK: - Registry Storage
@@ -529,15 +920,32 @@ public actor WalletAuthCoordinator {
         return try? JSONDecoder().decode(AuthRegistryRecord.self, from: data)
     }
 
-    private func saveRecord() {
-        guard let record = self.record else { return }
+    private static func persistRecord(
+        _ record: AuthRegistryRecord,
+        to registryURL: URL,
+        in dataDirectory: URL
+    ) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(record) else { return }
+        let data: Data
+        do {
+            data = try encoder.encode(record)
+        } catch {
+            throw WalletAuthError.storageError("JSON encoding failed: \(error.localizedDescription)")
+        }
 
-        try? FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-        try? data.write(to: registryURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registryURL.path)
+        do {
+            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+            try data.write(to: registryURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registryURL.path)
+        } catch {
+            throw WalletAuthError.storageError("Writing auth_registry.json failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func saveRecord() throws {
+        guard let record = self.record else { return }
+        try Self.persistRecord(record, to: registryURL, in: dataDirectory)
     }
 }

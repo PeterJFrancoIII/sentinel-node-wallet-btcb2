@@ -984,34 +984,14 @@ public struct WalletView: View {
 
                 if !summary.isArchived {
                     Button("Archive") {
-                        Task {
-                            do {
-                                _ = try await state.requestHighRiskApproval(
-                                    action: "archive",
-                                    reason: "Authorize archiving wallet '\(summary.name)' from active memory"
-                                )
-                                state.archiveWallet(name: summary.name)
-                            } catch {
-                                // Cancelled or failed
-                            }
-                        }
+                        state.archiveWallet(name: summary.name)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
                     .help("Unload wallet from memory and collapse into Archived list. No files are deleted.")
                 } else {
                     Button("Unarchive") {
-                        Task {
-                            do {
-                                _ = try await state.requestHighRiskApproval(
-                                    action: "unarchive",
-                                    reason: "Authorize unarchiving wallet '\(summary.name)' to active memory"
-                                )
-                                state.unarchiveWallet(name: summary.name)
-                            } catch {
-                                // Cancelled or failed
-                            }
-                        }
+                        state.unarchiveWallet(name: summary.name)
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
@@ -1138,22 +1118,12 @@ public struct WalletView: View {
 
                 Button("Move to macOS Trash") {
                     guard let name = walletToDelete?.name else { return }
-                    Task {
-                        do {
-                            _ = try await state.requestHighRiskApproval(
-                                action: "delete",
-                                reason: "Authorize deletion of empty wallet '\(name)' to macOS Trash"
-                            )
-                            state.deleteWallet(
-                                name: name,
-                                typedConfirmation: typedDeleteName,
-                                verifiedBackupPath: deleteBackupPath
-                            )
-                            showDeleteConfirmationSheet = false
-                        } catch {
-                            deleteErrorMessage = "Device authorization failed: \(error.localizedDescription)"
-                        }
-                    }
+                    state.deleteWallet(
+                        name: name,
+                        typedConfirmation: typedDeleteName,
+                        verifiedBackupPath: deleteBackupPath
+                    )
+                    showDeleteConfirmationSheet = false
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)

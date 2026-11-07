@@ -113,7 +113,8 @@ final class EncryptedWalletOnboardingTests: XCTestCase {
         )
         return WalletManager(
             rpcClient: client,
-            keychainHelper: KeychainHelper(serviceName: "app.nodepocket.btcb2.wallet.onboarding-test")
+            keychainHelper: KeychainHelper(serviceName: "app.nodepocket.btcb2.wallet.onboarding-test"),
+            allowUnauthenticatedForTesting: true
         )
     }
 

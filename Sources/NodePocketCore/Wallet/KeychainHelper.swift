@@ -166,18 +166,27 @@ public final class KeychainHelper: Sendable {
             if status == errSecSuccess {
                 // When using fallback item where SecAccessControl.userPresence was not enforced at the OS Keychain level
                 // (e.g. ad-hoc signed development builds), enforce device-owner authentication explicitly via LAContext.
+                // P0-5: MUST fail closed if device-owner policy cannot be evaluated or is canceled/failed.
                 var authError: NSError?
-                if context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) {
-                    var authSuccess = false
-                    let sema = DispatchSemaphore(value: 0)
-                    context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Authorize access to BTCB2 wallet encryption key for " + account) { success, _ in
-                        authSuccess = success
-                        sema.signal()
-                    }
-                    _ = sema.wait(timeout: .now() + 60)
-                    guard authSuccess else {
+                guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                    throw KeychainError.userPresenceAuthenticationFailed(
+                        authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
+                    )
+                }
+                var authSuccess = false
+                var evalError: Error?
+                let sema = DispatchSemaphore(value: 0)
+                context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Authorize access to BTCB2 wallet encryption key for " + account) { success, error in
+                    authSuccess = success
+                    evalError = error
+                    sema.signal()
+                }
+                _ = sema.wait(timeout: .now() + 60)
+                guard authSuccess else {
+                    if let laErr = evalError as? LAError, laErr.code == .userCancel || laErr.code == .appCancel || laErr.code == .systemCancel {
                         throw KeychainError.userPresenceCanceled
                     }
+                    throw KeychainError.userPresenceAuthenticationFailed(evalError?.localizedDescription ?? "Device-owner authorization failed.")
                 }
             }
         }

@@ -71,7 +71,7 @@ public final class AppState: ObservableObject {
         let authCoord = WalletAuthCoordinator(dataDirectory: config.dataDirectory)
         self.authCoordinator = authCoord
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book, authCoordinator: authCoord)
-        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory)
+        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, authCoordinator: authCoord)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
         self.userPreferredProfile = config.profile.type
@@ -294,7 +294,7 @@ public final class AppState: ObservableObject {
             let clean = username.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !clean.isEmpty else { return }
             self.enrolledUsername = clean
-            self.generatedEnrollmentData = await authCoordinator.generateEnrollmentSecret(username: clean)
+            self.generatedEnrollmentData = try? await authCoordinator.generateEnrollmentSecret(username: clean)
         }
     }
 
@@ -349,11 +349,11 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func requestHighRiskApproval(action: String, reason: String) async throws -> HighRiskApproval {
+    public func requestHighRiskApproval(action: String, target: String, reason: String) async throws -> HighRiskApproval {
         guard let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
-        return try await authCoordinator.requestHighRiskApproval(capability: session, action: action, reason: reason)
+        return try await authCoordinator.requestHighRiskApproval(capability: session, action: action, target: target, reason: reason)
     }
 
     /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
@@ -590,13 +590,14 @@ public final class AppState: ObservableObject {
 
     public func refreshWalletInventory() {
         guard case .running = nodeState else { return }
+        guard isWalletTabUnlocked, let session = self.authSession else { return }
         Task { @MainActor in
             guard !isRefreshingInventory else { return }
             isRefreshingInventory = true
             defer { isRefreshingInventory = false }
             do {
                 let height = blockchainInfo?.blocks ?? 0
-                let summaries = try await walletInventory.refreshInventory(currentBlockHeight: height)
+                let summaries = try await walletInventory.refreshInventory(currentBlockHeight: height, capability: session)
                 self.walletSummaries = summaries
                 self.inventoryError = nil
             } catch {
@@ -608,7 +609,12 @@ public final class AppState: ObservableObject {
     public func archiveWallet(name: String) {
         Task { @MainActor in
             do {
-                try await walletInventory.archiveWallet(name: name)
+                let approval = try await requestHighRiskApproval(
+                    action: "archive",
+                    target: name,
+                    reason: "Authorize archiving wallet '\(name)' from active memory"
+                )
+                try await walletInventory.archiveWallet(name: name, capability: self.authSession, approval: approval)
                 appendLog("[WALLET] Archived wallet: \(name)")
                 refreshWalletInventory()
                 if walletSnapshot?.name == name {
@@ -624,7 +630,12 @@ public final class AppState: ObservableObject {
     public func unarchiveWallet(name: String) {
         Task { @MainActor in
             do {
-                try await walletInventory.unarchiveWallet(name: name)
+                let approval = try await requestHighRiskApproval(
+                    action: "unarchive",
+                    target: name,
+                    reason: "Authorize unarchiving and loading wallet '\(name)'"
+                )
+                try await walletInventory.unarchiveWallet(name: name, capability: self.authSession, approval: approval)
                 appendLog("[WALLET] Unarchived wallet: \(name)")
                 refreshWalletInventory()
             } catch {
@@ -637,10 +648,17 @@ public final class AppState: ObservableObject {
     public func deleteWallet(name: String, typedConfirmation: String, verifiedBackupPath: String) {
         Task { @MainActor in
             do {
+                let approval = try await requestHighRiskApproval(
+                    action: "delete",
+                    target: name,
+                    reason: "Authorize moving wallet '\(name)' to macOS Trash"
+                )
                 try await walletInventory.deleteWalletFromMac(
                     name: name,
                     typedConfirmation: typedConfirmation,
-                    verifiedBackupPath: verifiedBackupPath
+                    verifiedBackupPath: verifiedBackupPath,
+                    capability: self.authSession,
+                    approval: approval
                 )
                 appendLog("[WALLET] Safely trashed wallet '\(name)' with verified backup at \(verifiedBackupPath)")
                 refreshWalletInventory()

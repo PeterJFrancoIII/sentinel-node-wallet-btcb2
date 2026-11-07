@@ -128,6 +128,7 @@ public actor WalletManager {
     public let keychainHelper: KeychainHelper
     public let addressBook: AddressBook
     public let authCoordinator: WalletAuthCoordinator?
+    public let allowUnauthenticatedForTesting: Bool
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     private var isCreatingWallet = false
@@ -136,16 +137,21 @@ public actor WalletManager {
         rpcClient: BitcoinRPCClient,
         keychainHelper: KeychainHelper = .shared,
         addressBook: AddressBook = AddressBook(),
-        authCoordinator: WalletAuthCoordinator? = nil
+        authCoordinator: WalletAuthCoordinator? = nil,
+        allowUnauthenticatedForTesting: Bool = false
     ) {
         self.rpcClient = rpcClient
         self.keychainHelper = keychainHelper
         self.addressBook = addressBook
         self.authCoordinator = authCoordinator
+        self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
     }
 
     public func ensureAuthenticated(capability: WalletAuthCapability?) async throws {
-        guard let coordinator = self.authCoordinator else { return }
+        if allowUnauthenticatedForTesting { return }
+        guard let coordinator = self.authCoordinator else {
+            throw WalletAuthError.unauthenticated
+        }
         try await coordinator.verifyCapability(capability)
     }
 
@@ -399,9 +405,16 @@ public actor WalletManager {
     public func executeAuthorizedSend(
         preview: FundedTxPreview,
         explicitPassphrase: String? = nil,
-        capability: WalletAuthCapability? = nil
+        capability: WalletAuthCapability? = nil,
+        approval: HighRiskApproval? = nil
     ) async throws -> String {
         try await ensureAuthenticated(capability: capability)
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress)
+        }
         // No broadcast unless a verified BLAKE2b SIGHASH_UNIFIED transaction is signed with
         // fresh macOS user presence and immutable PSBT preview authorization.
         // This guard applies to ALL callers, not only the SwiftUI button.
@@ -416,8 +429,19 @@ public actor WalletManager {
     }
 
     /// Restores a wallet from an existing backup file.
-    public func restoreWallet(name: String, backupFile: URL, capability: WalletAuthCapability? = nil) async throws -> String {
+    public func restoreWallet(
+        name: String,
+        backupFile: URL,
+        capability: WalletAuthCapability? = nil,
+        approval: HighRiskApproval? = nil
+    ) async throws -> String {
         try await ensureAuthenticated(capability: capability)
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet restoration.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "restore", target: name)
+        }
         let resp = try await rpcClient.restoreWallet(name: name, backupFile: backupFile.path)
         self.currentWalletName = resp.name
         _ = try await refreshWalletInfo(capability: capability)
@@ -425,8 +449,19 @@ public actor WalletManager {
     }
 
     /// Backs up the wallet database to an isolated, operator-specified path.
-    public func exportBackup(to fileURL: URL, capability: WalletAuthCapability? = nil) async throws {
+    public func exportBackup(
+        to fileURL: URL,
+        capability: WalletAuthCapability? = nil,
+        approval: HighRiskApproval? = nil
+    ) async throws {
         try await ensureAuthenticated(capability: capability)
+        let target = currentWalletName ?? "default_wallet"
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet backup export.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "export", target: target)
+        }
         try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: currentWalletName)
     }
 

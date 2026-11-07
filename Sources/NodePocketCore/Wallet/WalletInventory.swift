@@ -166,12 +166,29 @@ public actor WalletInventory {
     private let dataDirectory: URL
     private var metadata: WalletMetadataRegistry
     private let metadataFileURL: URL
+    public let authCoordinator: WalletAuthCoordinator?
+    public let allowUnauthenticatedForTesting: Bool
 
-    public init(rpcClient: BitcoinRPCClient, dataDirectory: URL) {
+    public init(
+        rpcClient: BitcoinRPCClient,
+        dataDirectory: URL,
+        authCoordinator: WalletAuthCoordinator? = nil,
+        allowUnauthenticatedForTesting: Bool = false
+    ) {
         self.rpcClient = rpcClient
         self.dataDirectory = dataDirectory
         self.metadataFileURL = dataDirectory.appendingPathComponent("wallets_metadata.json")
         self.metadata = Self.loadMetadata(from: metadataFileURL)
+        self.authCoordinator = authCoordinator
+        self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
+    }
+
+    public func ensureAuthenticated(capability: WalletAuthCapability?) async throws {
+        if allowUnauthenticatedForTesting { return }
+        guard let coordinator = self.authCoordinator else {
+            throw WalletAuthError.unauthenticated
+        }
+        try await coordinator.verifyCapability(capability)
     }
 
     public static func validateWalletName(_ name: String) throws {
@@ -211,7 +228,11 @@ public actor WalletInventory {
         metadata
     }
 
-    public func refreshInventory(currentBlockHeight: Int = 0) async throws -> [WalletSummary] {
+    public func refreshInventory(
+        currentBlockHeight: Int = 0,
+        capability: WalletAuthCapability? = nil
+    ) async throws -> [WalletSummary] {
+        try await ensureAuthenticated(capability: capability)
         // 1. Discover wallets on disk
         let diskResponse = try await rpcClient.listWalletDir()
         let diskNames = diskResponse.wallets.map(\.name)
@@ -336,7 +357,18 @@ public actor WalletInventory {
         }
     }
 
-    public func archiveWallet(name: String) async throws {
+    public func archiveWallet(
+        name: String,
+        capability: WalletAuthCapability? = nil,
+        approval: HighRiskApproval? = nil
+    ) async throws {
+        try await ensureAuthenticated(capability: capability)
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet archive.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "archive", target: name)
+        }
         try Self.validateWalletName(name)
         if let loaded = try? await rpcClient.listWallets(), loaded.contains(name) {
             _ = try? await rpcClient.unloadWallet(name: name, loadOnStartup: false)
@@ -345,7 +377,18 @@ public actor WalletInventory {
         saveMetadata()
     }
 
-    public func unarchiveWallet(name: String) async throws {
+    public func unarchiveWallet(
+        name: String,
+        capability: WalletAuthCapability? = nil,
+        approval: HighRiskApproval? = nil
+    ) async throws {
+        try await ensureAuthenticated(capability: capability)
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet unarchive.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "unarchive", target: name)
+        }
         try Self.validateWalletName(name)
         metadata.archivedWallets.remove(name)
         saveMetadata()
@@ -407,8 +450,17 @@ public actor WalletInventory {
     public func deleteWalletFromMac(
         name: String,
         typedConfirmation: String,
-        verifiedBackupPath: String
+        verifiedBackupPath: String,
+        capability: WalletAuthCapability? = nil,
+        approval: HighRiskApproval? = nil
     ) async throws {
+        try await ensureAuthenticated(capability: capability)
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet deletion.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "delete", target: name)
+        }
         guard typedConfirmation == name else {
             throw WalletInventoryError.confirmationMismatch(expected: name, got: typedConfirmation)
         }

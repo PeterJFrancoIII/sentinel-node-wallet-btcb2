@@ -60,7 +60,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let isEnrolledInitially = await coordinator.isEnrolled
         XCTAssertFalse(isEnrolledInitially)
 
-        let (secret, uri, codes) = await coordinator.generateEnrollmentSecret(username: "operator1")
+        let (secret, uri, codes) = try await coordinator.generateEnrollmentSecret(username: "operator1")
         XCTAssertFalse(secret.isEmpty)
         XCTAssertTrue(uri.contains("otpauth://totp/"))
         XCTAssertEqual(codes.count, 8)
@@ -89,6 +89,11 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let attrs = try FileManager.default.attributesOfItem(atPath: registryFile.path)
         let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
         XCTAssertEqual(perms & 0o777, 0o600)
+
+        // P0-1: Registry file MUST NOT contain plaintext TOTP secret
+        let rawContent = try String(contentsOf: registryFile, encoding: .utf8)
+        XCTAssertFalse(rawContent.contains(secret), "auth_registry.json must NEVER contain plaintext TOTP secret!")
+        XCTAssertTrue(rawContent.contains("isTotpInKeychain"))
 
         // Double enrollment must fail
         do {
@@ -139,7 +144,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
-        let (secret, _, codes) = await coordinator.generateEnrollmentSecret(username: "operator")
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator")
         let now = Date().timeIntervalSince1970
         let code = WalletAuthCoordinator.generateTOTP(secret: secret, time: now)
 
@@ -181,7 +186,9 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
-        let (secret, _, codes) = await coordinator.generateEnrollmentSecret(username: "operator")
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator")
         let now = Date().timeIntervalSince1970
         let code = WalletAuthCoordinator.generateTOTP(secret: secret, time: now)
 
@@ -193,18 +200,111 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             recoveryCodes: codes
         )
 
+        // P0-2: Verify >= 128-bit entropy format (4 groups of 8 hex chars = 32 hex = 16 bytes = 128 bits)
         let firstRecoveryCode = codes[0]
+        let stripped = firstRecoveryCode.replacingOccurrences(of: "-", with: "")
+        XCTAssertEqual(stripped.count, 32, "Recovery code must have 128 bits of entropy (32 hex characters)")
 
         // Login using recovery code
         let recCapability = try await coordinator.loginWithRecoveryCode(username: "operator", code: firstRecoveryCode)
         XCTAssertEqual(recCapability.username, "operator")
 
-        // Using same recovery code again must fail (consumed)
+        // Using same recovery code again must fail (consumed single-use)
         do {
             _ = try await coordinator.loginWithRecoveryCode(username: "operator", code: firstRecoveryCode)
             XCTFail("Consumed recovery code must fail")
         } catch let err as WalletAuthError {
-            XCTAssertEqual(err, .invalidRecoveryCode)
+            XCTAssertEqual(err, .invalidCredentials)
+        }
+    }
+
+    // MARK: - Adversarial Security Tests (P0-3, P0-4)
+
+    func testHighRiskApprovalBoundActionAndReplayPrevention() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_auth_approval_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "admin")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+
+        let capability = try await coordinator.enroll(
+            username: "admin",
+            password: "AdminPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        // Request approval bound to action "archive" and target "vault_alpha"
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "archive",
+            target: "vault_alpha",
+            reason: "Testing high-risk binding"
+        )
+
+        XCTAssertEqual(approval.action, "archive")
+        XCTAssertEqual(approval.target, "vault_alpha")
+        XCTAssertFalse(approval.token.isEmpty)
+
+        // 1. Mismatched action must fail
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "delete", target: "vault_alpha")
+            XCTFail("Consuming with mismatched action must fail")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 2. Mismatched target must fail
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "archive", target: "vault_beta")
+            XCTFail("Consuming with mismatched target must fail")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 3. Exact match consumes successfully
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "archive", target: "vault_alpha")
+        } catch {
+            XCTFail("Exact match should consume successfully: \(error)")
+        }
+
+        // 4. Replay must fail immediately (single-use)
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "archive", target: "vault_alpha")
+            XCTFail("Replayed approval must fail")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction on replay, got \(err)")
+            }
+        }
+    }
+
+    func testFailClosedWhenUnauthenticatedOrNoCoordinator() async throws {
+        let rpc = BitcoinRPCClient(user: "test", password: "pwd")
+        // Production initialization without coordinator or capability must fail closed
+        let manager = WalletManager(rpcClient: rpc, authCoordinator: nil)
+        do {
+            try await manager.ensureAuthenticated(capability: nil)
+            XCTFail("ensureAuthenticated must fail closed when authCoordinator is nil in production")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .unauthenticated)
         }
     }
 }

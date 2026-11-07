@@ -199,7 +199,7 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "test", password: "pwd")
-        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, allowUnauthenticatedForTesting: true)
 
         // Archive a wallet
         try await inventory.archiveWallet(name: "archive_me")
@@ -224,7 +224,7 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "test", password: "pwd")
-        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, allowUnauthenticatedForTesting: true)
 
         // 1. Confirmation name mismatch
         do {
@@ -303,7 +303,7 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         }
 
         let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: rpcUser, password: rpcPass)
-        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: datadir)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: datadir, allowUnauthenticatedForTesting: true)
 
         let ephemeralWalletName = "test_del_wallet_\(Int(Date().timeIntervalSince1970))"
 

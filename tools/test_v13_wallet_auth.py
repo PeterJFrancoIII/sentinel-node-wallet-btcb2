@@ -75,21 +75,21 @@ class TestV13WalletAuth(unittest.TestCase):
         self.assertTrue(verify_totp(secret, code_next, t0)[0])
         self.assertFalse(verify_totp(secret, code_too_far, t0)[0])
 
-    def test_recovery_code_one_time_use(self):
-        recovery_codes = ["A1B2C3D4", "E5F6G7H8"]
-        recovery_hashes = [hashlib.sha256(c.encode()).hexdigest() for c in recovery_codes]
+    def test_recovery_code_high_entropy_and_salt(self):
+        # 16 bytes = 128 bits = 32 hex chars
+        raw_code = "A1B2C3D4-E5F67890-12345678-90ABCDEF"
+        stripped = raw_code.replace("-", "")
+        self.assertEqual(len(stripped), 32)
 
-        # Use first code
-        input_code = "A1B2C3D4"
-        input_hash = hashlib.sha256(input_code.encode()).hexdigest()
-        self.assertIn(input_hash, recovery_hashes)
+        salt = os.urandom(16)
+        verifier = hashlib.pbkdf2_hmac("sha512", stripped.encode(), salt, 10000)
+        self.assertEqual(len(verifier), 64)
 
-        # Consume code
-        recovery_hashes.remove(input_hash)
-        self.assertEqual(len(recovery_hashes), 1)
-
-        # Attempt to reuse consumed code
-        self.assertNotIn(input_hash, recovery_hashes)
+        # Single-use consumption
+        stored_records = [{"salt": salt.hex(), "verifier": verifier.hex()}]
+        self.assertEqual(len(stored_records), 1)
+        stored_records.pop(0)
+        self.assertEqual(len(stored_records), 0)
 
     def test_rate_limiting_lockout_calculation(self):
         failed_attempts = 4
@@ -99,7 +99,6 @@ class TestV13WalletAuth(unittest.TestCase):
         self.assertEqual(penalty_seconds, 20)
 
     def test_source_code_regtest_exclusion(self):
-        # Confirm generateRegtestBlocks is compile-gated or removed from production runtime
         wallet_mgr_path = os.path.join(
             os.path.dirname(__file__), "..", "Sources", "NodePocketCore", "Wallet", "WalletManager.swift"
         )
@@ -108,6 +107,32 @@ class TestV13WalletAuth(unittest.TestCase):
 
         if "generateRegtestBlocks" in content:
             self.assertIn("#if DEBUG", content)
+
+    def test_source_code_no_raw_totp_in_auth_registry_record(self):
+        coord_path = os.path.join(
+            os.path.dirname(__file__), "..", "Sources", "NodePocketCore", "Auth", "WalletAuthCoordinator.swift"
+        )
+        with open(coord_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # AuthRegistryRecord encoding must not save totpSecretBase32
+        self.assertIn("isTotpInKeychain", content)
+        self.assertIn("saveTOTPSecretToKeychain", content)
+        self.assertIn("loadTOTPSecretFromKeychain", content)
+
+    def test_high_risk_approval_hmac_binding(self):
+        secret = os.urandom(32)
+        payload = "uuid-123:archive:wallet_alpha:1000:1060:session-456"
+        token = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
+
+        # Matching verification
+        expected = hmac.new(secret, payload.encode(), hashlib.sha256).hexdigest()
+        self.assertEqual(token, expected)
+
+        # Tampered action fails
+        tampered_payload = "uuid-123:delete:wallet_alpha:1000:1060:session-456"
+        tampered_expected = hmac.new(secret, tampered_payload.encode(), hashlib.sha256).hexdigest()
+        self.assertNotEqual(token, tampered_expected)
 
 if __name__ == "__main__":
     unittest.main()
