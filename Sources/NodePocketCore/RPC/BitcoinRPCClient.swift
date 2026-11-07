@@ -35,7 +35,8 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         port: Int = 8332,
         user: String,
         password: String,
-        timeoutInterval: TimeInterval = 10.0
+        timeoutInterval: TimeInterval = 10.0,
+        urlSession: URLSession? = nil
     ) {
         self.host = host
         self.port = port
@@ -45,7 +46,7 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeoutInterval
         config.timeoutIntervalForResource = timeoutInterval
-        self.session = URLSession(configuration: config)
+        self.session = urlSession ?? URLSession(configuration: config)
     }
 
     public func getEndpointURL(walletName: String? = nil) -> URL? {
