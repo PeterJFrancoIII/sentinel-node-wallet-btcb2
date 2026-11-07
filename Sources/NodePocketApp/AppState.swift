@@ -135,19 +135,22 @@ public final class AppState: ObservableObject {
                     try await nodeManager.waitForRPCReadiness(timeoutSeconds: 60)
                 }
 
-                startupStatus = "Loading encrypted descriptor wallet..."
-                let walletName = try await walletManager.ensureDefaultWalletLoaded()
-                appendLog("[BOOTSTRAP] Wallet '\(walletName)' ready.")
-
-                startupStatus = "Generating receive address..."
-                if let addr = try? await walletManager.generateReceiveAddress() {
-                    self.receiveAddress = addr
-                    appendLog("[BOOTSTRAP] Generated receive address: \(addr)")
+                startupStatus = "Checking for an existing wallet..."
+                var needsWalletSetup = false
+                do {
+                    let walletName = try await walletManager.ensureDefaultWalletLoaded()
+                    appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded.")
+                    receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
+                    walletSnapshot = try await walletManager.refreshWalletInfo()
+                    transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                } catch WalletSecurityError.walletOnboardingRequired {
+                    // No wallet exists yet. This is normal, NOT a failed node startup.
+                    needsWalletSetup = true
+                    walletSnapshot = nil
+                    receiveAddress = ""
+                    transactions = []
+                    appendLog("[WALLET] Node is running. Create or load an encrypted wallet.")
                 }
-
-                startupStatus = "Refreshing balances..."
-                self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
 
                 if let binfo = try? await nodeManager.rpcClient.getBlockchainInfo() {
                     self.blockchainInfo = binfo
@@ -156,9 +159,11 @@ public final class AppState: ObservableObject {
                     self.networkInfo = netInfo
                 }
 
-                startupStatus = "Ready"
+                startupStatus = needsWalletSetup ? "Node running — create an encrypted wallet" : "Ready"
                 isStartingUp = false
-                appendLog("[BOOTSTRAP] 1-Click initialization completed successfully.")
+                appendLog(needsWalletSetup
+                    ? "[BOOTSTRAP] Node online; wallet setup required."
+                    : "[BOOTSTRAP] Node and existing wallet ready.")
             } catch {
                 isStartingUp = false
                 startupStatus = "Failed"
@@ -167,6 +172,31 @@ public final class AppState: ObservableObject {
                 appendLog("[ERROR] 1-Click Startup failed: \(error.localizedDescription)")
             }
         }
+    }
+
+    /// Complete first-run wallet onboarding without restarting or resetting IBD.
+    public func createEncryptedWallet(
+        name: String, passphrase: String, storeInKeychain: Bool
+    ) async throws {
+        try await walletManager.createEncryptedDescriptorWallet(
+            name: name, passphrase: passphrase, storeInKeychain: storeInKeychain
+        )
+        walletSnapshot = try await walletManager.refreshWalletInfo()
+        receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
+        transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        startupStatus = "Ready"
+        appendLog("[WALLET] Encrypted descriptor wallet '\(name)' verified and ready.")
+    }
+
+    /// A prior attempt may have succeeded before its response was lost.
+    /// Load it safely instead of creating a second wallet over the same name.
+    public func loadExistingWallet(name: String) async throws {
+        try await walletManager.loadWallet(name: name)
+        walletSnapshot = try await walletManager.refreshWalletInfo()
+        receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
+        transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        startupStatus = "Ready"
+        appendLog("[WALLET] Existing wallet '\(name)' loaded.")
     }
 
     public func stopNode() {
