@@ -1,43 +1,23 @@
-# Test and Release Matrix: Sentinel Node Wallet - BTCB2
+# Test and release matrix — Sentinel Node Wallet - BTCB2
 
-**Date:** 2026-11-06  
-**Architecture:** Apple Silicon (`arm64`)  
-**macOS Target:** macOS 13.0+ (Ventura, Sonoma, Sequoia)
+**Current status:** a published development repository exists. The previous v6 receipt of 35 passing tests does **not** cover the new Wallet Manager v7 requirements, genuine security-device consent, nor release notarization. This file specifies **required** results; unmeasured items are NOT RUN.
 
----
+| Gate / scenario | Evidence required | Current v7 status |
+| --- | --- | --- |
+| Wallet constructor never creates unencrypted by default | Mock missing passphrase + failure, real empty-wallet creation check | NOT RUN — P0 |
+| BTCB2 MainNet and replay-safe signing | Verified fork block 961,640, fresh anchor/tip and decoded actual unified signatures; wrong chain/`tb1`/`bcrt1` rejected | NOT RUN — P0 |
+| Per-send Mac user presence | Touch ID / device owner auth, deny/cancel/replay tests with Security.framework on real host | NOT RUN — P0 |
+| Address allowlist | New/edited/removed/disabled entries require auth; unknown address and clipboard swap rejected by core logic | NOT RUN — P0 |
+| Immutable fee-aware send preview | Sat integer accounting; funded PSBT actual vsize/fee/change; quote change, expired quote and double-submit rejected | NOT RUN — P0 |
+| Fees and timing | Cheapest=24, Normal=6, Fast=2 blocks; live own-node estimate/floor; custom sat/vB; no invented ETA; fee target ordering | NOT RUN |
+| Coinbase maturity | Original height 973439/973440/979918/979919, MTP expiry, pre-expiry long-lock, exact boundary/reorg | NOT RUN |
+| Mature/pending/immature buckets | Coinbases only subject to maturity; verify trusted balance and 0-conf handling with node | NOT RUN |
+| TX history | Pagination, UTXO detail, confirmations, fee, vsize, replace/conflict/abandon/reorg, multi-output TXID grouping | NOT RUN |
+| Explorer link | Strict 64 lowercase/uppercase hex, `mempool.guide/tx/`, explicit click; no silent network request | NOT RUN |
+| Wallet backup/restore | Empty wallet + contacts backup, Keychain auth, prune birth-height warning, no overwrite/data loss | NOT RUN — P0 |
+| App isolation + minimalism | One node, three views, no DATUM/miner/cloud integration, no production alternate chains | TO REVERIFY |
+| Resource/storage | 550MiB prune from IBD, 35/40GiB disk warnings/stops, actual peak disk and CPU/RSS/energy | TO REVERIFY |
+| Development docs + secrets | Swift+Python deterministic tests, clean CI scan, source/vendor/license review | NOT RUN v7 |
+| Public release | Apple Developer ID for app+bitcoind; notarization/staple/Gatekeeper; signed updates; independent wallet audit | BLOCKED |
 
-## 1. Test Execution Summary
-
-| Test Suite | Framework | Target / Test File | Test Count | Result | Execution Time |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Adaptive ETA Formatting & States** | Swift XCTest | `AdaptiveETATests.swift` | 2 | **PASS** | 0.001s |
-| **BIP-110 Consensus & Checkpoints** | Swift XCTest | `ConsensusTests.swift` | 4 | **PASS** | 0.001s |
-| **Hashrate Tracker & Anomaly Defense** | Swift XCTest | `HashrateTrackerTests.swift` | 3 | **PASS** | 0.001s |
-| **Isolation & Zero-Leak Auditing** | Swift XCTest | `IsolationSecurityTests.swift` | 4 | **PASS** | 0.001s |
-| **Subprocess Perms & Fork Rejection** | Swift XCTest | `NodeSubprocessIntegrationTests.swift` | 2 | **PASS** | 0.003s |
-| **1-Click Adoption & Mainnet RPC** | Swift XCTest | `OneClickIntegrationTests.swift` | 1 | **PASS** | 0.008s |
-| **Compact 550M & Archival 1TB Gates**| Swift XCTest | `StorageModeTests.swift` | 2 | **PASS** | 0.001s |
-| **Profile Presets & bitcoin.conf** | Swift XCTest | `SyncProfileTests.swift` | 2 | **PASS** | 0.001s |
-| **Host System Health (Disk & Power)** | Swift XCTest | `SystemHealthTests.swift` | 2 | **PASS** | 0.020s |
-| **Keychain Passphrase & Send Gating**| Swift XCTest | `WalletIntegrationTests.swift` | 3 | **PASS** | 0.027s |
-| **Deterministic ETA Trajectory** | Python 3 | `tools/test_eta_engine.py` | 3 | **PASS** | 0.001s |
-| **Governance & Topic Compliance** | Python 3 | `tools/verify_governance.py` | 3 | **PASS** | 0.008s |
-| **Secret & Cross-Project Isolation** | Shell / Regex | `scripts/secret_scan.sh` | 4 | **PASS** | 0.012s |
-
-**Total Tests:** 35 / 35 Passed (0 Failures, 0 Regressions)
-
----
-
-## 2. Release Gate Status Matrix
-
-| Release Gate | Gate Description | Target Verification | Status in v0.1.0 Dev Build |
-| :--- | :--- | :--- | :--- |
-| **Gate 1** | Clean-Room Consensus Tests | 25/25 Swift XCTest & Python suites passing | **PASS** (Local arm64) |
-| **Gate 2** | Secret & Isolation Audit | Zero credentials, private keys, or cross-project leaks | **PASS** (`secret_scan.sh`) |
-| **Gate 3** | Discrete Prune Storage Protection | 550 MiB default, warn at 35 GB, stop at $\le 10$ GB free | **PASS** (`StorageModeTests`) |
-| **Gate 4** | Adaptive ETA Engine | Multi-window smoothing, auto-scaled unit formatting | **PASS** (`AdaptiveETATests`) |
-| **Gate 5** | Apple Developer ID Signing | Valid Apple Developer ID certificate code sign | **BLOCKED (Operator Credentials Needed)** |
-| **Gate 6** | Apple Notarization & Stapling | `xcrun notarytool` ticket stapled to DMG | **BLOCKED (Operator Credentials Needed)** |
-| **Gate 7** | Gatekeeper Qualification | Clean execution under macOS Gatekeeper default policy | **BLOCKED (Awaiting Gate 5 & 6)** |
-| **Gate 8** | Sparkle Update Infrastructure | EdDSA signed delta release appcast | **BLOCKED (Awaiting Release Key)** |
-| **Gate 9** | Independent Security Audit | Third-party cryptographic & descriptor wallet review | **BLOCKED (Scheduled Post-Alpha)** |
+**No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
