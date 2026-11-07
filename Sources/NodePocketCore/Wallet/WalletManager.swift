@@ -177,7 +177,18 @@ public actor WalletManager {
         // creation, so an ambiguous RPC timeout cannot strand an encrypted wallet
         // whose passphrase failed to save. Do not discard it automatically on error.
         if storeInKeychain {
-            try keychainHelper.savePassphrase(passphrase, account: name)
+            do {
+                try keychainHelper.savePassphrase(passphrase, account: name)
+            } catch KeychainError.duplicateItem {
+                // A previous create request may have succeeded before its RPC
+                // response failed. Preserve that existing Keychain credential;
+                // permit a retry only when the owner authenticates and confirms
+                // that its passphrase matches exactly.
+                let saved = try await keychainHelper.retrievePassphraseInteractively(account: name)
+                guard saved == passphrase else {
+                    throw WalletSecurityError.passphrasesDoNotMatch
+                }
+            }
         }
         _ = try await rpcClient.createWallet(
             name: name, passphrase: passphrase, descriptors: true, loadOnStartup: true
