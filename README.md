@@ -1,128 +1,59 @@
 # Sentinel Node Wallet - BTCB2
 
-> Native macOS BTCB2 BLAKE2b mainnet wallet and Bitcoin Knots validating node. 550 MiB pruning, adjustable storage, optional archival history, Keychain security, network hashrate and sync ETA.
+> **Minimal, self-custodial BTCB2 BLAKE2b MainNet wallet and validating Bitcoin Knots node for macOS.** Active pruning by default, optional archival history, network hashrate, dynamic synchronization ETA, and a secure native Wallet Manager.
 
-[![macOS](https://img.shields.io/badge/platform-macOS%2013%2B%20(Apple%20Silicon)-black.svg)](https://apple.com)
-[![Swift](https://img.shields.io/badge/Swift-6.4.2%20%2F%20SwiftUI-orange.svg)](https://swift.org)
-[![Consensus](https://img.shields.io/badge/consensus-BIP--110%20BLAKE2b-blue.svg)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+**Development status — not approved for real funds or public binary distribution.** Swift/Python test receipts document development progress, not independent wallet-security certification. Apple Developer ID signing, notarization, secured auto-updates, full wallet recovery and an independent security review are release gates. [Security policy](SECURITY.md) · [Release matrix](TEST_AND_RELEASE_MATRIX.md).
 
----
+## Three screens. No unnecessary services.
 
-## Important Notices & Disclaimer
+| Screen | Purpose |
+| --- | --- |
+| **Node** | Verified BTCB2 BLAKE2b MainNet sync, node health, adaptive time remaining, disk safety, Quiet/Balanced/Fast profiles and storage options. |
+| **Wallet** | Local encrypted descriptor wallet, receive QR, balances, coinbase maturity countdown, fee-aware sending, named trusted recipients and full transaction history. See [Wallet Manager v7](docs/WALLET_MANAGER_V7.md) for planned security requirements and implementation status. |
+| **Network** | Locally derived BLAKE2b network hashrate, 30/120-block trends, freshness and difficulty. |
 
-> [!WARNING]
-> **DEVELOPMENT & EVALUATION RELEASE ONLY**  
-> This build is strictly for local testing, consensus validation, and peer evaluation. Public binary releases and distribution are gated until formal Apple Developer ID code signing, Apple Notarization, Gatekeeper validation, signed Sparkle update delivery, and an independent security audit are completed.
+One native **SwiftUI** application supervises one official, verified fork-compatible **Bitcoin Knots** node. Its dedicated app data and Keychain items are isolated from the Sentinel mining pool, Admin Node Console, Ethereum Mining Corp, ASIC firmware and all other projects. No Electron, Docker, hosted wallet, miner, gateway or analytics service.
 
-> [!IMPORTANT]
-> **Consensus & Network Scope: BTCB2 BLAKE2b MainNet Only**  
-> Sentinel Node Wallet operates exclusively on the **BTCB2 BLAKE2b / BIP-110 MainNet** (hard fork checkpoint at height `961,640`, block hash `0000000000000050c1e5f69672f459293be14f46e5a494e7a8c8541396f18eeb`). It is **NOT** compatible with ordinary SHA-256d Bitcoin mainnet, nor are testnets or regtest enabled in production builds.
+### BTCB2 MainNet, not ordinary BTC
 
-> [!NOTE]
-> **Pruning vs. Disk Footprint Clarification**  
-> The default `prune=550` (550 MiB) setting restricts **raw blockfile storage**. It does **not** cap the total node data directory size. The UTXO coins database (`chainstate`), block index, and wallet database grow independently (~5–15 GB). Sentinel Node Wallet actively monitors host disk space, warns the operator at 35 GB total datadir usage, and gracefully suspends sync if host free space drops below 10 GB.
+The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,640**. Ordinary Bitcoin Core, standard SHA-256d Bitcoin MainNet and the same-looking `bc1` addresses are **not proof of this chain**. Every sensitive wallet operation must verify the BLAKE2b block at that height, subsequent trusted chain evidence and a current synchronized tip. Only BTCB2 MainNet is shipped: no TestNet, RegTest, Signet or network selector.
 
----
+### Disk space: pruned by default
 
-## Discoverability & GitHub Topics
+| Mode | Policy |
+| --- | --- |
+| **Compact** (default) | `prune=550` and `pruneduringinit=550` MiB, beginning with initial sync; selectable 550 MiB, 1/2/4 GiB or validated custom value. |
+| **Storage protection** | Warn at 35 GiB app data; graceful pause by 40 GiB or around 10–12 GiB host free, preserving wallet data. Target **under 50 GiB total**, not a hard guarantee. |
+| **Full History** (explicit opt-in) | `prune=0`, complete historical redownload/reindex, sufficient capacity (typically a dedicated external SSD), verified backup and safe rollback. |
 
-Repository: `PeterJFrancoIII/sentinel-node-wallet-btcb2`
+**550 MiB limits retained block/undo files, not the entire node directory.** Chainstate, indexes, wallet files and temporary operations consume more space. Even a pruned node downloads and validates historical blocks before discarding them; it remains a **fully validating node**. Full History additionally stores and can serve historical blocks when reachable.
 
-Topics:
-`btcb2`, `bitcoin-blake2b`, `blake2b`, `bip110`, `bitcoin-knots`, `macos`, `macos-app`, `swift`, `swiftui`, `apple-silicon`, `bitcoin-wallet`, `non-custodial`, `self-custody`, `wallet-manager`, `pruned-node`, `full-node`, `blockchain-node`, `low-storage`, `network-hashrate`, `sentinel-node-wallet`
+### Wallet Manager — target v7 parity with the Admin Console
 
----
+- **Mature / immature / pending / spendable** BTCB2 balances. Coinbase rules use the **reward's originating height**: 100 blocks before 973,440; 6,480 blocks for 973,440–979,918; 25,920 blocks from 979,919 until the September 2027 rule expiry; then the applicable node-reported consensus rules. Previously minted 45-day rewards do not become 180-day rewards. Per-reward maturity block, remaining blocks and approximate w/d/h/m/s ETA are displayed; non-coinbase transfers are not subject to coinbase maturity.
+- **Cheapest / Normal / Fast / Custom** transfer fees: local-node dynamic rates, tentative 24/6/2-block inclusion targets, actual PSBT-based fee/virtual-size preview, and honest estimated time ranges. No guessed fees, fake precision or silent broadcast.
+- **Named trusted recipients** and enforced address allowlist; identity confirmation and reauthorization for additions, edits, bypasses and each spend.
+- **History and TXID detail:** all available wallet records with fees, confirmation/reorg/immature/RBF states, search and pagination. Explicit-click BTCB2 explorer links use [mempool.guide](https://mempool.guide), **not ordinary mempool.space** (which indexes a different Bitcoin chain).
+- **Security first:** Keychain user presence, encrypted wallets only, replay-safe SIGHASH_UNIFIED signing verified on the actual fork, preview bound to the eventual broadcast, no plaintext secret fallback, no remote wallet RPC. **Sending is not approved until all v7 P0 gates are proven and tested.**
 
-## Core Capabilities
+A hot wallet on a fully compromised Mac cannot promise perfect protection. Enable FileVault, keep macOS updated, protect login credentials and consider an offline/hardware signer for high-value funds.
 
-### 1. Embedded Bitcoin Knots Validating Node
-- Bundles official Bitcoin Knots `v29.4.3.knots20260508` compiled natively for Apple Silicon (`arm64`).
-- Full sovereign consensus verification from genesis through the BIP-110 BLAKE2b transition.
-- Fail-closed fork checkpoint enforcement: automatically rejects any block sequence that attempts to continue legacy SHA-256d consensus past height 961,640.
+## Installation and development
 
-### 2. Dual Storage Architecture
-- **Compact Pruned (Default):**
-  - Active from initial block download: `prune=550` and `pruneduringinit=550`.
-  - Operator-customizable retention selector ($\ge 550$ MiB, e.g. 1 GB, 2 GB, 4 GB, or custom integer).
-  - Designed for internal laptop SSDs (MacBook Air / MacBook Pro).
-  - Disk safety guards: Alert at $\ge 35$ GB datadir; automatic graceful stop at $\ge 40$ GB datadir or $\le 10$ GB free host storage.
-- **Full-History / Archival Mode (Opt-in):**
-  - Fully unpruned (`prune=0`) retaining 100% of historical block data (~800+ GB).
-  - Hard-gated against internal drive installation (<50 GB free) to protect macOS system stability.
-  - Requires preflight-verified external high-capacity drive or SSD with $\ge 1$ TB free space.
-  - Clear confirmation warnings regarding complete historical reindex / redownload requirements.
+**Target:** Apple Silicon macOS 13+; existing internal app identifier/data paths may remain under the former development name to protect existing wallet and sync state. Branding changes must never initialize a new wallet or delete old blockchain files.
 
-### 3. Adaptive Verification Progress ETA
-- Computes empirical block verification speed using monotonic, rolling-window throughput smoothing.
-- Displays auto-scaled time remaining: `~2w 3d`, `~3d 7h`, `~5h 24m`, `~18m 42s`, `~47s`, or `~0s`.
-- Transparent state indicators: `Calibrating...`, `Estimating`, `Waiting for peers`, `Stalled`, or `Synchronized`.
-
-### 4. Non-Custodial Encrypted Descriptor Wallet
-- Modern output descriptors with Native SegWit (Bech32, `bc1...`) addresses.
-- Passphrase protection using Apple Keychain Services (`app.nodepocket.btcb2.wallet`).
-- Zero plaintext passphrases or unencrypted private keys written to disk.
-- Send transaction gating: Transacting is locked until Initial Block Download (IBD) is complete and the chain tip is verified past the BIP-110 fork.
-
-### 5. Local Consensus Hashrate Tracker
-- 100% locally calculated from consensus block headers and target work difficulty.
-- Zero reliance on external, proprietary, or paid third-party APIs.
-- Rolling 30-block work window with anomaly filtering for non-positive block timestamps.
-
-### 6. Strict Isolation by Architecture
-- RPC binds exclusively to `127.0.0.1` on local loopback. External ingress is disabled.
-- Zero code sharing, networking, or credential links with mining pools, remote servers, or external services.
-
----
-
-## Architecture Overview
-
-```mermaid
-flowchart TD
-    App[Sentinel Node Wallet macOS App\nSwiftUI / Swift 6.4.2] --> AppState[AppState Coordinator]
-    AppState --> NodeMgr[NodeManager Process Supervisor]
-    AppState --> WalletMgr[WalletManager Descriptor Service]
-    AppState --> ETAMgr[AdaptiveETAEngine]
-    AppState --> HealthMgr[SystemHealthMonitor]
-
-    NodeMgr -->|Spawns / Manages| Knots[Embedded Bitcoin Knots bitcoind\nv29.4.3.knots20260508 arm64]
-    Knots -->|Loopback JSON-RPC\n127.0.0.1:8332| RPC[BitcoinRPCClient]
-    RPC --> NodeMgr
-
-    WalletMgr -->|Passphrase Secure Storage| Keychain[Apple Keychain Services\napp.nodepocket.btcb2.wallet]
-    WalletMgr -->|Descriptor RPC| RPC
-
-    Knots -->|Compact Pruned default 550 MiB| InternalDisk[~/Library/Application Support/NodePocketBTCB2]
-    Knots -.->|Archival Mode opt-in >= 1 TB| ExternalSSD[/Volumes/ExternalSSD/BTCB2Archival]
-```
-
----
-
-## Building from Source
-
-### Prerequisites
-- macOS 13.0 (Ventura) or newer
-- Apple Silicon Mac (`M1/M2/M3/M4`, `arm64`)
-- Xcode 15+ with Swift 5.9+ / 6.x
-
-### Build & Package
 ```bash
-# Clone the repository
 git clone https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2.git
 cd sentinel-node-wallet-btcb2
-
-# Run test suite (25/25 unit & integration tests)
 swift test
-
-# Build native release app bundle
-./scripts/build_app.sh
-
-# Package macOS DMG
-./scripts/build_dmg.sh
 ```
 
----
+The repository currently contains development source and documentation. Do **not** treat an ad-hoc-signed DMG as a notarized public release. See [Governance](GOVERNANCE.md), [Security](SECURITY.md), [Architecture](docs/ARCHITECTURE.md) and [Test & release matrix](TEST_AND_RELEASE_MATRIX.md). Wallet behavior remains subject to [v7 acceptance criteria](docs/WALLET_MANAGER_V7.md).
 
-## License
+## Roadmap: deliberately not in this release
 
-This project is licensed under the [MIT License](LICENSE). Embedded Bitcoin Knots components are copyright © 2009–2026 The Bitcoin Core Developers and Bitcoin Knots Contributors, under the MIT License.
+One-click **DATUM Gateway** provisioning may be added in a future independently reviewed phase. No DATUM, Stratum, mining, pool access, unattended auto-send, cloud account or other additional service is being shipped today.
+
+## License and notices
+
+The source is visible on GitHub; **public visibility is not an open-source license**. The project license must be approved by the owner and committed as a `LICENSE` file before declaring a licensing grant or general distribution. See [NOTICE](NOTICE.md) for upstream Bitcoin Knots attribution and third-party obligations. No private Admin Console or pool implementation is distributed.

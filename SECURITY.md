@@ -1,31 +1,37 @@
-# Security Policy: Sentinel Node Wallet - BTCB2
+# Security policy — Sentinel Node Wallet - BTCB2
 
-## 1. Security Architecture & Threat Model
+**Development wallet: do not store real funds until independent audit and signed release gates are complete.** Report vulnerabilities privately through GitHub's repository security advisory or a verified maintainer contact, never a public issue containing exploitable details or user secrets.
 
-Sentinel Node Wallet enforces strict defense-in-depth isolation across multiple levels:
+## Threat model
 
-### Local Loopback Enforcement
-- Embedded Bitcoin Knots `bitcoind` binds strictly to `127.0.0.1` (`rpcbind=127.0.0.1`, `rpcallowip=127.0.0.1`).
-- P2P networking operates strictly outbound by default (`listen=0` or restricted inbound) to avoid exposing the host machine as an open routing relay.
-- All remote network RPC ingress is disabled.
+Assume hostile websites, malicious browser extensions, clipboard substitution, compromised RPC peers, untrusted dependencies, unattended Mac sessions, stolen/unlocked devices, user tricked into approval and partial malware compromise. **No local hot wallet can guarantee security if the user account, process, memory or operating system is fully controlled by an attacker.** An independently controlled external signer is stronger than software-only controls for high-value funds.
 
-### Keychain-Backed Key Management
-- Wallet descriptors and master seed credentials are encrypted on disk.
-- Passphrases are stored in macOS Keychain Services under access group `app.nodepocket.btcb2.wallet` only with explicit operator consent.
-- Passphrases are never written to disk in plaintext files.
+## Hard safeguards
 
-### File Permissions & Filesystem Isolation
-- Application Support Directory: `~/Library/Application Support/NodePocketBTCB2` is created with POSIX permission `0700` (owner read/write/execute only).
-- Configuration Files: `bitcoin.conf` is written with POSIX permission `0600` (owner read/write only).
+- Native encrypted descriptor wallets must **never** silently default to empty passphrase; fail closed and request deliberate user setup. A locked wallet can still receive and report chain status.
+- Wallet passphrases belong to macOS Keychain with documented `SecAccessControl` / device-owner user-presence enforcement on each signing authorization. Avoid silent Keychain auto-retrieval, plaintext on-disk fallback, permanent process caches and unattended unlock.
+- Keep current bundle ID, datadir, wallet identity and Keychain service stable until a separately tested migration; don't lose access while rebranding.
+- RPC only on `127.0.0.1` with authenticated app-owned cookie and strict file permissions; no remote RPC, shared Sentinel services, public HTTP wallet endpoint or logs of secrets. Audit older persistent rpcuser/rpcpassword and move to cookie auth without breaking the user's existing node.
+- Validate BTCB2 BLAKE2b hard-fork checkpoint at 961,640 and later anchor; fresh MainNet sync, correct replay-protected signing `SIGHASH_UNIFIED` and native encrypted-wallet ownership before authorizing transfer. The previous `sendtoaddress` call and UI's height-only gating are **not sufficient proof**.
+- Permit only allowlisted BTCB2 addresses with explicit user-verified labels. Add/change/remove/disable the allowlist requires user-presence approval. Final send must bind the exact address, BTCB2 amount, fee and change/inputs; recheck immediately before signing; do not trust mutable UI fields.
+- Use non-signing PSBT/funded raw transaction preview and integer satoshis. Default fee ceilings, validate relay policy, per-tx caps, dust and sufficient mature funds. Fail closed on no fee data; no hard-coded transaction vsize guesses.
+- Authenticate and rate-limit spend flow against double-click/replay and unsolicited local IPC. Require a short-lived one-time approval token tied to immutable transaction details. Lock wallet immediately after use, on error and on cancel; avoid relying only on fire-and-forget asynchronous `defer Task` for lock.
+- Log minimal redacted financial events; never export seeds/passphrases/address books to public CI, markdown, issue comments, telemetry, or Shared Cognitive Memory. No automatic background contact sync or explorer lookup.
+- Bounded backup/restore workflows: verify backup readability, application wallet ownership, source chain identity and pruned history warnings; restore must not overwrite an existing wallet or corrupt encryption state.
 
-### Replay & Send Gating
-- Transaction transmission interface is locked while Initial Block Download (IBD) is incomplete or before block height reaches BIP-110 hard-fork activation height `961,640`.
+## Explorer privacy
 
----
+The BTCB2-compatible explorer `https://mempool.guide/tx/{txid}` may learn a viewer's IP and the TXID when clicked. Show an explicit external-link indicator; do **not** query or open it automatically. Ordinary `mempool.space` is the wrong chain unless a specifically verified BTCB2-compatible instance is selected.
 
-## 2. Reporting Security Vulnerabilities
+## P0 public-code observations that need fixing
 
-If you identify a security vulnerability in Sentinel Node Wallet, please report it privately:
-- Do NOT open a public GitHub issue.
-- Contact the maintainers privately via encrypted channels or repository security advisory.
-- Maintainers will acknowledge within 48 hours and coordinate remediation.
+- `WalletManager.ensureDefaultWalletLoaded` currently risks an unencrypted wallet with empty-passphrase fallback.
+- `WalletManager.send` currently accepts `tb1`/`bcrt1` and relies on `sendtoaddress` without proof of `SIGHASH_UNIFIED`, and uses `Double` amounts.
+- `WalletView.isSendAllowed` currently checks IBD/height only, not a verified fork hash, recipient allowlist, quote binding or authentication.
+- `KeychainHelper` uses basic when-unlocked device-only accessibility but no confirmed mandatory per-send user-presence policy.
+
+Do not close any of these by UI wording alone. Fix code and verify with both mock adversity tests and actual authorized Mac Security.framework interactions.
+
+## Security release gates
+
+Unresolved P0 => no public notarized release and no recommendation to custody real funds. Independent review of signing correctness, storage/migration, dependencies and wallet recovery is required. This policy does not claim that Apple notarization proves wallet security.
