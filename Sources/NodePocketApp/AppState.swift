@@ -11,6 +11,8 @@ public final class AppState: ObservableObject {
     @Published public var networkInfo: NetworkInfo?
     @Published public var hashrateReport: HashrateReport?
     @Published public var adaptiveETA: (state: ETAState, display: String) = (.calibrating, "Calibrating...")
+    @Published public var rollingHistoryCoverage: RollingHistoryCoverage?
+    @Published public var rollingHistoryStatus: String = "Measuring retained block history…"
     @Published public var walletSnapshot: WalletSnapshot?
     @Published public var transactions: [TransactionRecord] = []
     @Published public var coinbaseRewards: [CoinbaseRewardDetail] = []
@@ -30,6 +32,8 @@ public final class AppState: ObservableObject {
     public private(set) var walletManager: WalletManager
     private var healthTimer: AnyCancellable?
     private var gaveBatteryFastWarning = false
+    private var lastRollingCoveragePoll: Date?
+    private var isPollingRollingCoverage = false
     private let timeFormatter: DateFormatter
 
     public init() {
@@ -72,11 +76,67 @@ public final class AppState: ObservableObject {
                 self?.hashrateReport = report
                 self?.networkInfo = netInfo
                 self?.adaptiveETA = eta
+                self?.refreshRollingCoverageIfNeeded(blockchain: binfo)
 
                 // Refresh transactions periodically
                 if let txs = try? await self?.walletManager.fetchRecentTransactions(count: 30) {
                     self?.transactions = txs
                 }
+            }
+        }
+    }
+
+    /// Low-cost read-only RPC sampling: no background block scans or heavy
+    /// filesystem walking while IBD is already resource constrained.
+    private func refreshRollingCoverageIfNeeded(blockchain info: BlockchainInfo) {
+        guard info.pruned else {
+            rollingHistoryCoverage = nil
+            rollingHistoryStatus = "Full-history mode — no pruning"
+            return
+        }
+        guard let earliestHeight = info.pruneheight,
+              earliestHeight > 0, earliestHeight < info.blocks,
+              !info.bestblockhash.isEmpty else {
+            rollingHistoryCoverage = nil
+            rollingHistoryStatus = "Awaiting initial pruning — live coverage not available yet"
+            return
+        }
+        let now = Date()
+        if isPollingRollingCoverage { return }
+        if let previous = lastRollingCoveragePoll, now.timeIntervalSince(previous) < 120 {
+            return
+        }
+        lastRollingCoveragePoll = now
+        isPollingRollingCoverage = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.isPollingRollingCoverage = false }
+            do {
+                let oldHash = try await self.nodeManager.rpcClient.getBlockHash(height: earliestHeight)
+                async let oldest = self.nodeManager.rpcClient.getBlockHeader(hash: oldHash)
+                async let newest = self.nodeManager.rpcClient.getBlockHeader(hash: info.bestblockhash)
+                let (start, tip) = try await (oldest, newest)
+                guard start.height == earliestHeight, tip.height == info.blocks,
+                      let measured = RollingHistoryCoverage(
+                        firstRetainedHeight: earliestHeight,
+                        tipHeight: info.blocks,
+                        firstRetainedTimestamp: TimeInterval(start.time),
+                        tipTimestamp: TimeInterval(tip.time),
+                        observedBlockUndoBytes: info.size_on_disk,
+                        effectivePruneTargetBytes: info.prune_target_size,
+                        initialBlockDownload: info.initialblockdownload
+                      ) else {
+                    self.rollingHistoryCoverage = nil
+                    self.rollingHistoryStatus = "Recalibrating retained history…"
+                    return
+                }
+                self.rollingHistoryCoverage = measured
+                self.rollingHistoryStatus = measured.description
+            } catch {
+                // Headers or RPC can be unavailable during IBD/reorgs.
+                // Never display an old estimate as a live guaranteed window.
+                self.rollingHistoryCoverage = nil
+                self.rollingHistoryStatus = "Waiting for verified retention data…"
             }
         }
     }
