@@ -72,6 +72,11 @@ public struct CoinbaseRewardDetail: Sendable, Identifiable {
 
 public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case unencryptedWalletProhibited
+    case walletOnboardingRequired
+    case invalidWalletName
+    case walletAlreadyExists(String)
+    case walletCreationInProgress
+    case walletCreationVerificationFailed
     case allowlistBlocked(String)
     case invalidMainnetAddress(String)
     case previewExpired
@@ -85,7 +90,17 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .unencryptedWalletProhibited:
-            return "Creating an unencrypted wallet is strictly prohibited under V7 security policy. A strong passphrase is required."
+            return "An encryption passphrase is required; unencrypted wallets cannot be created."
+        case .walletOnboardingRequired:
+            return "The node is running. Create or load an encrypted wallet to finish setup."
+        case .invalidWalletName:
+            return "Wallet names must be 1–64 characters: letters, numbers, underscores or hyphens, beginning with a letter or number."
+        case .walletAlreadyExists(let name):
+            return "A wallet named '\(name)' already exists. Load the existing wallet rather than creating a duplicate. No wallet data was changed."
+        case .walletCreationInProgress:
+            return "Wallet creation is already in progress; finish that operation before trying again."
+        case .walletCreationVerificationFailed:
+            return "Knots did not confirm an encrypted descriptor wallet. The wallet may have been created; check the wallet list before retrying. Existing files were not removed."
         case .allowlistBlocked(let addr):
             return "Destination '\(addr)' is not in your trusted recipient allowlist. Outgoing transfers to unapproved addresses are strictly blocked."
         case .invalidMainnetAddress(let addr):
@@ -114,6 +129,7 @@ public actor WalletManager {
     public let addressBook: AddressBook
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
+    private var isCreatingWallet = false
 
     public init(
         rpcClient: BitcoinRPCClient,
@@ -151,56 +167,91 @@ public actor WalletManager {
             }
         }
 
-        // 3. If a keychain passphrase exists, create an encrypted wallet with it
-        if let pass = try? keychainHelper.retrievePassphrase(account: preferredName), !pass.isEmpty {
-            _ = try await rpcClient.createWallet(name: preferredName, passphrase: pass, descriptors: true, loadOnStartup: true)
-            self.currentWalletName = preferredName
-            _ = try await refreshWalletInfo()
-            return preferredName
-        }
-
-        // 4. Fail closed: do NOT create an unencrypted wallet!
-        throw WalletSecurityError.unencryptedWalletProhibited
+        // First launch is an onboarding state, not a failed node startup.
+        // Never silently recreate a wallet from a stored passphrase: a passphrase
+        // does not restore the wallet's original descriptors or history.
+        throw WalletSecurityError.walletOnboardingRequired
     }
 
     /// Creates a modern, descriptor-based encrypted wallet.
+    public static func isValidWalletName(_ name: String) -> Bool {
+        let clean = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return clean == name
+            && clean.range(
+                of: "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+                options: .regularExpression
+            ) != nil
+    }
+
+    /// Explicit user-consented wallet creation. Never overwrites a wallet with
+    /// the same name, and never confuses an encryption phrase with a seed.
     public func createEncryptedDescriptorWallet(
         name: String,
         passphrase: String,
         storeInKeychain: Bool = false
     ) async throws {
-        guard !name.isEmpty, !passphrase.isEmpty else {
+        guard Self.isValidWalletName(name) else {
+            throw WalletSecurityError.invalidWalletName
+        }
+        guard !passphrase.isEmpty else {
             throw WalletSecurityError.unencryptedWalletProhibited
         }
+        guard !isCreatingWallet else {
+            throw WalletSecurityError.walletCreationInProgress
+        }
+        isCreatingWallet = true
+        defer { isCreatingWallet = false }
 
-        // Record a user-consented, protected passphrase BEFORE attempting wallet
-        // creation, so an ambiguous RPC timeout cannot strand an encrypted wallet
-        // whose passphrase failed to save. Do not discard it automatically on error.
+        // Check actual loaded and on-disk wallets before touching Keychain.
+        // Do not swallow RPC failures as an "empty list" result.
+        let loaded = try await rpcClient.listWallets()
+        let walletDir = try await rpcClient.listWalletDir()
+        guard !loaded.contains(name),
+              !walletDir.wallets.contains(where: { $0.name == name }) else {
+            throw WalletSecurityError.walletAlreadyExists(name)
+        }
+
+        // Save before the RPC call, so if the daemon processes creation but
+        // the reply is lost, the user still has the exact encryption passphrase.
+        // Never delete or overwrite an existing item on a duplicate.
         if storeInKeychain {
             do {
                 try keychainHelper.savePassphrase(passphrase, account: name)
             } catch KeychainError.duplicateItem {
-                // A previous create request may have succeeded before its RPC
-                // response failed. Preserve that existing Keychain credential;
-                // permit a retry only when the owner authenticates and confirms
-                // that its passphrase matches exactly.
                 let saved = try await keychainHelper.retrievePassphraseInteractively(account: name)
                 guard saved == passphrase else {
                     throw WalletSecurityError.passphrasesDoNotMatch
                 }
             }
         }
+
+        // Some RPC calls can create the wallet before returning a transport
+        // error. A retry must inspect listwalletdir and load, not recreate.
         _ = try await rpcClient.createWallet(
-            name: name, passphrase: passphrase, descriptors: true, loadOnStartup: true
+            name: name, passphrase: passphrase, descriptors: true,
+            loadOnStartup: true
         )
 
+        let info = try await rpcClient.getWalletInfo(walletName: name)
+        guard info.walletname == name, info.descriptors == true,
+              info.unlocked_until != nil else {
+            throw WalletSecurityError.walletCreationVerificationFailed
+        }
+
         self.currentWalletName = name
-        _ = try await refreshWalletInfo()
+        let snapshot = try await refreshWalletInfo()
+        guard snapshot.isEncrypted, snapshot.descriptors else {
+            throw WalletSecurityError.walletCreationVerificationFailed
+        }
     }
 
     /// Loads an existing wallet by name.
     public func loadWallet(name: String) async throws {
-        _ = try await rpcClient.loadWallet(name: name)
+        guard Self.isValidWalletName(name) else { throw WalletSecurityError.invalidWalletName }
+        let loaded = try await rpcClient.listWallets()
+        if !loaded.contains(name) {
+            _ = try await rpcClient.loadWallet(name: name)
+        }
         self.currentWalletName = name
         _ = try await refreshWalletInfo()
     }
