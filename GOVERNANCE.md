@@ -17,11 +17,13 @@
 - Strict isolation from the original Admin Node Console, external mining pools, and hardware projects. Reference the Admin Wallet Manager source **read only**; no import of private code, address book, wallets, real transaction records, credentials or services.
 - Wallet and chain data must survive renaming, app upgrade, pruned/full-history transitions, crashed sync and backup restoration; no silent datadir or bundle ID migration.
 - BTCB2 MainNet identity requires consensus checkpoint at block 961,640, subsequent trusted anchors and fresh tip; `chain=main` or `bc1` alone is insufficient.
-- Compact by default: `prune=550` and `pruneduringinit=550` MiB, user selects >=550 MiB; monitor total datadir, warn near 35 GiB, graceful stop by 40 GiB or <=10–12 GiB host free. 550 MiB is **not** a full datadir limit.
+- Compact validating node by default: NEW installs `prune=2048` MiB, `pruneduringinit=550` MiB; custom >=550 MiB. Preserve every EXISTING user's 550/custom retention and archive state, and keep storage independent of Quiet/Balanced/Fast. Monitor full datadir, warn near 35 GiB and gracefully stop by 40 GiB or <=10–12 GiB host free. Block retention is **not** a complete datadir limit.
 - Optional full-history archive: explicit opt-in, validated high-capacity external SSD where needed, wallet backup and fresh full-history download/reindex; preserve rollback.
 - The entire user-facing app is BTCB2 MainNet only. No alternative-network profiles or binaries exposed through UI. Deterministic mocked RPC tests are allowed without running alternative chains.
 - Adaptive synchronization and coinbase-maturity ETAs must be labeled estimates, calibrated from observed network/sync data, with unknown/stalled states.
 - **No DATUM Gateway in the current scope.** Reserve future capability only as roadmap text, with its own threat model, UI and acceptance gates if authorized later.
+
+- Minimal consensus-security peer policy: default Balanced par=2/cache512MiB/maxconnections24, Quiet 1/256/16 and Fast 4/1024/32. Relay full blocks and transactions and permit inbound P2P when reachable, but explicitly disable NAT-PMP/UPnP auto-mapping and NEVER expose RPC; peer limit is a ceiling, not a guaranteed number of peers. Preserve wallet data and user-selectable Quiet/Fast/profile settings. [Canonical v10 node policy](docs/MINIMAL_CONSENSUS_SECURITY_V10.md).
 
 ## Wallet v7 P0 gates — failing any blocks live spending
 
