@@ -68,6 +68,14 @@ The repository currently contains development source and documentation. Do **not
 
 One-click **DATUM Gateway** provisioning may be added in a future independently reviewed phase. No DATUM, Stratum, mining, pool access, unattended auto-send, cloud account or other additional service is being shipped today.
 
+## Final Wallet Manager authentication — v13 (implementation pending)
+
+The release target is one **local, offline-first Wallet Manager login** with a user-selected username, strong password and time-based one-time verification code (TOTP). The Wallet tab remains locked until authorized; Node and Network continue syncing without wallet login. Every wallet-sensitive operation requires an internally enforced session, and spending, backups, recipient edits and wallet deletion additionally require fresh macOS owner presence. No account/password/TOTP secret is shared with a server.
+
+**Apple Passwords support is a release gate, not a completed feature.** System-authorized username/password saving and autofill requires an app-controlled `webcredentials` associated domain, matching AASA/Apple Team ID and properly signed macOS app. Apple Passwords can also hold verification codes, but storing password and TOTP together weakens factor independence; Touch ID/device-owner step-up remains mandatory. Generic macOS Keychain items do not automatically appear in Apple Passwords. No unapproved domain will be attached or cloud login added.
+
+Read [Final authentication v13](docs/FINAL_WALLET_AUTH_V13.md) and [production security audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md). Both are implementation/test specifications; **no real-funds or public release approval has been granted**.
+
 ## License and notices
 
 The source is visible on GitHub; **public visibility is not an open-source license**. The project license must be approved by the owner and committed as a `LICENSE` file before declaring a licensing grant or general distribution. See [NOTICE](NOTICE.md) for upstream Bitcoin Knots attribution and third-party obligations. No private Admin Console or pool implementation is distributed.
