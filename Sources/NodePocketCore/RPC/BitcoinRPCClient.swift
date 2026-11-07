@@ -113,6 +113,19 @@ public final class BitcoinRPCClient: @unchecked Sendable {
             throw RPCClientError.invalidResponse
         }
 
+        if T.self == EmptyResponse.self {
+            return EmptyResponse() as! T
+        }
+
+        if result is NSNull {
+            if T.self == String.self {
+                return "" as! T
+            }
+            if let empty = EmptyResponse() as? T {
+                return empty
+            }
+        }
+
         if T.self == String.self, let stringResult = result as? T {
             return stringResult
         } else if T.self == Double.self, let doubleResult = result as? T {
@@ -121,6 +134,13 @@ public final class BitcoinRPCClient: @unchecked Sendable {
             return intResult
         } else if T.self == Bool.self, let boolResult = result as? T {
             return boolResult
+        }
+
+        guard JSONSerialization.isValidJSONObject(result) else {
+            if let empty = EmptyResponse() as? T {
+                return empty
+            }
+            throw RPCClientError.invalidResponse
         }
 
         let resultData = try JSONSerialization.data(withJSONObject: result, options: [])
@@ -201,11 +221,11 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     }
 
     public func walletPassphrase(passphrase: String, timeout: Int = 60, walletName: String? = nil) async throws {
-        let _: String? = try? await call(method: "walletpassphrase", params: [passphrase, timeout], walletName: walletName)
+        let _: EmptyResponse = try await call(method: "walletpassphrase", params: [passphrase, timeout], walletName: walletName)
     }
 
     public func walletLock(walletName: String? = nil) async throws {
-        let _: String? = try? await call(method: "walletlock", walletName: walletName)
+        let _: EmptyResponse = try await call(method: "walletlock", walletName: walletName)
     }
 
     public func estimateSmartFee(confTarget: Int = 6) async throws -> SmartFeeResponse {
@@ -221,7 +241,7 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     }
 
     public func backupWallet(destinationPath: String, walletName: String? = nil) async throws {
-        let _: String = try await call(method: "backupwallet", params: [destinationPath], walletName: walletName)
+        let _: EmptyResponse = try await call(method: "backupwallet", params: [destinationPath], walletName: walletName)
     }
 
     public func stopNode() async throws -> String {

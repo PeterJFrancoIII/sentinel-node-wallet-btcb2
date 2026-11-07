@@ -148,6 +148,10 @@ public struct LoadWalletResponse: Codable, Sendable {
     public let warning: String?
 }
 
+public struct EmptyResponse: Codable, Sendable {
+    public init() {}
+}
+
 public struct UnloadWalletResponse: Codable, Sendable {
     public let warning: String?
 }
