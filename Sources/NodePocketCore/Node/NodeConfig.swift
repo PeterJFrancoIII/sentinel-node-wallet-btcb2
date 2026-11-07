@@ -18,7 +18,7 @@ public struct NodeConfig: Sendable {
         rpcUser: String? = nil,
         rpcPassword: String? = nil,
         p2pPort: Int = 8333,
-        profile: SyncProfile = .preset(for: .quiet),
+        profile: SyncProfile = .preset(for: .balanced),
         storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB),
         dataDirectory: URL? = nil
     ) {
@@ -61,7 +61,32 @@ public struct NodeConfig: Sendable {
         // Use the last effective on-disk settings, not a new Quiet/Balance default
         // that would silently overwrite the profile selected in a prior session.
         self.profile = Self.persistedProfile(at: dir.appendingPathComponent("bitcoin.conf"), fallback: profile)
-        self.storageMode = storageMode
+        self.storageMode = Self.persistedStorageMode(at: dir.appendingPathComponent("bitcoin.conf"), fallback: storageMode)
+    }
+
+    /// A new 2 GiB recommendation must NEVER silently overwrite an existing
+    /// user's 550 MiB/custom pruning target or turn archival history into pruned.
+    private static func persistedStorageMode(at url: URL, fallback: StorageMode) -> StorageMode {
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return fallback
+        }
+        let values = text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.hasPrefix("prune=") }
+        guard let line = values.last,
+              let target = Int(line.dropFirst("prune=".count)) else {
+            // Existing unknown legacy configuration: retain explicit caller
+            // setting and flag for Mac-side migration audit before launch.
+            return fallback
+        }
+        if target >= StorageMode.minimumPruneMB {
+            return .compact(pruneMB: target)
+        }
+        if target == 0 {
+            // Existing archive MUST NOT be pruned just because the new default is.
+            return .archival(externalDataDir: url.deletingLastPathComponent())
+        }
+        return fallback
     }
 
     /// Recover the persisted profile selection and operational resource limits.
@@ -101,6 +126,13 @@ public struct NodeConfig: Sendable {
         lines.append("# Strict Localhost RPC Enforcement - Zero Public Ingress")
         lines.append("server=1")
         lines.append("listen=1")
+        // Never map a port on the user's router without their informed consent.
+        lines.append("natpmp=0")
+        lines.append("upnp=0")
+        // Permit block, transaction and address relay over modern P2P transport.
+        lines.append("blocksonly=0")
+        lines.append("v2transport=1")
+        lines.append("rest=0")
         lines.append("daemon=0")
         lines.append("fallbackfee=0.0001")
         lines.append("rpcuser=\(rpcUser)")
