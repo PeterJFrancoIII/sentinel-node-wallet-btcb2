@@ -68,22 +68,35 @@ public final class KeychainHelper: Sendable {
 
     /// Stores a wallet passphrase in macOS Keychain with user-level protection.
     public func savePassphrase(_ pass: String, account: String) throws {
-        guard let data = pass.data(using: .utf8) else {
+        guard !pass.isEmpty, !account.isEmpty, let data = pass.data(using: .utf8) else {
             throw KeychainError.invalidData
+        }
+
+        // These new wallet secrets require actual device-owner authorization on
+        // every retrieval. Do not delete an older item before a new save succeeds.
+        var accessError: Unmanaged<CFError>?
+        guard let control = SecAccessControlCreateWithFlags(
+            kCFAllocatorDefault,
+            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
+            .userPresence,
+            &accessError
+        ) else {
+            throw KeychainError.userPresenceAuthenticationFailed("Keychain user-presence access control unavailable.")
         }
 
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
+            kSecAttrLabel as String: "Sentinel Node Wallet - BTCB2: " + account,
             kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            kSecAttrAccessControl as String: control
         ]
 
-        // Delete any existing item first
-        SecItemDelete(query as CFDictionary)
-
         let status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            throw KeychainError.duplicateItem
+        }
         guard status == errSecSuccess else {
             throw KeychainError.unexpectedStatus(status)
         }
@@ -110,7 +123,8 @@ public final class KeychainHelper: Sendable {
             kSecAttrService as String: serviceName,
             kSecAttrAccount as String: account,
             kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
+            kSecMatchLimit as String: kSecMatchLimitOne,
+            kSecUseOperationPrompt as String: "Unlock BTCB2 wallet encryption passphrase for " + account
         ]
 
         var dataTypeRef: AnyObject?
@@ -132,6 +146,14 @@ public final class KeychainHelper: Sendable {
 
     public func retrievePassphrase(account: String) throws -> String {
         try getPassphrase(account: account)
+    }
+
+    /// Invoked only for a user-requested credential fill. Move the potentially
+    /// modal Security.framework call off the main SwiftUI actor.
+    public func retrievePassphraseInteractively(account: String) async throws -> String {
+        try await Task.detached(priority: .userInitiated) { [self] in
+            try getPassphrase(account: account)
+        }.value
     }
 
     /// Removes passphrase from macOS Keychain.
