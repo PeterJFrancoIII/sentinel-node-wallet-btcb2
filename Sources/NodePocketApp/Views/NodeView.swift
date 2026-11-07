@@ -5,6 +5,16 @@ public struct NodeView: View {
     @EnvironmentObject var state: AppState
     @Binding var showAdvancedSheet: Bool
 
+    private var peerConnectionSummary: String {
+        let maxPeers = state.nodeManager.config.profile.maxConnections
+        guard let info = state.networkInfo else {
+            return "Configured maximum: \(maxPeers) • Live P2P data unavailable"
+        }
+        let inbound = info.connections_in.map(String.init) ?? "?"
+        let outbound = info.connections_out.map(String.init) ?? "?"
+        return "\(outbound) outbound • \(inbound) inbound • max \(maxPeers) configured"
+    }
+
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -181,8 +191,8 @@ public struct NodeView: View {
 
                     metricCard(
                         title: "Connected Peers",
-                        value: "\(state.networkInfo?.connections ?? (state.blockchainInfo != nil ? 8 : 0)) Connected",
-                        subtitle: "Strict Outbound Only (Inbound Disabled)",
+                        value: state.networkInfo.map { "\($0.connections) Connected" } ?? "Unknown",
+                        subtitle: peerConnectionSummary,
                         icon: "network",
                         color: .purple
                     )
