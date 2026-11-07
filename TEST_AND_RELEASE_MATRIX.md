@@ -20,6 +20,16 @@
 | Development docs + secrets | Swift+Python deterministic tests, clean CI scan, source/vendor/license review | NOT RUN v7 |
 | Public release | Apple Developer ID for app+bitcoind; notarization/staple/Gatekeeper; signed updates; independent wallet audit | BLOCKED |
 
+## v13.1 Apple Passwords onboarding validation
+
+| Scenario | Status |
+| --- | --- |
+| App-generated 192-bit login password; strength, uniqueness, macOS input hints | Swift test authored; native compile/test NOT RUN |
+| apple-otpauth system UI launched and 2FA code verified with Apple Passwords | NOT RUN on actual signed Mac |
+| Save username/password into selected Apple Passwords vault | BLOCKED — owner-approved associated domain, AASA/Apple signing and working credential-save API required |
+| Unsupported OS, ad-hoc build, denied user consent, canceled credentials | Must visibly fail safe; NOT RUN |
+| Existing operator, wallet secrets, Keychain and MainNet IBD unchanged | Mac validation NOT RUN |
+
 ## Final v13 authentication + complete production freeze gates (NOT RUN)
 
 | Surface / gate | Actual proof | Status |
