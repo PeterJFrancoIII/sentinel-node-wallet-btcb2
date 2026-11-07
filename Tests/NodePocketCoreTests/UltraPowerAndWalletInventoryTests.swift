@@ -57,7 +57,7 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         XCTAssertEqual(ultra.type, .ultra)
         XCTAssertEqual(ultra.parThreads, 1)
         XCTAssertEqual(ultra.dbCacheMB, 128)
-        XCTAssertEqual(ultra.maxConnections, 12)
+        XCTAssertEqual(ultra.maxConnections, 4)
         XCTAssertEqual(ultra.maxUploadTargetMB, 128)
         XCTAssertEqual(ultra.pruneMB, StorageMode.defaultPruneMB)
 

@@ -115,7 +115,8 @@ public final class NodeManager: @unchecked Sendable {
             arguments.append(contentsOf: [
                 "-par=1",
                 "-dbcache=128",
-                "-maxconnections=12",
+                "-maxconnections=4",
+                "-listen=0",
                 "-maxuploadtarget=128"
             ])
         } else {
@@ -175,7 +176,17 @@ public final class NodeManager: @unchecked Sendable {
             self.process = proc
             self.stdoutPipe = outPipe
             self.stderrPipe = errPipe
-            updateState(.running(pid: proc.processIdentifier))
+            let pid = proc.processIdentifier
+            if self.isUltraActive {
+                #if os(macOS)
+                let tpProc = Process()
+                tpProc.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
+                tpProc.arguments = ["-b", "-p", "\(pid)"]
+                try? tpProc.run()
+                setpriority(PRIO_PROCESS, id_t(pid), 19)
+                #endif
+            }
+            updateState(.running(pid: pid))
             startMonitoring()
         } catch {
             updateState(.error("Failed to spawn node: \(error.localizedDescription)"))
@@ -329,6 +340,17 @@ public final class NodeManager: @unchecked Sendable {
     @MainActor public func applyUltraMode(active: Bool) async throws -> Bool {
         guard isUltraActive != active else { return true }
         let wasRunning = state.isRunning
+
+        // Update taskpolicy and nice priority immediately on existing child or adopted process
+        if let currentPid = process?.processIdentifier ?? adoptedPid {
+            #if os(macOS)
+            let tpProc = Process()
+            tpProc.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
+            tpProc.arguments = [active ? "-b" : "-B", "-p", "\(currentPid)"]
+            try? tpProc.run()
+            setpriority(PRIO_PROCESS, id_t(currentPid), active ? 19 : 0)
+            #endif
+        }
 
         if wasRunning {
             if process == nil && adoptedPid != nil {

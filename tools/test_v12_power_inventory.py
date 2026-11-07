@@ -39,13 +39,13 @@ class TestV12PowerPolicy(unittest.TestCase):
         ultra_profile = {
             "par": 1,
             "dbcache": 128,
-            "maxconnections": 12,
+            "maxconnections": 4,
             "maxuploadtarget": 128,
             "prune": 2048
         }
         self.assertEqual(ultra_profile["par"], 1)
         self.assertEqual(ultra_profile["dbcache"], 128)
-        self.assertEqual(ultra_profile["maxconnections"], 12)
+        self.assertEqual(ultra_profile["maxconnections"], 4)
         self.assertEqual(ultra_profile["maxuploadtarget"], 128)
         self.assertGreaterEqual(ultra_profile["prune"], 550)
 

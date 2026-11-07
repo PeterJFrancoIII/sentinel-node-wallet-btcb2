@@ -195,8 +195,8 @@ public final class AppState: ObservableObject {
 
         if requiresUltra {
             if !isUltraActive {
-                ultraStatusTitle = "Ultra · \(snapshot.powerState.displayLabel)"
-                ultraStatusSubtitle = "Ultra active: 1 thread, 128 MiB dbcache, max 12 peers • Preferred \(userPreferredProfile.rawValue) resumes on AC"
+                ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
+                ultraStatusSubtitle = "Applying Ultra: 1 thread, 128 MiB dbcache, max 4 peers, listen=0 • Preferred \(userPreferredProfile.rawValue) resumes on AC"
                 Task { @MainActor in
                     guard !self.isEvaluatingPower else { return }
                     self.isEvaluatingPower = true
@@ -206,8 +206,8 @@ public final class AppState: ObservableObject {
                         let applied = try await self.nodeManager.applyUltraMode(active: true)
                         if applied {
                             self.isUltraActive = true
-                            self.ultraStatusTitle = "Ultra · \(snapshot.powerState.displayLabel) Active"
-                            self.ultraStatusSubtitle = "1 thread, 128 MiB dbcache, max 12 peers • Preferred \(self.userPreferredProfile.rawValue) resumes on AC"
+                            self.ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
+                            self.ultraStatusSubtitle = "Active (\(snapshot.powerState.displayLabel)): 1 thread, 128 MiB dbcache, max 4 peers, listen=0 • Preferred \(self.userPreferredProfile.rawValue) resumes on AC"
                             self.appendLog("[POWER] Ultra power mode applied (\(snapshot.powerState.displayLabel)). Preferred profile: \(self.userPreferredProfile.rawValue)")
                         } else {
                             self.ultraStatusTitle = "Ultra Pending Safe Restart"
@@ -219,8 +219,8 @@ public final class AppState: ObservableObject {
                     }
                 }
             } else {
-                ultraStatusTitle = "Ultra · \(snapshot.powerState.displayLabel) Active"
-                ultraStatusSubtitle = "1 thread, 128 MiB dbcache, max 12 peers • Preferred \(userPreferredProfile.rawValue) resumes on AC"
+                ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
+                ultraStatusSubtitle = "Active (\(snapshot.powerState.displayLabel)): 1 thread, 128 MiB dbcache, max 4 peers, listen=0 • Preferred \(userPreferredProfile.rawValue) resumes on AC"
             }
         } else {
             // Stable AC

@@ -13,7 +13,7 @@ public enum SyncProfileType: String, CaseIterable, Codable, Sendable {
     public var description: String {
         switch self {
         case .ultra:
-            return "Automatic Ultra power saver: 1 thread, 128 MiB cache, max 12 peers, 128 MiB upload target. Preserves consensus while minimizing power draw."
+            return "Automatic Ultra power saver: 1 thread, 128 MiB cache, max 4 peers, listen=0, background CPU/IO priority. Preserves consensus while minimizing power draw."
         case .quiet:
             return "Ultra-low CPU/RAM footprint. Recommended on battery for MacBook Air."
         case .balanced:
@@ -55,7 +55,7 @@ public struct SyncProfile: Codable, Equatable, Sendable {
                 type: .ultra,
                 parThreads: 1,
                 dbCacheMB: 128,
-                maxConnections: 12,
+                maxConnections: 4,
                 maxUploadTargetMB: 128,
                 pruneMB: StorageMode.defaultPruneMB
             )
