@@ -20,7 +20,7 @@ final class ConsensusSecurityDefaultsTests: XCTestCase {
         let conf = config.renderBitcoinConf()
         for required in [
             "prune=2048", "pruneduringinit=550", "maxconnections=24",
-            "natpmp=0", "upnp=0", "listen=1", "blocksonly=0",
+            "natpmp=0", "upnp=0", "listen=0", "blocksonly=0",
             "v2transport=1", "rest=0", "rpcbind=127.0.0.1",
             "rpcallowip=127.0.0.1", "[main]"
         ] {
