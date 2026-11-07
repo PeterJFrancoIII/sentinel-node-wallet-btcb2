@@ -315,6 +315,9 @@ public final class AppState: ObservableObject {
         self.enrolledUsername = session.username
         self.isWalletTabUnlocked = true
         self.authErrorMessage = nil
+        // The TOTP provisioning URI and recovery codes are secret setup material.
+        // Once enrollment succeeds, discard the app's transient onboarding copy.
+        self.generatedEnrollmentData = nil
         self.appendLog("[AUTH] Operator enrolled and Wallet Manager unlocked.")
         self.refreshWallet()
     }
