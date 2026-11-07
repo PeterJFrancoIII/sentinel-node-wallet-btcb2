@@ -59,7 +59,7 @@ public struct SyncProfile: Codable, Equatable, Sendable {
                 dbCacheMB: 512,
                 maxConnections: 24,
                 maxUploadTargetMB: 512,
-                pruneMB: 2048
+                pruneMB: StorageMode.defaultPruneMB
             )
         case .fast:
             return SyncProfile(
