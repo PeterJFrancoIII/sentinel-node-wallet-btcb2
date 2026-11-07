@@ -3,22 +3,38 @@ import NodePocketCore
 
 public struct WalletView: View {
     @EnvironmentObject var state: AppState
+
+    // Wallet Lifecycle Sheets
     @State private var showCreateModal = false
     @State private var walletNameInput = "main_wallet"
     @State private var passphraseInput = ""
+    @State private var passphraseConfirmInput = ""
     @State private var storeInKeychain = true
 
-    // Gated Send Fields
+    // Send Form Fields
     @State private var sendAddressInput = ""
     @State private var sendAmountInput = ""
-    @State private var showSendConfirmSheet = false
+    @State private var selectedFeePreset: FeePresetType = .normal
+    @State private var customSatPerVBInput = "2"
+    @State private var activePreview: FundedTxPreview?
+    @State private var showPreviewSheet = false
     @State private var sendPassphraseInput = ""
     @State private var isBroadcasting = false
+    @State private var sendErrorMessage: String?
+
+    // Address Book / Allowlist Sheet
+    @State private var showAddressBookSheet = false
+    @State private var newRecipientName = ""
+    @State private var newRecipientAddress = ""
+    @State private var addressBookError: String?
 
     // Restore Wallet Fields
     @State private var showRestoreModal = false
     @State private var restoreFileURL: URL?
     @State private var restoreWalletName = "restored_wallet"
+
+    // Transaction Filter
+    @State private var selectedTxFilter: String = "all"
 
     public var isSendAllowed: Bool {
         // Mainnet requires completion of IBD past the fork checkpoint
@@ -35,7 +51,7 @@ public struct WalletView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("Wallet Manager")
                             .font(.system(size: 26, weight: .bold))
-                        Text("Encrypted Descriptor Wallet • Native SegWit Bech32")
+                        Text("Encrypted Descriptor Wallet • Native SegWit Bech32 • Integer Satoshi Math")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
@@ -45,30 +61,96 @@ public struct WalletView: View {
 
                 // Balance Card
                 VStack(alignment: .leading, spacing: 14) {
-                    Text("Verified Spendable Balance")
-                        .font(.subheadline)
-                        .foregroundColor(.secondary)
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Verified Spendable Balance")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
 
-                    Text(String(format: "%.8f BTCB2", state.walletSnapshot?.trustedBalance ?? 0.0))
-                        .font(.system(size: 34, weight: .bold, design: .monospaced))
+                            Text(String(format: "%.8f BTCB2", state.walletSnapshot?.trustedBalance ?? 0.0))
+                                .font(.system(size: 34, weight: .bold, design: .monospaced))
 
-                    Divider()
+                            Text("\(SatoshiMath.formatSats(state.walletSnapshot?.trustedBalanceSats ?? 0)) sats")
+                                .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
 
-                    HStack(spacing: 24) {
-                        balanceDetail(label: "Pending (0-Conf)", amount: state.walletSnapshot?.pendingBalance ?? 0.0)
-                        balanceDetail(label: "Immature (Mining/Subsidy)", amount: state.walletSnapshot?.immatureBalance ?? 0.0)
                         Spacer()
+
                         if state.walletSnapshot?.isEncrypted == true {
                             Label("Encrypted & Locked", systemImage: "lock.shield.fill")
                                 .font(.caption)
                                 .foregroundColor(.green)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Color.green.opacity(0.12)))
                         }
                     }
 
-                    if (state.walletSnapshot?.immatureBalance ?? 0.0) > 0 {
-                        Text("ℹ️ Note: Post-fork coinbase transactions require 6,480 to 25,920 block confirmations before becoming spendable.")
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
+                    Divider()
+
+                    HStack(spacing: 24) {
+                        balanceDetail(
+                            label: "Pending (0-Conf)",
+                            amount: state.walletSnapshot?.pendingBalance ?? 0.0,
+                            sats: state.walletSnapshot?.pendingBalanceSats ?? 0
+                        )
+                        balanceDetail(
+                            label: "Immature (Mining Rewards)",
+                            amount: state.walletSnapshot?.immatureBalance ?? 0.0,
+                            sats: state.walletSnapshot?.immatureBalanceSats ?? 0
+                        )
+                    }
+
+                    // Immature Coinbase Rewards Countdown & Epoch Breakdown
+                    if (state.walletSnapshot?.immatureBalance ?? 0.0) > 0 || !state.coinbaseRewards.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "hourglass.circle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Coinbase Rewards Maturity Countdown")
+                                    .font(.subheadline)
+                                    .bold()
+                                Spacer()
+                                Text("BIP-110 Consensus Schedule")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            if state.coinbaseRewards.isEmpty {
+                                Text("Mining rewards detected. Maturity schedule: 100 blocks (< 973,440), 6,480 blocks (~45 days for 973,440-979,918), 25,920 blocks (~180 days for >= 979,919 until Sep 2027 MTP expiry).")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                ForEach(state.coinbaseRewards.prefix(3)) { reward in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Block #\(reward.originHeight) Reward (\(String(format: "%.4f", reward.amountBTC)) BTCB2)")
+                                                .font(.caption)
+                                                .bold()
+                                            Text("Matures at height #\(reward.maturityHeight) • \(reward.remainingBlocks) blocks remaining")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            Text(reward.estimatedTimeRemaining)
+                                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                                .foregroundColor(reward.isMature ? .green : .orange)
+                                            if reward.isLowConfidence {
+                                                Text("Est. (~10m/blk)")
+                                                    .font(.system(size: 9))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+                                    .padding(8)
+                                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor)))
+                                }
+                            }
+                        }
                     }
                 }
                 .padding()
@@ -85,7 +167,6 @@ public struct WalletView: View {
 
                     if !state.receiveAddress.isEmpty {
                         HStack(alignment: .top, spacing: 20) {
-                            // QR Code
                             QRCodeView(string: state.receiveAddress, size: 130)
 
                             VStack(alignment: .leading, spacing: 10) {
@@ -128,15 +209,31 @@ public struct WalletView: View {
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
-                // Gated Send Section
+                // Send Composer Section (Minimalist, Gated, V7-Compliant)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         Image(systemName: isSendAllowed ? "paperplane.fill" : "lock.fill")
                             .foregroundColor(isSendAllowed ? .green : .orange)
-                        Text("Gated Send Transaction")
+                        Text("Send BTCB2 Transaction")
                             .font(.headline)
                         Spacer()
-                        Text(isSendAllowed ? "SIGHASH_UNIFIED Armed" : "Replay Protection Locked")
+
+                        // Allowlist Badge & Manager Button
+                        Button(action: { showAddressBookSheet = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: state.addressBook.isAllowlistEnabled ? "shield.checkmark.fill" : "shield.slash")
+                                    .foregroundColor(state.addressBook.isAllowlistEnabled ? .green : .orange)
+                                Text(state.addressBook.isAllowlistEnabled ? "Allowlist Active" : "Allowlist Off")
+                                    .font(.caption2)
+                                    .bold()
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color(NSColor.windowBackgroundColor)))
+                        }
+                        .buttonStyle(.plain)
+
+                        Text(isSendAllowed ? "BIP-110 Armed" : "IBD Incomplete")
                             .font(.caption2)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
@@ -145,51 +242,141 @@ public struct WalletView: View {
                     }
 
                     if !isSendAllowed {
-                        Text("Sending on Mainnet is strictly locked until the local node finishes Initial Block Download (IBD) past BIP-110 fork height \(BTCB2ConsensusConstants.forkActivationHeight).")
+                        Text("Sending on Mainnet is strictly locked until Initial Block Download passes BIP-110 hard-fork height \(BTCB2ConsensusConstants.forkActivationHeight).")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
 
-                    HStack(spacing: 12) {
-                        TextField("Recipient Bech32 Address", text: $sendAddressInput)
-                            .textFieldStyle(.roundedBorder)
+                    // Recipient Selector / Input
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Recipient Address:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            if !state.addressBook.recipients.isEmpty {
+                                Menu("Select Trusted Recipient") {
+                                    ForEach(state.addressBook.recipients) { r in
+                                        Button("\(r.name) (\(r.address.prefix(12))...)") {
+                                            sendAddressInput = r.address
+                                        }
+                                    }
+                                }
+                                .menuStyle(.borderlessButton)
+                                .font(.caption)
+                            }
+                        }
 
-                        TextField("Amount (BTCB2)", text: $sendAmountInput)
+                        TextField("bc1... (Native SegWit Bech32 only)", text: $sendAddressInput)
                             .textFieldStyle(.roundedBorder)
-                            .frame(width: 140)
+                    }
 
-                        Button("Review & Send") {
-                            showSendConfirmSheet = true
+                    // Amount Input
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Amount (BTCB2):")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack {
+                            TextField("0.00000000", text: $sendAmountInput)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 180)
+
+                            let parsedBTC = Double(sendAmountInput) ?? 0.0
+                            let parsedSats = SatoshiMath.toSats(btc: parsedBTC)
+                            Text("≈ \(SatoshiMath.formatSats(parsedSats)) satoshis")
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    // Fee Selection (Cheapest / Normal / Fast / Custom)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Network Fee Target (Local BTCB2 Knots Quotes):")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack(spacing: 10) {
+                            feeOptionButton(title: "Cheapest", subtitle: "24 blks (~4h)", preset: .cheapest)
+                            feeOptionButton(title: "Normal", subtitle: "6 blks (~1h)", preset: .normal)
+                            feeOptionButton(title: "Fast", subtitle: "2 blks (~20m)", preset: .fast)
+                            feeOptionButton(title: "Custom", subtitle: "sat/vB", preset: .custom)
+                        }
+
+                        if selectedFeePreset == .custom {
+                            HStack {
+                                Text("Custom Fee Rate:")
+                                    .font(.caption)
+                                TextField("sat/vB", text: $customSatPerVBInput)
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 80)
+                                Text("sat/vB")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    // Review & Preview Button
+                    HStack {
+                        Spacer()
+                        Button(action: { generateSendPreview() }) {
+                            Label("Review Transaction Preview", systemImage: "magnifyingglass.circle.fill")
+                                .font(.headline)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 6)
                         }
                         .buttonStyle(.borderedProminent)
+                        .tint(.blue)
                         .disabled(!isSendAllowed || sendAddressInput.isEmpty || (Double(sendAmountInput) ?? 0) <= 0)
                     }
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
-                // Recent Transactions List
+                // Recent Transactions List with Verified Explorer Link
                 VStack(alignment: .leading, spacing: 12) {
                     HStack {
                         Image(systemName: "clock.arrow.circlepath")
                             .foregroundColor(.purple)
                         Text("Recent Transactions")
                             .font(.headline)
+
                         Spacer()
-                        Button(action: { state.refreshWallet() }) {
+
+                        Picker("Filter", selection: $selectedTxFilter) {
+                            Text("All").tag("all")
+                            Text("Received").tag("receive")
+                            Text("Sent").tag("send")
+                            Text("Mining").tag("generate")
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 250)
+
+                        Button(action: {
+                            state.refreshWallet()
+                            state.refreshCoinbaseRewards()
+                            state.refreshFeeQuotes()
+                        }) {
                             Image(systemName: "arrow.clockwise")
                         }
                         .buttonStyle(.plain)
                     }
 
-                    if state.transactions.isEmpty {
-                        Text("No transactions found in active descriptor wallet.")
+                    Text("Verified BTCB2 Explorer: mempool.guide (ordinary mempool.space tracks legacy SHA-256d chain)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
+                    let filtered = filteredTransactions
+                    if filtered.isEmpty {
+                        Text("No transactions found matching current filter.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .padding(.vertical, 8)
                     } else {
                         VStack(spacing: 8) {
-                            ForEach(state.transactions.prefix(8)) { tx in
+                            ForEach(filtered.prefix(12)) { tx in
                                 transactionRow(tx)
                             }
                         }
@@ -198,7 +385,7 @@ public struct WalletView: View {
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
-                // Management Actions
+                // Management Actions Row
                 HStack(spacing: 12) {
                     Button(action: { showCreateModal = true }) {
                         Label("Create Encrypted Wallet", systemImage: "plus.app.fill")
@@ -242,7 +429,11 @@ public struct WalletView: View {
 
                     Spacer()
 
-                    Button(action: { state.refreshWallet() }) {
+                    Button(action: {
+                        state.refreshWallet()
+                        state.refreshCoinbaseRewards()
+                        state.refreshFeeQuotes()
+                    }) {
                         Label("Refresh", systemImage: "arrow.clockwise")
                     }
                     .buttonStyle(.bordered)
@@ -250,8 +441,15 @@ public struct WalletView: View {
             }
             .padding(24)
         }
-        .sheet(isPresented: $showSendConfirmSheet) {
-            sendConfirmationSheet
+        .onAppear {
+            state.refreshFeeQuotes()
+            state.refreshCoinbaseRewards()
+        }
+        .sheet(isPresented: $showPreviewSheet) {
+            sendPreviewSheet
+        }
+        .sheet(isPresented: $showAddressBookSheet) {
+            addressBookSheet
         }
         .sheet(isPresented: $showCreateModal) {
             createWalletSheet
@@ -275,14 +473,54 @@ public struct WalletView: View {
         .background(Capsule().fill(Color.green.opacity(0.15)))
     }
 
-    private func balanceDetail(label: String, amount: Double) -> some View {
+    private func balanceDetail(label: String, amount: Double, sats: Int64) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label)
                 .font(.caption2)
                 .foregroundColor(.secondary)
-            Text(String(format: "%.8f", amount))
+            Text(String(format: "%.8f BTCB2", amount))
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
+            Text("\(SatoshiMath.formatSats(sats)) sats")
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundColor(.secondary)
         }
+    }
+
+    private func feeOptionButton(title: String, subtitle: String, preset: FeePresetType) -> some View {
+        let isSelected = selectedFeePreset == preset
+        let quote = state.feeQuotes[preset]
+        let rate = quote?.satPerVB ?? (preset == .cheapest ? 1 : (preset == .normal ? 2 : 5))
+
+        return Button(action: { selectedFeePreset = preset }) {
+            VStack(spacing: 3) {
+                Text(title)
+                    .font(.caption)
+                    .bold()
+                Text("\(rate) sat/vB")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                Text(subtitle)
+                    .font(.system(size: 9))
+                    .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(isSelected ? Color.blue.opacity(0.2) : Color(NSColor.windowBackgroundColor))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isSelected ? Color.blue : Color.clear, lineWidth: 1.5)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var filteredTransactions: [TransactionRecord] {
+        if selectedTxFilter == "all" {
+            return state.transactions
+        }
+        return state.transactions.filter { $0.category == selectedTxFilter }
     }
 
     private func transactionRow(_ tx: TransactionRecord) -> some View {
@@ -292,12 +530,36 @@ public struct WalletView: View {
                 .frame(width: 24)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(categoryTitle(tx.category))
-                    .font(.caption)
-                    .bold()
-                Text(tx.txid.prefix(16) + "..." + tx.txid.suffix(8))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    Text(categoryTitle(tx.category))
+                        .font(.caption)
+                        .bold()
+
+                    // Clickable Explorer link (mempool.guide)
+                    if !tx.txid.isEmpty {
+                        Button(action: {
+                            if let url = URL(string: "https://mempool.guide/tx/\(tx.txid)") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }) {
+                            HStack(spacing: 2) {
+                                Text(tx.txid.prefix(12) + "..." + tx.txid.suffix(6))
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .underline()
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.system(size: 9))
+                            }
+                            .foregroundColor(.blue)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
+                if let height = tx.blockheight {
+                    Text("Block #\(height) • \(tx.confirmations) confirmations")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Spacer()
@@ -306,8 +568,8 @@ public struct WalletView: View {
                 Text(String(format: "%@%.8f BTCB2", tx.amount >= 0 ? "+" : "", tx.amount))
                     .font(.system(size: 12, weight: .bold, design: .monospaced))
                     .foregroundColor(tx.amount >= 0 ? .green : .primary)
-                Text("\(tx.confirmations) confs")
-                    .font(.caption2)
+                Text("\(SatoshiMath.formatSats(SatoshiMath.toSats(btc: tx.amount))) sats")
+                    .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
             }
         }
@@ -319,18 +581,17 @@ public struct WalletView: View {
         switch category {
         case "receive": return "arrow.down.left"
         case "send": return "arrow.up.right"
-        case "generate": return "hammer.fill"
-        case "immature": return "clock.fill"
-        default: return "circle"
+        case "generate", "immature": return "hammer.fill"
+        default: return "circle.fill"
         }
     }
 
     private func categoryColor(_ category: String) -> Color {
         switch category {
-        case "receive", "generate": return .green
+        case "receive": return .green
         case "send": return .orange
-        case "immature": return .yellow
-        default: return .secondary
+        case "generate", "immature": return .purple
+        default: return .blue
         }
     }
 
@@ -339,121 +600,348 @@ public struct WalletView: View {
         case "receive": return "Received"
         case "send": return "Sent"
         case "generate": return "Mined Reward"
-        case "immature": return "Immature Coinbase"
+        case "immature": return "Immature Reward"
         default: return category.capitalized
         }
     }
 
-    private var sendConfirmationSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Confirm Transaction")
-                .font(.title2)
-                .bold()
+    private func generateSendPreview() {
+        let btc = Double(sendAmountInput) ?? 0.0
+        let sats = SatoshiMath.toSats(btc: btc)
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Recipient Bech32 Address:")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Text(sendAddressInput)
-                    .font(.system(size: 12, design: .monospaced))
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Color(NSColor.windowBackgroundColor))
-                    .cornerRadius(6)
+        let quote: FeeQuote
+        if selectedFeePreset == .custom {
+            let customRate = max(1, Int(customSatPerVBInput) ?? 1)
+            quote = FeeQuote(type: .custom, satPerVB: customRate, targetBlocks: 0, estimatedMinutes: 0)
+        } else {
+            quote = state.feeQuotes[selectedFeePreset] ?? FeeQuote(type: selectedFeePreset, satPerVB: 2, targetBlocks: selectedFeePreset.targetBlocks, estimatedMinutes: 60)
+        }
 
-                HStack {
-                    Text("Transfer Amount:")
-                    Spacer()
-                    Text("\(sendAmountInput) BTCB2")
-                        .bold()
+        Task {
+            do {
+                let preview = try await state.prepareSendPreview(to: sendAddressInput, amountSats: sats, feeQuote: quote)
+                await MainActor.run {
+                    self.activePreview = preview
+                    self.showPreviewSheet = true
+                    self.sendErrorMessage = nil
                 }
-
-                HStack {
-                    Text("Estimated Network Fee:")
-                    Spacer()
-                    Text("0.00010000 BTCB2")
-                        .foregroundColor(.secondary)
-                }
-
-                HStack {
-                    Text("Consensus Replay Protection:")
-                    Spacer()
-                    Text("SIGHASH_UNIFIED Validated")
-                        .foregroundColor(.green)
-                        .font(.caption)
-                        .bold()
+            } catch {
+                await MainActor.run {
+                    self.state.alertMessage = error.localizedDescription
+                    self.state.showAlert = true
                 }
             }
+        }
+    }
 
-            if state.walletSnapshot?.isEncrypted == true {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Wallet Passphrase (Required to Authorize Spend):")
-                        .font(.caption)
-                    SecureField("Passphrase", text: $sendPassphraseInput)
-                        .textFieldStyle(.roundedBorder)
-                }
-            }
+    // MARK: - Subviews & Modal Sheets
 
+    private var sendPreviewSheet: some View {
+        VStack(spacing: 20) {
             HStack {
+                Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                Text("Authorize BTCB2 Transaction")
+                    .font(.headline)
+                Spacer()
                 Button("Cancel") {
-                    showSendConfirmSheet = false
-                    sendPassphraseInput = ""
+                    showPreviewSheet = false
+                    activePreview = nil
                 }
-                .keyboardShortcut(.cancelAction)
+                .buttonStyle(.plain)
+            }
+
+            Divider()
+
+            if let preview = activePreview {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Destination Address (Full & Unmasked):")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(preview.destinationAddress)
+                            .font(.system(size: 13, weight: .bold, design: .monospaced))
+                            .textSelection(.enabled)
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.controlBackgroundColor)))
+
+                        if let name = preview.recipientName {
+                            Text("Trusted Recipient: \(name)")
+                                .font(.caption2)
+                                .foregroundColor(.green)
+                        }
+                    }
+
+                    HStack(spacing: 20) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Send Amount:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(String(format: "%.8f BTCB2", SatoshiMath.toBTC(sats: preview.amountSats)))
+                                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                            Text("\(SatoshiMath.formatSats(preview.amountSats)) sats")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Network Fee (\(preview.satPerVB) sat/vB):")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(String(format: "%.8f BTCB2", SatoshiMath.toBTC(sats: preview.feeSats)))
+                                .font(.system(size: 16, weight: .bold, design: .monospaced))
+                            Text("\(SatoshiMath.formatSats(preview.feeSats)) sats (\(preview.estimatedVSize) vB)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Total Debit from Wallet:")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Text(String(format: "%.8f BTCB2", SatoshiMath.toBTC(sats: preview.totalDebitSats)))
+                            .font(.system(size: 20, weight: .heavy, design: .monospaced))
+                            .foregroundColor(.primary)
+                        Text("\(SatoshiMath.formatSats(preview.totalDebitSats)) sats")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    if let err = sendErrorMessage {
+                        Text(err)
+                            .font(.caption)
+                            .foregroundColor(.red)
+                    }
+
+                    HStack {
+                        Image(systemName: "clock")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Text("Authorization window expires in 60s")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
 
                 Spacer()
 
-                Button("Authorize & Broadcast") {
-                    isBroadcasting = true
-                    Task {
-                        do {
-                            let amount = Double(sendAmountInput) ?? 0.0
-                            _ = try await state.sendTransaction(
-                                to: sendAddressInput,
-                                amount: amount,
-                                passphrase: sendPassphraseInput.isEmpty ? nil : sendPassphraseInput
-                            )
-                            isBroadcasting = false
-                            showSendConfirmSheet = false
-                            sendAddressInput = ""
-                            sendAmountInput = ""
-                            sendPassphraseInput = ""
-                        } catch {
-                            isBroadcasting = false
-                            state.alertMessage = "Transaction broadcast failed: \(error.localizedDescription)"
-                            state.showAlert = true
+                HStack(spacing: 14) {
+                    Button("Abort") {
+                        showPreviewSheet = false
+                        activePreview = nil
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button(action: {
+                        isBroadcasting = true
+                        Task {
+                            do {
+                                let txid = try await state.executeAuthorizedSend(preview: preview, explicitPassphrase: sendPassphraseInput.isEmpty ? nil : sendPassphraseInput)
+                                await MainActor.run {
+                                    self.isBroadcasting = false
+                                    self.showPreviewSheet = false
+                                    self.activePreview = nil
+                                    self.sendAddressInput = ""
+                                    self.sendAmountInput = ""
+                                    self.state.alertMessage = "Transaction successfully broadcasted!\n\nTXID: \(txid)\n\nTrack on mempool.guide."
+                                    self.state.showAlert = true
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    self.isBroadcasting = false
+                                    self.sendErrorMessage = error.localizedDescription
+                                }
+                            }
+                        }
+                    }) {
+                        if isBroadcasting {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label("Authenticate & Broadcast Spend", systemImage: "touchid")
+                                .bold()
                         }
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                    .disabled(isBroadcasting)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(isBroadcasting)
             }
         }
         .padding(24)
-        .frame(width: 480)
+        .frame(width: 540, height: 460)
+    }
+
+    private var addressBookSheet: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                Image(systemName: "person.crop.rectangle.stack.fill")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                Text("Trusted Recipients Allowlist")
+                    .font(.headline)
+                Spacer()
+                Button("Done") { showAddressBookSheet = false }
+                    .buttonStyle(.plain)
+            }
+
+            // Allowlist Toggle
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Strict Outgoing Allowlist Enforcement")
+                        .font(.subheadline)
+                        .bold()
+                    Text("When active, the wallet strictly blocks transactions to any address not on this trusted list.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { state.addressBook.isAllowlistEnabled },
+                    set: { enabled in
+                        Task {
+                            if (try? await KeychainHelper.shared.authenticateUserPresence(reason: "Authorize Allowlist security setting change")) == true {
+                                await MainActor.run {
+                                    state.setAllowlistEnabled(enabled)
+                                }
+                            }
+                        }
+                    }
+                ))
+                .toggleStyle(.switch)
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.controlBackgroundColor)))
+
+            Divider()
+
+            // Add Recipient Form
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Add New Trusted Recipient")
+                    .font(.subheadline)
+                    .bold()
+
+                HStack(spacing: 10) {
+                    TextField("Name / Label", text: $newRecipientName)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 130)
+
+                    TextField("Native SegWit Address (bc1...)", text: $newRecipientAddress)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Add") {
+                        Task {
+                            do {
+                                if (try? await KeychainHelper.shared.authenticateUserPresence(reason: "Authorize adding trusted recipient '\(newRecipientName)'")) == true {
+                                    _ = try state.addTrustedRecipient(name: newRecipientName, address: newRecipientAddress)
+                                    await MainActor.run {
+                                        self.newRecipientName = ""
+                                        self.newRecipientAddress = ""
+                                        self.addressBookError = nil
+                                    }
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    self.addressBookError = error.localizedDescription
+                                }
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(newRecipientAddress.isEmpty)
+                }
+
+                if let err = addressBookError {
+                    Text(err)
+                        .font(.caption2)
+                        .foregroundColor(.red)
+                }
+            }
+
+            // List of Recipients
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Saved Recipients (\(state.addressBook.recipients.count)):")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if state.addressBook.recipients.isEmpty {
+                    Text("No trusted recipients saved yet.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .padding(.vertical, 8)
+                } else {
+                    List {
+                        ForEach(state.addressBook.recipients) { r in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(r.name)
+                                        .font(.subheadline)
+                                        .bold()
+                                    Text(r.address)
+                                        .font(.system(size: 11, design: .monospaced))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button(action: {
+                                    try? state.removeTrustedRecipient(id: r.id)
+                                }) {
+                                    Image(systemName: "trash")
+                                        .foregroundColor(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                    .listStyle(.inset)
+                    .frame(height: 160)
+                }
+            }
+
+            Spacer()
+        }
+        .padding(24)
+        .frame(width: 560, height: 500)
     }
 
     private var createWalletSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(spacing: 16) {
             Text("Create Encrypted Descriptor Wallet")
-                .font(.title2)
-                .bold()
+                .font(.headline)
+
+            Text("V7 Security Policy mandates passphrase encryption. Unencrypted wallets cannot be created.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
 
             TextField("Wallet Name", text: $walletNameInput)
                 .textFieldStyle(.roundedBorder)
 
-            SecureField("Passphrase", text: $passphraseInput)
+            SecureField("Passphrase (Required)", text: $passphraseInput)
                 .textFieldStyle(.roundedBorder)
 
-            Toggle("Save Passphrase to macOS Keychain (Touch ID/Local Auth)", isOn: $storeInKeychain)
+            SecureField("Confirm Passphrase", text: $passphraseConfirmInput)
+                .textFieldStyle(.roundedBorder)
+
+            Toggle("Store Passphrase in macOS Keychain", isOn: $storeInKeychain)
+                .font(.subheadline)
 
             HStack {
                 Button("Cancel") { showCreateModal = false }
-                    .keyboardShortcut(.cancelAction)
+                    .buttonStyle(.bordered)
 
-                Spacer()
+                Button("Create Encrypted Wallet") {
+                    guard !passphraseInput.isEmpty, passphraseInput == passphraseConfirmInput else {
+                        state.alertMessage = "Passphrase cannot be empty and confirmation must match."
+                        state.showAlert = true
+                        return
+                    }
 
-                Button("Create Wallet") {
                     Task {
                         do {
                             try await state.walletManager.createEncryptedDescriptorWallet(
@@ -461,82 +949,74 @@ public struct WalletView: View {
                                 passphrase: passphraseInput,
                                 storeInKeychain: storeInKeychain
                             )
-                            showCreateModal = false
-                            state.refreshWallet()
+                            await MainActor.run {
+                                showCreateModal = false
+                                state.appendLog("[WALLET] Created encrypted wallet '\(walletNameInput)'")
+                                state.generateNewReceiveAddress()
+                            }
                         } catch {
-                            state.alertMessage = "Wallet creation failed: \(error.localizedDescription)"
-                            state.showAlert = true
+                            await MainActor.run {
+                                state.alertMessage = "Creation failed: \(error.localizedDescription)"
+                                state.showAlert = true
+                            }
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .keyboardShortcut(.defaultAction)
+                .tint(.green)
+                .disabled(passphraseInput.isEmpty || passphraseInput != passphraseConfirmInput)
             }
         }
         .padding(24)
-        .frame(width: 440)
+        .frame(width: 440, height: 320)
     }
 
     private var restoreWalletSheet: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.yellow)
-                    .font(.title2)
-                Text("Restore Wallet & Pruning Advisory")
-                    .font(.title2)
+        VStack(spacing: 16) {
+            Text("Restore Wallet from Backup")
+                .font(.headline)
+
+            Text("Select a previously exported wallet database (.dat). The wallet will be loaded and rescanned.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+
+            if let url = restoreFileURL {
+                Text("Selected: \(url.lastPathComponent)")
+                    .font(.caption)
                     .bold()
             }
 
-            Text("⚠️ Pruned Restore Warning: Bitcoin Knots in pruned mode only retains chainstate and recent block files. If the restored wallet has transaction history created prior to the local prune window, historical transactions will not be visible without initiating a fresh chain resync.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-            if let file = restoreFileURL {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Selected Backup File:")
-                        .font(.caption2)
-                    Text(file.path)
-                        .font(.system(size: 11, design: .monospaced))
-                        .padding(6)
-                        .background(Color(NSColor.windowBackgroundColor))
-                        .cornerRadius(4)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Restored Wallet Name:")
-                    .font(.caption)
-                TextField("Wallet Name", text: $restoreWalletName)
-                    .textFieldStyle(.roundedBorder)
-            }
+            TextField("Restored Wallet Name", text: $restoreWalletName)
+                .textFieldStyle(.roundedBorder)
 
             HStack {
-                Button("Cancel") {
-                    showRestoreModal = false
-                    restoreFileURL = nil
-                }
-                .keyboardShortcut(.cancelAction)
+                Button("Cancel") { showRestoreModal = false }
+                    .buttonStyle(.bordered)
 
-                Spacer()
-
-                Button("Confirm Restore") {
-                    guard let file = restoreFileURL else { return }
-                    Task {
-                        do {
-                            _ = try await state.restoreWallet(name: restoreWalletName, backupFile: file)
-                            showRestoreModal = false
-                            restoreFileURL = nil
-                        } catch {
-                            state.alertMessage = "Wallet restore failed: \(error.localizedDescription)"
-                            state.showAlert = true
+                Button("Restore Wallet") {
+                    if let fileURL = restoreFileURL {
+                        Task {
+                            do {
+                                let name = try await state.restoreWallet(name: restoreWalletName, backupFile: fileURL)
+                                await MainActor.run {
+                                    showRestoreModal = false
+                                    state.appendLog("[WALLET] Successfully restored '\(name)'")
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    state.alertMessage = "Restore failed: \(error.localizedDescription)"
+                                    state.showAlert = true
+                                }
+                            }
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(.blue)
             }
         }
         .padding(24)
-        .frame(width: 480)
+        .frame(width: 440, height: 260)
     }
 }

@@ -30,6 +30,6 @@ The standalone public `WalletManager.swift` is much smaller: only basic balances
 
 ## Rules that do not change
 
-MainNet only; minimal native app; keep default 550 MiB active pruning with 50 GiB design objective, optional external SSD archival full-redownload; adaptive synchronization ETA; logo from owner-supplied JPG; strict Sentinel mining/EMC isolation; wallet data stays at existing app-owned path until approved migration; noncustodial keys never leave device.
+MainNet only; minimal native app; keep default 550 MiB active pruning with 50 GiB design objective, optional external SSD archival full-redownload; adaptive synchronization ETA; logo from owner-supplied JPG; strict pool and enterprise infrastructure isolation; wallet data stays at existing app-owned path until approved migration; noncustodial keys never leave device.
 
 **Roadmap only:** one-click DATUM gateway provisioning **not today**. It requires its own permission, resource/battery, network/Stratum and security design before any future implementation.

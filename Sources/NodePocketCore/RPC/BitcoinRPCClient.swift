@@ -207,6 +207,10 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "estimatesmartfee", params: [confTarget])
     }
 
+    public func validateAddress(address: String) async throws -> ValidateAddressResponse {
+        try await call(method: "validateaddress", params: [address])
+    }
+
     public func getNewAddress(label: String = "", addressType: String = "bech32", walletName: String? = nil) async throws -> String {
         try await call(method: "getnewaddress", params: [label, addressType], walletName: walletName)
     }

@@ -14,7 +14,7 @@
 
 - Exactly three user views: Node, Wallet and Network, with one optional Advanced sheet. Wallet functionality expands *inside Wallet*.
 - One managed, provenance-verified BLAKE2b-capable Bitcoin Knots process, dedicated app-owned datadir, cookie-authenticated loopback RPC, macOS Keychain; Python only for development tests/mocks, never a shipped Python service.
-- Strict isolation from the original Admin Node Console, Sentinel mining pool, EMC and hardware projects. Reference the Admin Wallet Manager source **read only**; no import of private code, address book, wallets, real transaction records, credentials or services.
+- Strict isolation from the original Admin Node Console, external mining pools, and hardware projects. Reference the Admin Wallet Manager source **read only**; no import of private code, address book, wallets, real transaction records, credentials or services.
 - Wallet and chain data must survive renaming, app upgrade, pruned/full-history transitions, crashed sync and backup restoration; no silent datadir or bundle ID migration.
 - BTCB2 MainNet identity requires consensus checkpoint at block 961,640, subsequent trusted anchors and fresh tip; `chain=main` or `bc1` alone is insufficient.
 - Compact by default: `prune=550` and `pruneduringinit=550` MiB, user selects >=550 MiB; monitor total datadir, warn near 35 GiB, graceful stop by 40 GiB or <=10–12 GiB host free. 550 MiB is **not** a full datadir limit.

@@ -13,6 +13,9 @@ public final class AppState: ObservableObject {
     @Published public var adaptiveETA: (state: ETAState, display: String) = (.calibrating, "Calibrating...")
     @Published public var walletSnapshot: WalletSnapshot?
     @Published public var transactions: [TransactionRecord] = []
+    @Published public var coinbaseRewards: [CoinbaseRewardDetail] = []
+    @Published public var feeQuotes: [FeePresetType: FeeQuote] = [:]
+    @Published public var addressBook: AddressBook
     @Published public var systemHealth: SystemHealthSnapshot?
     @Published public var selectedProfileType: SyncProfileType = .quiet
     @Published public var storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB)
@@ -31,8 +34,10 @@ public final class AppState: ObservableObject {
             profile: .preset(for: .quiet),
             storageMode: .compact(pruneMB: StorageMode.defaultPruneMB)
         )
+        let book = AddressBook()
+        self.addressBook = book
         self.nodeManager = NodeManager(config: config)
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient)
+        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book)
         self.storageMode = config.storageMode
 
         let tf = DateFormatter()
@@ -205,6 +210,56 @@ public final class AppState: ObservableObject {
         self.walletSnapshot = try? await walletManager.refreshWalletInfo()
         self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
         return txid
+    }
+
+    public func prepareSendPreview(to destinationAddress: String, amountSats: Int64, feeQuote: FeeQuote) async throws -> FundedTxPreview {
+        try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote)
+    }
+
+    public func executeAuthorizedSend(preview: FundedTxPreview, explicitPassphrase: String? = nil) async throws -> String {
+        let txid = try await walletManager.executeAuthorizedSend(preview: preview, explicitPassphrase: explicitPassphrase)
+        appendLog("[TRANSACTION] Broadcasted \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress): \(txid)")
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        return txid
+    }
+
+    public func refreshFeeQuotes() {
+        Task {
+            if let quotes = try? await walletManager.fetchLiveFeeQuotes() {
+                await MainActor.run {
+                    self.feeQuotes = quotes
+                }
+            }
+        }
+    }
+
+    public func setAllowlistEnabled(_ enabled: Bool) {
+        addressBook.setAllowlistEnabled(enabled)
+        objectWillChange.send()
+    }
+
+    public func addTrustedRecipient(name: String, address: String) throws -> TrustedRecipient {
+        let recipient = try addressBook.addRecipient(name: name, address: address)
+        objectWillChange.send()
+        return recipient
+    }
+
+    public func removeTrustedRecipient(id: UUID) throws {
+        try addressBook.removeRecipient(id: id)
+        objectWillChange.send()
+    }
+
+    public func refreshCoinbaseRewards() {
+        let tip = blockchainInfo?.blocks ?? 0
+        let inIBD = blockchainInfo?.initialblockdownload ?? false
+        Task {
+            if let rewards = try? await walletManager.fetchCoinbaseRewards(currentTipHeight: tip, isIBD: inIBD) {
+                await MainActor.run {
+                    self.coinbaseRewards = rewards
+                }
+            }
+        }
     }
 
     public func restoreWallet(name: String, backupFile: URL) async throws -> String {

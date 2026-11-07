@@ -31,7 +31,8 @@ FORBIDDEN_STRINGS = [
 REQUIRED_DOCS = [
     "README.md", "AGENTS.md", "GOVERNANCE.md", "SECURITY.md",
     "CONTRIBUTING.md", "NOTICE.md", "docs/ARCHITECTURE.md",
-    "TEST_AND_RELEASE_MATRIX.md", "GEMINI_COMPLETION_HANDOFF.md"
+    "TEST_AND_RELEASE_MATRIX.md", "GEMINI_COMPLETION_HANDOFF.md",
+    "docs/WALLET_MANAGER_V7.md"
 ]
 
 def check_secrets_and_forbidden():

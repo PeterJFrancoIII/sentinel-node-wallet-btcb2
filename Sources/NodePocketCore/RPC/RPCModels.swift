@@ -31,6 +31,8 @@ public struct MempoolInfo: Codable, Sendable {
     public let size: Int
     public let bytes: Int
     public let usage: Int
+    public let mempoolminfee: Double?
+    public let minrelaytxfee: Double?
 }
 
 public struct BlockHeader: Codable, Sendable {
@@ -140,4 +142,13 @@ public struct CreateWalletResponse: Codable, Sendable {
 public struct LoadWalletResponse: Codable, Sendable {
     public let name: String
     public let warning: String?
+}
+
+public struct ValidateAddressResponse: Codable, Sendable {
+    public let isvalid: Bool
+    public let address: String?
+    public let scriptPubKey: String?
+    public let iswitness: Bool?
+    public let witness_version: Int?
+    public let witness_program: String?
 }

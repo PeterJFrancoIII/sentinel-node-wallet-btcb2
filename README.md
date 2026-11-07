@@ -12,7 +12,7 @@
 | **Wallet** | Local encrypted descriptor wallet, receive QR, balances, coinbase maturity countdown, fee-aware sending, named trusted recipients and full transaction history. See [Wallet Manager v7](docs/WALLET_MANAGER_V7.md) for planned security requirements and implementation status. |
 | **Network** | Locally derived BLAKE2b network hashrate, 30/120-block trends, freshness and difficulty. |
 
-One native **SwiftUI** application supervises one official, verified fork-compatible **Bitcoin Knots** node. Its dedicated app data and Keychain items are isolated from the Sentinel mining pool, Admin Node Console, Ethereum Mining Corp, ASIC firmware and all other projects. No Electron, Docker, hosted wallet, miner, gateway or analytics service.
+One native **SwiftUI** application supervises one official, verified fork-compatible **Bitcoin Knots** node. Its dedicated app data and Keychain items are isolated from external mining pools, admin consoles, enterprise networks, ASIC firmware and all other projects. No Electron, Docker, hosted wallet, miner, gateway or analytics service.
 
 ### BTCB2 MainNet, not ordinary BTC
 

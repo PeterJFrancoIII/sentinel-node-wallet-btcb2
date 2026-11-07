@@ -11,7 +11,7 @@ Maintain exactly three main surfaces: **Node, Wallet, Network**, plus one small 
 
 ## Read-only references and isolation
 
-Original private Admin Node Console Wallet Manager (`src/status_server.py` and `src/wallet_registry.py`) may be read for behavioral parity; NEVER copy its live code, database, real wallet data/addresses, credentials or integration services. No writes to Sentinel Pool, Ethereum Mining Corp, Admin Console, BM-S3 firmware, or other project repos/runtimes. Retain historical app bundle ID, Keychain service and datadir until a reversible migration is proved. Existing running node and wallet are not disposable test fixtures.
+Original private Admin Node Console Wallet Manager (`src/status_server.py` and `src/wallet_registry.py`) may be read for behavioral parity; NEVER copy its live code, database, real wallet data/addresses, credentials or integration services. No writes to external mining pools, corporate parent repos, Admin Console, ASIC firmware, or other project repos/runtimes. Retain historical app bundle ID, Keychain service and datadir until a reversible migration is proved. Existing running node and wallet are not disposable test fixtures.
 
 ## Immediate P0 items
 

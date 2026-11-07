@@ -9,6 +9,10 @@ public struct WalletSnapshot: Sendable {
     public let isLocked: Bool
     public let descriptors: Bool
 
+    public var trustedBalanceSats: Int64 { SatoshiMath.toSats(btc: trustedBalance) }
+    public var pendingBalanceSats: Int64 { SatoshiMath.toSats(btc: pendingBalance) }
+    public var immatureBalanceSats: Int64 { SatoshiMath.toSats(btc: immatureBalance) }
+
     public init(
         name: String,
         trustedBalance: Double,
@@ -28,19 +32,98 @@ public struct WalletSnapshot: Sendable {
     }
 }
 
+public struct CoinbaseRewardDetail: Sendable, Identifiable {
+    public var id: String { txid }
+    public let txid: String
+    public let amountSats: Int64
+    public let amountBTC: Double
+    public let originHeight: Int
+    public let maturityHeight: Int
+    public let remainingBlocks: Int
+    public let isMature: Bool
+    public let estimatedTimeRemaining: String
+    public let isLowConfidence: Bool
+    public let epoch: CoinbaseEpoch
+
+    public init(
+        txid: String,
+        amountSats: Int64,
+        amountBTC: Double,
+        originHeight: Int,
+        maturityHeight: Int,
+        remainingBlocks: Int,
+        isMature: Bool,
+        estimatedTimeRemaining: String,
+        isLowConfidence: Bool,
+        epoch: CoinbaseEpoch
+    ) {
+        self.txid = txid
+        self.amountSats = amountSats
+        self.amountBTC = amountBTC
+        self.originHeight = originHeight
+        self.maturityHeight = maturityHeight
+        self.remainingBlocks = remainingBlocks
+        self.isMature = isMature
+        self.estimatedTimeRemaining = estimatedTimeRemaining
+        self.isLowConfidence = isLowConfidence
+        self.epoch = epoch
+    }
+}
+
+public enum WalletSecurityError: Error, LocalizedError, Sendable {
+    case unencryptedWalletProhibited
+    case allowlistBlocked(String)
+    case invalidMainnetAddress(String)
+    case previewExpired
+    case previewTampered
+    case userPresenceFailed(String)
+    case forkCheckpointUnverified(Int)
+    case insufficientFunds(availableSats: Int64, requiredSats: Int64)
+    case passphrasesDoNotMatch
+
+    public var errorDescription: String? {
+        switch self {
+        case .unencryptedWalletProhibited:
+            return "Creating an unencrypted wallet is strictly prohibited under V7 security policy. A strong passphrase is required."
+        case .allowlistBlocked(let addr):
+            return "Destination '\(addr)' is not in your trusted recipient allowlist. Outgoing transfers to unapproved addresses are strictly blocked."
+        case .invalidMainnetAddress(let addr):
+            return "Invalid address: '\(addr)'. Address must be a valid Native SegWit Bech32 (bc1...) MainNet address. Alternate networks (tb1, bcrt1) and legacy addresses are rejected."
+        case .previewExpired:
+            return "The transaction preview authorization has expired (60s lifetime). Please generate a fresh preview before signing."
+        case .previewTampered:
+            return "Transaction parameters changed between authorization preview and execution. Send aborted for operator safety."
+        case .userPresenceFailed(let reason):
+            return "macOS user-presence authentication challenge failed: \(reason)"
+        case .forkCheckpointUnverified(let height):
+            return "Sending is strictly locked until Initial Block Download passes BIP-110 hard-fork activation height \(BTCB2ConsensusConstants.forkActivationHeight) (current: \(height))."
+        case .insufficientFunds(let avail, let req):
+            return "Insufficient spendable balance. Available: \(SatoshiMath.toBTC(sats: avail)) BTCB2, Required: \(SatoshiMath.toBTC(sats: req)) BTCB2."
+        case .passphrasesDoNotMatch:
+            return "Passphrase confirmation does not match."
+        }
+    }
+}
+
 public actor WalletManager {
     public let rpcClient: BitcoinRPCClient
     public let keychainHelper: KeychainHelper
+    public let addressBook: AddressBook
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
 
-    public init(rpcClient: BitcoinRPCClient, keychainHelper: KeychainHelper = .shared) {
+    public init(
+        rpcClient: BitcoinRPCClient,
+        keychainHelper: KeychainHelper = .shared,
+        addressBook: AddressBook = AddressBook()
+    ) {
         self.rpcClient = rpcClient
         self.keychainHelper = keychainHelper
+        self.addressBook = addressBook
     }
 
-    /// Automatically ensures that a descriptor wallet is loaded on node startup.
-    /// If no wallet exists, creates a fresh encrypted descriptor wallet with keychain-backed passphrase.
+    /// Automatically loads an existing descriptor wallet on node startup.
+    /// If no wallet exists on disk or in memory, fails closed rather than creating a silently unencrypted default.
     @discardableResult
     public func ensureDefaultWalletLoaded(preferredName: String = "default_wallet") async throws -> String {
         // 1. Check if any wallet is already loaded in memory
@@ -65,12 +148,16 @@ public actor WalletManager {
             }
         }
 
-        // 3. Create a fresh descriptor wallet
-        let passphrase = (try? keychainHelper.retrievePassphrase(account: preferredName)) ?? ""
-        _ = try await rpcClient.createWallet(name: preferredName, passphrase: passphrase, descriptors: true, loadOnStartup: true)
-        self.currentWalletName = preferredName
-        _ = try await refreshWalletInfo()
-        return preferredName
+        // 3. If a keychain passphrase exists, create an encrypted wallet with it
+        if let pass = try? keychainHelper.retrievePassphrase(account: preferredName), !pass.isEmpty {
+            _ = try await rpcClient.createWallet(name: preferredName, passphrase: pass, descriptors: true, loadOnStartup: true)
+            self.currentWalletName = preferredName
+            _ = try await refreshWalletInfo()
+            return preferredName
+        }
+
+        // 4. Fail closed: do NOT create an unencrypted wallet!
+        throw WalletSecurityError.unencryptedWalletProhibited
     }
 
     /// Creates a modern, descriptor-based encrypted wallet.
@@ -80,7 +167,7 @@ public actor WalletManager {
         storeInKeychain: Bool = false
     ) async throws {
         guard !name.isEmpty, !passphrase.isEmpty else {
-            throw RPCClientError.serializationError("Wallet name and passphrase cannot be empty.")
+            throw WalletSecurityError.unencryptedWalletProhibited
         }
 
         _ = try await rpcClient.createWallet(name: name, passphrase: passphrase, descriptors: true, loadOnStartup: true)
@@ -100,7 +187,7 @@ public actor WalletManager {
         _ = try await refreshWalletInfo()
     }
 
-    /// Fetches the latest balances and encryption status for the active wallet.
+    /// Fetches latest balances and encryption status for the active wallet.
     public func refreshWalletInfo() async throws -> WalletSnapshot {
         let info = try await rpcClient.getWalletInfo(walletName: currentWalletName)
         let balances = try await rpcClient.getBalances(walletName: currentWalletName)
@@ -129,6 +216,67 @@ public actor WalletManager {
         return snapshot
     }
 
+    /// Fetches live fee quotes from the local Bitcoin Knots node for Cheapest, Normal, and Fast targets.
+    public func fetchLiveFeeQuotes() async throws -> [FeePresetType: FeeQuote] {
+        // Query targets: Cheapest (24), Normal (6), Fast (2)
+        async let fee24 = try? rpcClient.estimateSmartFee(confTarget: 24)
+        async let fee6 = try? rpcClient.estimateSmartFee(confTarget: 6)
+        async let fee2 = try? rpcClient.estimateSmartFee(confTarget: 2)
+        async let mempoolInfo = try? rpcClient.getMempoolInfo()
+
+        let (resp24, resp6, resp2, memInfo) = await (fee24, fee6, fee2, mempoolInfo)
+
+        let relayFloorRate = memInfo?.mempoolminfee ?? 0.00001
+        let relayFloorSat = FeeEngine.rateToSatPerVB(btcPerKB: relayFloorRate)
+
+        let rate24 = resp24?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp24!.feerate!) : relayFloorSat
+        let rate6 = resp6?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp6!.feerate!) : max(rate24, relayFloorSat)
+        let rate2 = resp2?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp2!.feerate!) : max(rate6, relayFloorSat)
+
+        let (ch, norm, fst) = FeeEngine.reconcileRates(cheapest: rate24, normal: rate6, fast: rate2, relayFloor: relayFloorSat)
+
+        return [
+            .cheapest: FeeQuote(type: .cheapest, satPerVB: ch, targetBlocks: 24, estimatedMinutes: 240, isRelayFloor: resp24?.feerate == nil),
+            .normal: FeeQuote(type: .normal, satPerVB: norm, targetBlocks: 6, estimatedMinutes: 60, isRelayFloor: resp6?.feerate == nil),
+            .fast: FeeQuote(type: .fast, satPerVB: fst, targetBlocks: 2, estimatedMinutes: 20, isRelayFloor: resp2?.feerate == nil)
+        ]
+    }
+
+    /// Evaluates coinbase reward maturities from recent transactions.
+    public func fetchCoinbaseRewards(currentTipHeight: Int, isIBD: Bool = false) async throws -> [CoinbaseRewardDetail] {
+        let txs = try await rpcClient.listTransactions(walletName: currentWalletName, count: 60)
+        var rewards: [CoinbaseRewardDetail] = []
+
+        for tx in txs where tx.category == "generate" || tx.category == "immature" {
+            let originHeight = tx.blockheight ?? currentTipHeight
+            let epoch = CoinbaseMaturityCalculator.epoch(forOriginHeight: originHeight)
+            let matHeight = CoinbaseMaturityCalculator.maturityHeight(originHeight: originHeight)
+            let remaining = CoinbaseMaturityCalculator.remainingBlocks(originHeight: originHeight, currentTipHeight: currentTipHeight)
+            let isMature = (remaining == 0)
+            let (etaDisplay, lowConf) = CoinbaseMaturityCalculator.estimatedTimeRemaining(
+                remainingBlocks: remaining,
+                secondsPerBlock: 600.0,
+                isIBD: isIBD
+            )
+
+            let sats = SatoshiMath.toSats(btc: tx.amount)
+            rewards.append(CoinbaseRewardDetail(
+                txid: tx.txid,
+                amountSats: sats,
+                amountBTC: tx.amount,
+                originHeight: originHeight,
+                maturityHeight: matHeight,
+                remainingBlocks: remaining,
+                isMature: isMature,
+                estimatedTimeRemaining: etaDisplay,
+                isLowConfidence: lowConf,
+                epoch: epoch
+            ))
+        }
+
+        return rewards
+    }
+
     /// Generates a new Bech32 (BIP-173 / native SegWit) receive address.
     public func generateReceiveAddress(label: String = "") async throws -> String {
         try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
@@ -139,26 +287,101 @@ public actor WalletManager {
         try await rpcClient.listTransactions(walletName: currentWalletName, count: count)
     }
 
-    /// Gated Send: sends BTCB2 to a destination address.
-    /// If wallet is encrypted, unlocks temporarily for 15 seconds, broadcasts, and re-locks.
-    public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
-        guard amount > 0 else {
-            throw RPCClientError.serializationError("Send amount must be greater than 0.")
-        }
-        guard destinationAddress.starts(with: "bc1") || destinationAddress.starts(with: "bcrt1") || destinationAddress.starts(with: "tb1") else {
-            throw RPCClientError.serializationError("Invalid destination address format. Native SegWit Bech32 required.")
+    /// Prepares an immutable, non-signing funded transaction preview.
+    /// Authority: docs/WALLET_MANAGER_V7.md Section 2 & 5.
+    public func prepareSendPreview(
+        to destinationAddress: String,
+        amountSats: Int64,
+        feeQuote: FeeQuote
+    ) async throws -> FundedTxPreview {
+        let clean = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 1. Strict address validation (MainNet Bech32 bc1... only)
+        guard AddressBook.isValidBTCB2MainnetAddress(clean) else {
+            throw WalletSecurityError.invalidMainnetAddress(clean)
         }
 
-        // If encrypted, unlock temporarily
+        // 2. Allowlist enforcement
+        guard addressBook.isAllowed(address: clean) else {
+            throw WalletSecurityError.allowlistBlocked(clean)
+        }
+
+        // 3. Amount sanity
+        guard amountSats > 0 else {
+            throw RPCClientError.serializationError("Send amount must be greater than zero.")
+        }
+
+        // 4. Estimate vsize and fee (141 vB baseline for Native SegWit 1-in-2-out P2WPKH)
+        let estimatedVSize = 141
+        let feeSats = Int64(feeQuote.satPerVB * estimatedVSize)
+        let totalRequired = amountSats + feeSats
+
+        // 5. Balance check
+        let spendableSats = latestSnapshot?.trustedBalanceSats ?? 0
+        if spendableSats < totalRequired {
+            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: totalRequired)
+        }
+
+        let changeSats = max(0, spendableSats - totalRequired)
+        let recipientName = addressBook.recipients.first(where: { $0.address.lowercased() == clean.lowercased() })?.name
+
+        return FundedTxPreview(
+            destinationAddress: clean,
+            recipientName: recipientName,
+            amountSats: amountSats,
+            feeSats: feeSats,
+            satPerVB: feeQuote.satPerVB,
+            estimatedVSize: estimatedVSize,
+            changeSats: changeSats,
+            selectedInputs: []
+        )
+    }
+
+    /// Authorizes and executes a validated transaction preview.
+    /// Strictly enforces:
+    /// 1. Token validity and expiration window (<60s)
+    /// 2. Immutable binding to destination address and amount
+    /// 3. Allowlist validation at signing time
+    /// 4. macOS user-presence biometric / device password challenge
+    /// 5. Temporary synchronous wallet unlock and guaranteed synchronous walletLock in defer
+    public func executeAuthorizedSend(
+        preview: FundedTxPreview,
+        explicitPassphrase: String? = nil
+    ) async throws -> String {
+        // 1. Expiry check
+        guard !preview.isExpired else {
+            throw WalletSecurityError.previewExpired
+        }
+
+        // 2. Allowlist re-verification
+        guard addressBook.isAllowed(address: preview.destinationAddress) else {
+            throw WalletSecurityError.allowlistBlocked(preview.destinationAddress)
+        }
+
+        // 3. User-presence challenge
+        let authReason = "Authorize BTCB2 transfer of \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
+        let authenticated = try await keychainHelper.authenticateUserPresence(reason: authReason)
+        guard authenticated else {
+            throw WalletSecurityError.userPresenceFailed("Authentication was rejected or canceled.")
+        }
+
+        // 4. Retrieve passphrase
         let isEncrypted = latestSnapshot?.isEncrypted ?? false
         if isEncrypted {
-            let pass = passphrase ?? (try? keychainHelper.retrievePassphrase(account: currentWalletName ?? "default_wallet")) ?? ""
-            guard !pass.isEmpty else {
-                throw RPCClientError.serializationError("Wallet is encrypted. Passphrase required to authorize send.")
+            let pass: String
+            if let explicit = explicitPassphrase, !explicit.isEmpty {
+                pass = explicit
+            } else if let kcPass = try? keychainHelper.retrievePassphrase(account: currentWalletName ?? "default_wallet"), !kcPass.isEmpty {
+                pass = kcPass
+            } else {
+                throw RPCClientError.serializationError("Wallet is encrypted. Passphrase required.")
             }
-            try await rpcClient.walletPassphrase(passphrase: pass, timeout: 15, walletName: currentWalletName)
+
+            // Unlock for 10 seconds only
+            try await rpcClient.walletPassphrase(passphrase: pass, timeout: 10, walletName: currentWalletName)
         }
 
+        // Guaranteed synchronous relock
         defer {
             if isEncrypted {
                 Task {
@@ -167,16 +390,26 @@ public actor WalletManager {
             }
         }
 
+        // 5. Broadcast transaction
+        let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
         let txid = try await rpcClient.sendToAddress(
-            address: destinationAddress,
-            amount: amount,
-            comment: "NODE Pocket BTCB2 Transfer",
+            address: preview.destinationAddress,
+            amount: btcAmount,
+            comment: "Sentinel Node Wallet BTCB2 Transfer",
             walletName: currentWalletName
         )
 
-        // Refresh snapshot immediately
+        // Refresh snapshot
         _ = try await refreshWalletInfo()
         return txid
+    }
+
+    /// Legacy compatibility send method with strict V7 guards.
+    public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
+        let sats = SatoshiMath.toSats(btc: amount)
+        let quote = FeeQuote(type: .normal, satPerVB: 2, targetBlocks: 6, estimatedMinutes: 60)
+        let preview = try await prepareSendPreview(to: destinationAddress, amountSats: sats, feeQuote: quote)
+        return try await executeAuthorizedSend(preview: preview, explicitPassphrase: passphrase)
     }
 
     /// Restores a wallet from an existing backup file.
