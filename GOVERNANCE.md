@@ -48,6 +48,10 @@ The **Storage Footprint** selector must show two separate quantities: (1) the *o
 - Security regressions block new packaged distributions even when the prior development DMG launches successfully.
 - Avoid collecting private destination addresses, TXIDs, wallet passphrases or metadata in public issue descriptions, screenshots, CI logs or Shared Memory.
 
+## v13.1 — Apple Passwords operator onboarding clarification
+
+The last owner-authorized onboarding change offers user-controlled strong login-password generation, system-mediated Apple Passwords credential save only when correct associated-domain entitlements and signed macOS application are available, and user-approved 2FA verification-code setup via Apple's apple-otpauth handler. The operator's TOTP verifier key must stay independently secured in the application Keychain. Neither opening the system dialog nor saving a generic app Keychain password proves the user has a saved Apple Passwords login. Mark success only after owner/device verification. [Framework and Mac tests](docs/APPLE_PASSWORDS_OPERATOR_SETUP_V13_1.md).
+
 ## Final feature change and release freeze — v13
 
 The owner requires ONE final Wallet-tab authentication modification: username, strong password and RFC6238 TOTP on a completely local account, with truthful Apple Passwords save/autofill and fresh independent macOS owner-presence for sensitive actions. See [v13 implementation contract](docs/FINAL_WALLET_AUTH_V13.md). Keep Node and Network online without login. Generic Keychain access is not Apple Passwords and a password/TOTP gate does not cryptographically stop same-user/root malware or RPC access without core-level wallet protection.
