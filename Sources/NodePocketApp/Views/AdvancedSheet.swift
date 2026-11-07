@@ -142,6 +142,10 @@ public struct AdvancedSheet: View {
 
                     Divider()
 
+                    Text("Current: \(state.selectedProfileType.rawValue) · \(state.appliedSettingsStatus)")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+
                     // Resource Limits
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Fine-Tuned Resource Limits")
@@ -196,9 +200,13 @@ public struct AdvancedSheet: View {
 
             HStack {
                 Spacer()
-                Button("Apply Settings & Restart Node") {
+                if state.isApplyingNodeSettings {
+                    ProgressView().controlSize(.small)
+                }
+                Button("Apply Settings") {
                     applySettings()
                 }
+                .disabled(state.isApplyingNodeSettings)
                 .buttonStyle(.borderedProminent)
             }
         }
@@ -244,40 +252,46 @@ public struct AdvancedSheet: View {
     }
 
     private func applySettings() {
+        let mode: StorageMode
         if storageSelection == 0 {
-            let prune = Int(customPruneInput) ?? 550
-            if prune < 550 {
-                state.alertMessage = "Pruning limit cannot be less than 550 MiB."
+            guard let prune = Int(customPruneInput), prune >= 550 else {
+                state.alertMessage = "Enter a valid pruning limit of at least 550 MiB."
                 state.showAlert = true
                 return
             }
-            state.applyStorageMode(.compact(pruneMB: prune))
+            mode = .compact(pruneMB: prune)
         } else {
             guard !externalArchivalPath.isEmpty else {
-                state.alertMessage = "Please select an external volume path with at least 1 TB of free space for Archival mode."
+                state.alertMessage = "Choose a high-capacity external disk for archival rebuilding."
                 state.showAlert = true
                 return
             }
-            let url = URL(fileURLWithPath: externalArchivalPath)
-            state.applyStorageMode(.archival(externalDataDir: url))
+            mode = .archival(externalDataDir: URL(fileURLWithPath: externalArchivalPath))
         }
 
-        let dbcache = Int(dbCacheInput) ?? 256
-        let par = Int(parInput) ?? 1
-        let conns = Int(maxConnectionsInput) ?? 8
+        guard let cache = Int(dbCacheInput), (128...4096).contains(cache),
+              let par = Int(parInput), (1...8).contains(par),
+              let peers = Int(maxConnectionsInput), (1...64).contains(peers) else {
+            state.alertMessage = "Resource limits must be: cache 128–4096 MiB, verification threads 1–8, and peers 1–64."
+            state.showAlert = true
+            return
+        }
 
-        let customProfile = SyncProfile(
-            type: selectedProfile,
-            parThreads: par,
-            dbCacheMB: dbcache,
-            maxConnections: conns,
-            maxUploadTargetMB: 500,
-            pruneMB: state.storageMode.pruneMB
-        )
+        var profile = SyncProfile.preset(for: selectedProfile)
+        profile.dbCacheMB = cache
+        profile.parThreads = par
+        profile.maxConnections = peers
+        profile.pruneMB = mode.pruneMB
 
         Task {
-            try? await state.nodeManager.switchProfile(customProfile)
-            dismiss()
+            do {
+                try await state.applyNodeSettings(profile: profile, storageMode: mode)
+                dismiss()
+            } catch {
+                state.alertMessage = "Settings were NOT applied: \(error.localizedDescription)"
+                state.showAlert = true
+            }
         }
     }
+
 }
