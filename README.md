@@ -22,11 +22,11 @@ The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,64
 
 | Mode | Policy |
 | --- | --- |
-| **Compact** (default) | `prune=550` and `pruneduringinit=550` MiB, beginning with initial sync; selectable 550 MiB, 1/2/4 GiB or validated custom value. |
+| **Compact** (default) | New installs use `prune=2048` MiB after initial sync and `pruneduringinit=550` MiB while syncing. Selectable 550 MiB minimum, 1/2/4 GiB or validated custom. Existing settings remain unchanged. |
 | **Storage protection** | Warn at 35 GiB app data; graceful pause by 40 GiB or around 10–12 GiB host free, preserving wallet data. Target **under 50 GiB total**, not a hard guarantee. |
 | **Full History** (explicit opt-in) | `prune=0`, complete historical redownload/reindex, sufficient capacity (typically a dedicated external SSD), verified backup and safe rollback. |
 
-**550 MiB limits retained block/undo files, not the entire node directory.** Chainstate, indexes, wallet files and temporary operations consume more space. Even a pruned node downloads and validates historical blocks before discarding them; it remains a **fully validating node**. Full History additionally stores and can serve historical blocks when reachable.
+**550 MiB during IBD and the 2048 MiB post-sync target limit retained block/undo files, not the entire node directory.** Chainstate, indexes, wallet files and temporary operations consume more space. Even a pruned node downloads and validates historical blocks before discarding them; it remains a **fully validating node**. Full History additionally stores and can serve historical blocks when reachable.
 
 ### Wallet Manager — target v7 parity with the Admin Console
 
@@ -37,6 +37,10 @@ The BIP-110-aligned network switched from SHA-256d to BLAKE2b at height **961,64
 - **Security first:** Keychain user presence, encrypted wallets only, replay-safe SIGHASH_UNIFIED signing verified on the actual fork, preview bound to the eventual broadcast, no plaintext secret fallback, no remote wallet RPC. **Sending is not approved until all v7 P0 gates are proven and tested.**
 
 A hot wallet on a fully compromised Mac cannot promise perfect protection. Enable FileVault, keep macOS updated, protect login credentials and consider an offline/hardware signer for high-value funds.
+
+## Minimal consensus-security node defaults
+
+The default is **Balanced**: 2 verification threads, 512 MiB database cache, a **24-peer ceiling**, and modest recent-block retention. Quiet allows 16 maximum peers and Fast 32; these are capacities, not guarantees of actual peer count. Around 10–11 automatically selected outbound peers can be normal across every profile. The node independently validates BTCB2 MainNet, relays blocks and transactions, and permits inbound P2P when reachable, but never automatically maps the router (`natpmp=0`, `upnp=0`). RPC stays on 127.0.0.1. Changes must not force a new wallet, reset sync, open router ports or modify an existing prune target. [Consensus security specification](docs/MINIMAL_CONSENSUS_SECURITY_V10.md).
 
 ## Sync modes and generated wallet encryption passphrases (candidate fix)
 
