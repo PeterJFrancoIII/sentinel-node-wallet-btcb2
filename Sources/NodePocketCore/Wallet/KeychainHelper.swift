@@ -34,10 +34,18 @@ public enum KeychainError: Error, LocalizedError, Sendable {
 public final class KeychainHelper: Sendable {
     public static let shared = KeychainHelper()
     public let serviceName: String
+#if DEBUG
+    public let allowFallbackForTesting: Bool
 
+    public init(serviceName: String = "app.nodepocket.btcb2.wallet", allowFallbackForTesting: Bool = false) {
+        self.serviceName = serviceName
+        self.allowFallbackForTesting = allowFallbackForTesting
+    }
+#else
     public init(serviceName: String = "app.nodepocket.btcb2.wallet") {
         self.serviceName = serviceName
     }
+#endif
 
     /// Evaluates macOS device owner authentication (Touch ID / Local Password) before authorization.
     public func authenticateUserPresence(reason: String) async throws -> Bool {
@@ -94,10 +102,24 @@ public final class KeychainHelper: Sendable {
         ]
 
         var status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecParam || status == errSecMissingEntitlement || status == -34018 {
-            // On macOS without data-protection keychain entitlements (e.g. local ad-hoc binary builds),
-            // SecAccessControl fails with errSecParam (-50) or errSecMissingEntitlement (-34018).
-            // Fall back cleanly to kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+        if status == errSecDuplicateItem {
+            // Update existing item without deleting first!
+            let updateQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceName,
+                kSecAttrAccount as String: account
+            ]
+            let updateAttrs: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessControl as String: control
+            ]
+            status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+        }
+
+#if DEBUG
+        if (status == errSecParam || status == errSecMissingEntitlement || status == -34018) && allowFallbackForTesting {
+            // Under explicit opt-in in debug unit testing only, allow fallback test coverage.
+            // Release builds strictly fail closed on -34018 / errSecMissingEntitlement.
             let fallbackQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,
@@ -108,6 +130,8 @@ public final class KeychainHelper: Sendable {
             ]
             status = SecItemAdd(fallbackQuery as CFDictionary, nil)
         }
+#endif
+
         if status == errSecDuplicateItem {
             throw KeychainError.duplicateItem
         }

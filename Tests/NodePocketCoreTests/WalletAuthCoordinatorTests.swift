@@ -63,7 +63,105 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertFalse(invalid)
     }
 
+    override func tearDown() {
+        super.tearDown()
+        WalletAuthCoordinator.clearTestOverrides()
+    }
+
+    func testSaveTOTPThrowsOnMissingEntitlementWithoutTestMock() {
+        // Without explicit test mock injection, saveTOTPSecretToKeychain in an unentitled CLI environment
+        // MUST fail closed with storageError (status -34018 / errSecMissingEntitlement), never silently succeeding.
+        WalletAuthCoordinator.clearTestOverrides()
+        XCTAssertThrowsError(try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: "unentitled_user", secretBase32: "JBSWY3DPEHPK3PXP")) { error in
+            guard let authError = error as? WalletAuthError, case .storageError(let msg) = authError else {
+                XCTFail("Expected WalletAuthError.storageError but got \(error)")
+                return
+            }
+            XCTAssertTrue(msg.contains("-34018") || msg.contains("status"), "Error message must report Keychain failure: \(msg)")
+        }
+    }
+
+    func testSimulatedKeychainFailureThrows() {
+        WalletAuthCoordinator.simulateKeychainFailure(status: errSecMissingEntitlement)
+        XCTAssertThrowsError(try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: "fault_user", secretBase32: "JBSWY3DPEHPK3PXP")) { error in
+            guard let authError = error as? WalletAuthError, case .storageError(let msg) = authError else {
+                XCTFail("Expected WalletAuthError.storageError but got \(error)")
+                return
+            }
+            XCTAssertTrue(msg.contains("-34018") || msg.contains("status"), "Must report simulated error: \(msg)")
+        }
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: "fault_user")) { error in
+            guard let authError = error as? WalletAuthError, case .storageError = authError else {
+                XCTFail("Expected WalletAuthError.storageError on load failure but got \(error)")
+                return
+            }
+        }
+    }
+
+    func testLegacyTOTPMigrationPreservesSecretWhenKeychainFails() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_migration_fault_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Write an initial registry record with legacy plaintext TOTP
+        let initialRecord = AuthRegistryRecord(
+            username: "migrated_user",
+            saltHex: "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+            passwordHashHex: "ffeeddccbbaa99887766554433221100ffeeddccbbaa99887766554433221100",
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: "JBSWY3DPEHPK3PXP",
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(initialRecord)
+        try data.write(to: registryURL)
+
+        // Simulate Keychain write failure during coordinator initialization
+        WalletAuthCoordinator.simulateKeychainFailure(status: errSecMissingEntitlement)
+        _ = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Read registry file directly from disk: legacyTotpSecretBase32 MUST NOT have been erased!
+        let readData = try Data(contentsOf: registryURL)
+        let persistedRecord = try JSONDecoder().decode(AuthRegistryRecord.self, from: readData)
+        XCTAssertEqual(persistedRecord.legacyTotpSecretBase32, "JBSWY3DPEHPK3PXP",
+                       "Legacy secret MUST NOT be deleted if Keychain migration fails!")
+        XCTAssertFalse(persistedRecord.isTotpInKeychain)
+
+        // Now allow test mock so migration can complete successfully on subsequent initialization
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+
+        _ = WalletAuthCoordinator(dataDirectory: tempDir)
+        let successfulData = try Data(contentsOf: registryURL)
+        let migratedRecord = try JSONDecoder().decode(AuthRegistryRecord.self, from: successfulData)
+        XCTAssertNil(migratedRecord.legacyTotpSecretBase32, "Legacy secret must be safely removed once verified in Keychain")
+        XCTAssertTrue(migratedRecord.isTotpInKeychain)
+    }
+
+    func testConstantTimeComparison() {
+        let a = Data([0x01, 0x02, 0x03, 0x04])
+        let b = Data([0x01, 0x02, 0x03, 0x04])
+        let c = Data([0x01, 0x02, 0x03, 0x05])
+        let d = Data([0x01, 0x02, 0x03])
+
+        XCTAssertTrue(WalletAuthCoordinator.constantTimeCompare(a, b))
+        XCTAssertFalse(WalletAuthCoordinator.constantTimeCompare(a, c))
+        XCTAssertFalse(WalletAuthCoordinator.constantTimeCompare(a, d))
+        XCTAssertTrue(WalletAuthCoordinator.constantTimeCompareString("testString", "testString"))
+        XCTAssertFalse(WalletAuthCoordinator.constantTimeCompareString("testString1", "testString2"))
+    }
+
     func testEnrollmentAndLoginFlow() async throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -151,6 +249,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
     }
 
     func testRateLimitingOnRepeatedBadPasswords() async throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_rate_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -193,6 +292,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
     }
 
     func testEmergencyRecoveryCodeLogin() async throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_rec_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
@@ -234,6 +334,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
     // MARK: - Adversarial Security Tests (P0-3, P0-4)
 
     func testHighRiskApprovalBoundActionAndReplayPrevention() async throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_approval_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
