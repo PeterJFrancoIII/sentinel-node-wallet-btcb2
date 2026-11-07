@@ -32,6 +32,14 @@ The BTCB2-compatible explorer `https://mempool.guide/tx/{txid}` may learn a view
 
 Do not close any of these by UI wording alone. Fix code and verify with both mock adversity tests and actual authorized Mac Security.framework interactions.
 
+## New v13 local login, Apple Passwords and cleanup gates
+
+Mandatory Wallet-tab login: locally enrolled username + strong unique password + TOTP, no hardcoded account or server dependency; Argon2id (vetted, calibrated) or documented audited platform password derivation with unique CSPRNG salt; TOTP secret protected via Keychain, ±1 step maximum, anti-replay and persistent rate limiting. Apple Passwords native credential storage/autofill requires system consent, proper `webcredentials`/AASA and correct code signing; no generic Keychain item may be advertised as Apple Passwords. Losing login access must not delete independent Knots descriptor wallets or keys; recovery codes and offline wallet backup remain separate.
+
+**Known security blocker in repository:** `KeychainHelper` currently retries `SecItemAdd` after `-34018` or `-50` with weaker item flags and may retry `SecItemCopyMatching` without the authentication context. Stop silent protection downgrades; handle existing legacy items with non-destructive, consented migration and real entitlement tests. `BitcoinRPCClient.walletPassphrase`/`walletLock` error-suppression requires audited correction before sensitive transactions; a login overlay must not bypass this.
+
+Source cleanup and binary audit are specified in [v13 production security audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md). The current Knots 'fetch-verify' helper does not actually verify a signature/checksum, and dev app packaging is ad-hoc signed. A passing simple secret-string scan does not prove absence of malicious code, and notarization is not a cryptographic wallet audit. Sending remains disabled until proven safe.
+
 ## Security release gates
 
 Unresolved P0 => no public notarized release and no recommendation to custody real funds. Independent review of signing correctness, storage/migration, dependencies and wallet recovery is required. This policy does not claim that Apple notarization proves wallet security.
