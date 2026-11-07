@@ -6,13 +6,14 @@ public struct NodeView: View {
     @Binding var showAdvancedSheet: Bool
 
     private var peerConnectionSummary: String {
-        let maxPeers = state.nodeManager.config.profile.maxConnections
+        let configured = state.nodeManager.config.profile.maxConnections
+        let runtime = state.nodeManager.verifiedRunningMaxConnections.map(String.init) ?? "not verified"
         guard let info = state.networkInfo else {
-            return "Configured maximum: \(maxPeers) • Live P2P data unavailable"
+            return "Configured limit \(configured) • running cap \(runtime) • live peer data unavailable"
         }
         let inbound = info.connections_in.map(String.init) ?? "?"
         let outbound = info.connections_out.map(String.init) ?? "?"
-        return "\(outbound) outbound • \(inbound) inbound • max \(maxPeers) configured"
+        return "\(outbound) outbound • \(inbound) inbound • configured \(configured), running cap \(runtime)"
     }
 
     public var body: some View {
@@ -44,6 +45,31 @@ public struct NodeView: View {
                 }
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.windowBackgroundColor)))
+
+                // Active Sync Profile — first surface after the Node header
+                HStack(spacing: 14) {
+                    Image(systemName: state.isUltraActive ? "bolt.shield.fill" : "speedometer")
+                        .font(.title2)
+                        .foregroundColor(state.isUltraActive ? .orange : .blue)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 8) {
+                            Text(state.ultraStatusTitle)
+                                .font(.headline)
+                            if !state.isUltraActive {
+                                Text("• \(state.nodeManager.config.profile.parThreads) threads, \(state.nodeManager.config.profile.dbCacheMB) MiB dbcache, max \(state.nodeManager.config.profile.maxConnections) peers")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        Text(state.ultraStatusSubtitle)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.controlBackgroundColor)))
+                .accessibilityIdentifier("node-active-profile")
 
                 // Hero 1-Click Launch Card (Prominent when stopped or starting)
                 if state.nodeState == .stopped || state.isStartingUp {
@@ -193,14 +219,14 @@ public struct NodeView: View {
                         color: .blue
                     )
 
-                    let conns = state.networkInfo?.connections ?? (state.blockchainInfo != nil ? 8 : 0)
-                    let out = state.networkInfo?.connections_out ?? conns
-                    let inConns = state.networkInfo?.connections_in ?? 0
-                    let maxConns = state.nodeManager.config.profile.maxConnections
+                    let conns = state.networkInfo?.connections
+                    let out = state.networkInfo?.connections_out
+                    let inConns = state.networkInfo?.connections_in
+                    let effectiveCap = state.nodeManager.verifiedRunningMaxConnections.map(String.init) ?? "unverified"
 
                     metricCard(
                         title: "Connected Peers",
-                        value: "\(conns) (out:\(out), in:\(inConns)) / max \(maxConns)",
+                        value: "\(conns.map(String.init) ?? "—") (out:\(out.map(String.init) ?? "?"), in:\(inConns.map(String.init) ?? "?")) / cap \(effectiveCap)",
                         subtitle: peerConnectionSummary,
                         icon: "network",
                         color: .purple
@@ -216,30 +242,6 @@ public struct NodeView: View {
                         color: .green
                     )
                 }
-
-                // Active Sync Profile & Effective Resources Card
-                HStack(spacing: 14) {
-                    Image(systemName: state.isUltraActive ? "bolt.shield.fill" : "speedometer")
-                        .font(.title2)
-                        .foregroundColor(state.isUltraActive ? .orange : .blue)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            Text(state.ultraStatusTitle)
-                                .font(.headline)
-                            if !state.isUltraActive {
-                                Text("• \(state.nodeManager.config.profile.parThreads) threads, \(state.nodeManager.config.profile.dbCacheMB) MiB dbcache, max \(state.nodeManager.config.profile.maxConnections) peers")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                        Text(state.ultraStatusSubtitle)
-                            .font(.caption2)
-                            .foregroundColor(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(12)
-                .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.controlBackgroundColor)))
 
                 // BIP-110 Fork Progress Banner
                 let blocks = state.blockchainInfo?.blocks ?? 0
