@@ -272,6 +272,21 @@ public actor WalletAuthCoordinator {
         }
     }
 
+    /// User-chosen fallback if macOS does not present a Passwords-generated
+    /// suggestion. The 24 random bytes carry 192 bits of entropy; the fixed
+    /// suffix ensures the existing login complexity requirements are met.
+    /// This creates a LOGIN password, never a descriptor wallet seed.
+    public static func generateStrongOperatorPassword() throws -> String {
+        let random = try randomBytes(count: 24)
+        let base = random.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let password = base + "-aA9!"
+        try validatePasswordStrength(password)
+        return password
+    }
+
     public func generateEnrollmentSecret(username: String) throws -> (secretBase32: String, otpauthURI: String, recoveryCodes: [String]) {
         let secretBytes = try Self.randomBytes(count: 20)
         let base32 = Self.base32Encode(secretBytes)
