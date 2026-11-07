@@ -17,7 +17,7 @@ public final class AppState: ObservableObject {
     @Published public var feeQuotes: [FeePresetType: FeeQuote] = [:]
     @Published public var addressBook: AddressBook
     @Published public var systemHealth: SystemHealthSnapshot?
-    @Published public var selectedProfileType: SyncProfileType = .quiet
+    @Published public var selectedProfileType: SyncProfileType = .balanced
     @Published public var isApplyingNodeSettings = false
     @Published public var appliedSettingsStatus: String = "Not yet verified"
     @Published public var storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB)
@@ -34,7 +34,7 @@ public final class AppState: ObservableObject {
 
     public init() {
         let config = NodeConfig(
-            profile: .preset(for: .quiet),
+            profile: .preset(for: .balanced),
             storageMode: .compact(pruneMB: StorageMode.defaultPruneMB)
         )
         let book = AddressBook()
