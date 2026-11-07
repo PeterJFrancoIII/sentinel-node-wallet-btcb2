@@ -11,6 +11,7 @@ public struct WalletView: View {
     @State private var passphraseConfirmInput = ""
     @State private var storeInKeychain = true
     @State private var showWalletPassphrase = false
+    @State private var isCreatingWallet = false
 
     // Send Form Fields
     @State private var sendAddressInput = ""
@@ -36,6 +37,11 @@ public struct WalletView: View {
 
     // Transaction Filter
     @State private var selectedTxFilter: String = "all"
+
+    private var isNodeReadyForWallet: Bool {
+        if case .running = state.nodeState { return true }
+        return false
+    }
 
     public var isSendAllowed: Bool {
         // Mainnet requires completion of IBD past the fork checkpoint
@@ -1009,6 +1015,12 @@ public struct WalletView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
+            if !isNodeReadyForWallet {
+                Label("Start the BTCB2 node before creating a wallet.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+
             HStack {
                 Button("Cancel") {
                     passphraseInput = ""
@@ -1018,45 +1030,73 @@ public struct WalletView: View {
                 }
                 .buttonStyle(.bordered)
 
+                Button("Load Existing") {
+                    let name = walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    Task { @MainActor in
+                        do {
+                            try await state.loadExistingWallet(name: name)
+                            showCreateModal = false
+                            passphraseInput = ""
+                            passphraseConfirmInput = ""
+                            state.alertMessage = "Existing encrypted wallet loaded. No new wallet was created."
+                            state.showAlert = true
+                        } catch {
+                            state.alertMessage = "Cannot load existing wallet: \(error.localizedDescription)"
+                            state.showAlert = true
+                        }
+                    }
+                }
+                .disabled(isCreatingWallet || !isNodeReadyForWallet)
+                .buttonStyle(.bordered)
+
                 Spacer()
 
                 Button("Create Encrypted Wallet") {
-                    guard !walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                          !passphraseInput.isEmpty,
-                          passphraseInput == passphraseConfirmInput else {
-                        state.alertMessage = "A wallet name and matching nonempty passphrase are required."
+                    guard !isCreatingWallet else { return }
+                    let name = walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let passphrase = passphraseInput
+                    let save = storeInKeychain
+                    guard WalletManager.isValidWalletName(name),
+                          !passphrase.isEmpty,
+                          passphrase == passphraseConfirmInput else {
+                        state.alertMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.showAlert = true
                         return
                     }
 
-                    Task {
+                    isCreatingWallet = true
+                    Task { @MainActor in
+                        defer { isCreatingWallet = false }
                         do {
-                            try await state.walletManager.createEncryptedDescriptorWallet(
-                                name: walletNameInput,
-                                passphrase: passphraseInput,
-                                storeInKeychain: storeInKeychain
+                            try await state.createEncryptedWallet(
+                                name: name, passphrase: passphrase, storeInKeychain: save
                             )
                             showCreateModal = false
                             passphraseInput = ""
                             passphraseConfirmInput = ""
                             showWalletPassphrase = false
-                            state.appendLog("[WALLET] Created encrypted wallet '\(walletNameInput)'")
-                            state.generateNewReceiveAddress()
-                            state.alertMessage = "Encrypted wallet created. Export and verify a secure wallet backup before receiving substantial funds. The passphrase alone cannot restore the wallet."
+                            state.alertMessage = "Encrypted descriptor wallet created and verified. Back up the wallet database before receiving substantial funds. Its passphrase alone cannot restore the wallet."
                             state.showAlert = true
                         } catch {
-                            state.alertMessage = "Creation failed: \(error.localizedDescription)"
+                            state.alertMessage = "Wallet creation was not confirmed: \(error.localizedDescription)"
                             state.showAlert = true
                         }
                     }
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
-                .disabled(passphraseInput.isEmpty || passphraseInput != passphraseConfirmInput)
+                .disabled(
+                    isCreatingWallet || !isNodeReadyForWallet ||
+                    passphraseInput.isEmpty || passphraseInput != passphraseConfirmInput
+                )
+            }
+            if isCreatingWallet {
+                ProgressView("Creating and verifying encrypted wallet…")
+                    .controlSize(.small)
             }
         }
         .padding(24)
-        .frame(width: 500, height: 450)
+        .frame(width: 520, height: 470)
     }
 
     private var restoreWalletSheet: some View {
