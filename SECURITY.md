@@ -39,6 +39,10 @@ The BTCB2-compatible explorer `https://mempool.guide/tx/{txid}` may learn a view
 
 Do not close any of these by UI wording alone. Fix code and verify with both mock adversity tests and actual authorized Mac Security.framework interactions.
 
+## Apple Passwords v13.1 first-time setup — security contract
+
+User choice controls both password-manager saving and Apple Passwords TOTP code enrollment. Only approved signed `webcredentials`/AASA integration may save a password credential, and only a user-initiated apple-otpauth system link may enroll the authenticator into their chosen Passwords account. The app must never claim that the OS completed setup without verifying a code. System URL carries a secret and must never go to logs, network telemetry, analytics or a clipboard without consent. Save the verifier secret in protected local Keychain, not the JSON registry. Same-vault password+TOTP reduces factor independence; require fresh device-owner authentication for high-risk actions. [v13.1 acceptance](docs/APPLE_PASSWORDS_OPERATOR_SETUP_V13_1.md).
+
 ## New v13 local login, Apple Passwords and cleanup gates
 
 Mandatory Wallet-tab login: locally enrolled username + strong unique password + TOTP, no hardcoded account or server dependency; Argon2id (vetted, calibrated) or documented audited platform password derivation with unique CSPRNG salt; TOTP secret protected via Keychain, ±1 step maximum, anti-replay and persistent rate limiting. Apple Passwords native credential storage/autofill requires system consent, proper `webcredentials`/AASA and correct code signing; no generic Keychain item may be advertised as Apple Passwords. Losing login access must not delete independent Knots descriptor wallets or keys; recovery codes and offline wallet backup remain separate.
