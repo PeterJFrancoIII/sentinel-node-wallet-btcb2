@@ -3,6 +3,19 @@ import XCTest
 
 final class WalletAuthCoordinatorTests: XCTestCase {
 
+    func testGenerateStrongOperatorLoginPassword() throws {
+        var generated = Set<String>()
+        for _ in 0..<32 {
+            let password = try WalletAuthCoordinator.generateStrongOperatorPassword()
+            XCTAssertEqual(password.count, 37)
+            XCTAssertNoThrow(try WalletAuthCoordinator.validatePasswordStrength(password))
+            XCTAssertFalse(password.contains(" "))
+            XCTAssertTrue(generated.insert(password).inserted)
+        }
+        XCTAssertEqual(generated.count, 32)
+    }
+
+
     func testPasswordStrengthValidation() {
         // Less than 10 chars
         XCTAssertThrowsError(try WalletAuthCoordinator.validatePasswordStrength("Short1!"))
