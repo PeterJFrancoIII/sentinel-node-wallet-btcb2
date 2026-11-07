@@ -10,6 +10,7 @@ public struct WalletView: View {
     @State private var passphraseInput = ""
     @State private var passphraseConfirmInput = ""
     @State private var storeInKeychain = true
+    @State private var showWalletPassphrase = false
 
     // Send Form Fields
     @State private var sendAddressInput = ""
@@ -910,34 +911,95 @@ public struct WalletView: View {
     }
 
     private var createWalletSheet: some View {
-        VStack(spacing: 16) {
+        VStack(alignment: .leading, spacing: 12) {
             Text("Create Encrypted Descriptor Wallet")
                 .font(.headline)
-
-            Text("V7 Security Policy mandates passphrase encryption. Unencrypted wallets cannot be created.")
+            Text("The encryption passphrase unlocks this wallet. It is NOT a recovery seed; you must also back up the encrypted wallet database.")
                 .font(.caption)
                 .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
 
             TextField("Wallet Name", text: $walletNameInput)
                 .textFieldStyle(.roundedBorder)
 
-            SecureField("Passphrase (Required)", text: $passphraseInput)
+            HStack(spacing: 8) {
+                Group {
+                    if showWalletPassphrase {
+                        TextField("Encryption Passphrase", text: $passphraseInput)
+                    } else {
+                        SecureField("Encryption Passphrase", text: $passphraseInput)
+                    }
+                }
                 .textFieldStyle(.roundedBorder)
+
+                Button {
+                    showWalletPassphrase.toggle()
+                } label: {
+                    Image(systemName: showWalletPassphrase ? "eye.slash" : "eye")
+                }
+                .help(showWalletPassphrase ? "Hide passphrase" : "Show passphrase")
+                .buttonStyle(.borderless)
+            }
 
             SecureField("Confirm Passphrase", text: $passphraseConfirmInput)
                 .textFieldStyle(.roundedBorder)
 
-            Toggle("Store Passphrase in macOS Keychain", isOn: $storeInKeychain)
-                .font(.subheadline)
+            HStack(spacing: 12) {
+                Button("Generate Strong Passphrase") {
+                    do {
+                        let generated = try WalletPassphraseGenerator.generate()
+                        passphraseInput = generated
+                        passphraseConfirmInput = generated
+                        showWalletPassphrase = false
+                    } catch {
+                        state.alertMessage = error.localizedDescription
+                        state.showAlert = true
+                    }
+                }
+
+                Button("Use Saved Passphrase") {
+                    Task {
+                        do {
+                            let keychain = KeychainHelper.shared
+                            let authorized = try await keychain.authenticateUserPresence(
+                                reason: "Fill the saved encryption passphrase for wallet " + walletNameInput
+                            )
+                            guard authorized else { return }
+                            let saved = try await keychain.retrievePassphraseInteractively(account: walletNameInput)
+                            passphraseInput = saved
+                            passphraseConfirmInput = saved
+                        } catch {
+                            state.alertMessage = "Cannot fill saved passphrase: \(error.localizedDescription)"
+                            state.showAlert = true
+                        }
+                    }
+                }
+                .disabled(walletNameInput.isEmpty)
+            }
+            .font(.caption)
+
+            Toggle("Save in macOS Keychain (requires Mac user authentication)", isOn: $storeInKeychain)
+                .font(.caption)
+
+            Text("This saves the wallet name and passphrase to app-protected macOS Keychain, NOT necessarily to Apple's Passwords app. ThisDeviceOnly protection does not sync to a new Mac. Keep a separate encrypted wallet backup.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
 
             HStack {
-                Button("Cancel") { showCreateModal = false }
-                    .buttonStyle(.bordered)
+                Button("Cancel") {
+                    passphraseInput = ""
+                    passphraseConfirmInput = ""
+                    showWalletPassphrase = false
+                    showCreateModal = false
+                }
+                .buttonStyle(.bordered)
+
+                Spacer()
 
                 Button("Create Encrypted Wallet") {
-                    guard !passphraseInput.isEmpty, passphraseInput == passphraseConfirmInput else {
-                        state.alertMessage = "Passphrase cannot be empty and confirmation must match."
+                    guard !walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                          !passphraseInput.isEmpty,
+                          passphraseInput == passphraseConfirmInput else {
+                        state.alertMessage = "A wallet name and matching nonempty passphrase are required."
                         state.showAlert = true
                         return
                     }
@@ -949,16 +1011,17 @@ public struct WalletView: View {
                                 passphrase: passphraseInput,
                                 storeInKeychain: storeInKeychain
                             )
-                            await MainActor.run {
-                                showCreateModal = false
-                                state.appendLog("[WALLET] Created encrypted wallet '\(walletNameInput)'")
-                                state.generateNewReceiveAddress()
-                            }
+                            showCreateModal = false
+                            passphraseInput = ""
+                            passphraseConfirmInput = ""
+                            showWalletPassphrase = false
+                            state.appendLog("[WALLET] Created encrypted wallet '\(walletNameInput)'")
+                            state.generateNewReceiveAddress()
+                            state.alertMessage = "Encrypted wallet created. Export and verify a secure wallet backup before receiving substantial funds. The passphrase alone cannot restore the wallet."
+                            state.showAlert = true
                         } catch {
-                            await MainActor.run {
-                                state.alertMessage = "Creation failed: \(error.localizedDescription)"
-                                state.showAlert = true
-                            }
+                            state.alertMessage = "Creation failed: \(error.localizedDescription)"
+                            state.showAlert = true
                         }
                     }
                 }
@@ -968,7 +1031,7 @@ public struct WalletView: View {
             }
         }
         .padding(24)
-        .frame(width: 440, height: 320)
+        .frame(width: 500, height: 450)
     }
 
     private var restoreWalletSheet: some View {
