@@ -75,6 +75,12 @@ The repository currently contains development source and documentation. Do **not
 
 One-click **DATUM Gateway** provisioning may be added in a future independently reviewed phase. No DATUM, Stratum, mining, pool access, unattended auto-send, cloud account or other additional service is being shipped today.
 
+## Apple Passwords first-time enrollment (v13.1 candidate)
+
+In First-Time Operator Setup, the development UI now supports a cryptographically generated **operator login password**, macOS password/username/verification-code AutoFill field hints, and an explicit **Add Verification Code to Apple Passwords** action using Apple's system-managed apple-otpauth link. This code is NOT automatically saved without an Apple consent prompt. The alternative manual authenticator remains available.
+
+**Full automatic Apple Passwords login saving is not yet implemented**: it needs the owner's approved webcredentials domain, matching AASA/Team ID and a properly signed macOS build. The current development UI explicitly says so and must never claim vault saving succeeded. See [v13.1 implementation and tests](docs/APPLE_PASSWORDS_OPERATOR_SETUP_V13_1.md). This is the final enrollment refinement before the security audit, not permission to use real funds.
+
 ## Final Wallet Manager authentication — v13 (implementation pending)
 
 The release target is one **local, offline-first Wallet Manager login** with a user-selected username, strong password and time-based one-time verification code (TOTP). The Wallet tab remains locked until authorized; Node and Network continue syncing without wallet login. Every wallet-sensitive operation requires an internally enforced session, and spending, backups, recipient edits and wallet deletion additionally require fresh macOS owner presence. No account/password/TOTP secret is shared with a server.
