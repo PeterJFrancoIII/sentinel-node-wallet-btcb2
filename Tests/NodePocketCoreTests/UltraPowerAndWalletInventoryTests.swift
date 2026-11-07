@@ -277,4 +277,70 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
             }
         }
     }
+
+    func testLiveWalletBackupAndSafeTrashDeletion() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_LIVE_KNOTS_TESTS"] == "1" else {
+            return
+        }
+
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let datadir = appSupport.appendingPathComponent("NodePocketBTCB2")
+        let confURL = datadir.appendingPathComponent("bitcoin.conf")
+        guard FileManager.default.fileExists(atPath: confURL.path) else {
+            XCTFail("bitcoin.conf not found at \(confURL.path)")
+            return
+        }
+
+        let confContent = try String(contentsOf: confURL, encoding: .utf8)
+        var rpcUser = "nodepocket_user"
+        var rpcPass = ""
+        for line in confContent.components(separatedBy: .newlines) {
+            if line.starts(with: "rpcuser=") {
+                rpcUser = String(line.dropFirst("rpcuser=".count))
+            } else if line.starts(with: "rpcpassword=") {
+                rpcPass = String(line.dropFirst("rpcpassword=".count))
+            }
+        }
+
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: rpcUser, password: rpcPass)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: datadir)
+
+        let ephemeralWalletName = "test_del_wallet_\(Int(Date().timeIntervalSince1970))"
+
+        // 1. Create empty wallet
+        let createResp = try await rpc.createWallet(name: ephemeralWalletName, passphrase: "TestPassphrase123!#$")
+        XCTAssertEqual(createResp.name, ephemeralWalletName)
+
+        // 2. Perform verified backup
+        let tempBackup = FileManager.default.temporaryDirectory.appendingPathComponent("\(ephemeralWalletName).dat")
+        try await rpc.backupWallet(destinationPath: tempBackup.path, walletName: ephemeralWalletName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: tempBackup.path))
+        let attrs = try FileManager.default.attributesOfItem(atPath: tempBackup.path)
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        XCTAssertGreaterThan(size, 0, "Backup file must be non-empty")
+
+        // 3. Delete from Mac to Trash
+        try await inventory.deleteWalletFromMac(
+            name: ephemeralWalletName,
+            typedConfirmation: ephemeralWalletName,
+            verifiedBackupPath: tempBackup.path
+        )
+
+        // 4. Verify wallet directory is no longer in datadir
+        let walletDir = datadir.appendingPathComponent(ephemeralWalletName)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: walletDir.path), "Wallet dir must be removed from datadir")
+
+        // 5. Verify Knots no longer has it loaded
+        let loaded = try await rpc.listWallets()
+        XCTAssertFalse(loaded.contains(ephemeralWalletName), "Wallet must be unloaded")
+
+        // 6. Verify item was moved to macOS Trash
+        let trashDir = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first!
+        let trashedWallet = trashDir.appendingPathComponent(ephemeralWalletName)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: trashedWallet.path), "Wallet must be in macOS Trash")
+
+        // Clean up backup and trash for ephemeral test wallet
+        try? FileManager.default.removeItem(at: tempBackup)
+        try? FileManager.default.removeItem(at: trashedWallet)
+    }
 }
