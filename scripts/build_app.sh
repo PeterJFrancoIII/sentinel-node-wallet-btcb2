@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Building NODE Pocket BTCB2 Native macOS Release Binary ==="
+echo "=== Building Sentinel Node Wallet - BTCB2 Native macOS Release Binary ==="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -13,15 +13,15 @@ swift build -c release --arch arm64
 
 BIN_DIR="$(swift build -c release --show-bin-path)"
 BIN_PATH="${BIN_DIR}/NodePocketApp"
-APP_BUNDLE="${ROOT_DIR}/dist/NODE Pocket.app"
+APP_BUNDLE="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 
 rm -rf "${ROOT_DIR}/dist"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 mkdir -p "${APP_BUNDLE}/Contents/Resources"
 
 # Copy binary
-cp "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/NodePocket"
-chmod +x "${APP_BUNDLE}/Contents/MacOS/NodePocket"
+cp "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet"
+chmod +x "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet"
 
 # Embed official verified Bitcoin Knots binaries
 KNOTS_CACHE_DIR="${ROOT_DIR}/.cache/bitcoin-29.4.3.knots20260508/bin"
@@ -39,11 +39,17 @@ if [ -f "${KNOTS_CACHE_DIR}/bitcoin-cli" ]; then
     codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
 fi
 
-codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/NodePocket"
+codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet"
 
 # Copy resources
 if [ -f "${ROOT_DIR}/Resources/consensus-manifest.json" ]; then
     cp "${ROOT_DIR}/Resources/consensus-manifest.json" "${APP_BUNDLE}/Contents/Resources/"
+fi
+
+# Copy AppIcon.icns
+if [ -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
+    echo "Embedding AppIcon.icns into bundle..."
+    cp "${ROOT_DIR}/Resources/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 fi
 
 # Create Info.plist
@@ -53,11 +59,15 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>NodePocket</string>
+    <string>SentinelNodeWallet</string>
     <key>CFBundleIdentifier</key>
     <string>app.nodepocket.btcb2</string>
     <key>CFBundleName</key>
-    <string>NODE Pocket</string>
+    <string>Sentinel Node Wallet</string>
+    <key>CFBundleDisplayName</key>
+    <string>Sentinel Node Wallet</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

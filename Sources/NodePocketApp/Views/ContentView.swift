@@ -26,6 +26,19 @@ public struct ContentView: View {
         VStack(spacing: 0) {
             // Top Toolbar Navigation Bar
             HStack(spacing: 12) {
+                // Shield Logo + Short Brand Label
+                HStack(spacing: 8) {
+                    Image(nsImage: NSImage(named: NSImage.Name("AppIcon")) ?? NSApp.applicationIconImage)
+                        .resizable()
+                        .aspectRatio(contentMode: .fit)
+                        .frame(width: 22, height: 22)
+                        .clipShape(RoundedRectangle(cornerRadius: 5))
+
+                    Text("Sentinel Wallet")
+                        .font(.system(size: 13, weight: .bold))
+                }
+                .padding(.trailing, 4)
+
                 // View Switcher (Node, Wallet, Network)
                 Picker("View", selection: $selectedTab) {
                     ForEach(AppViewTab.allCases) { tab in
@@ -33,9 +46,35 @@ public struct ContentView: View {
                     }
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 300)
+                .frame(width: 270)
 
                 Spacer()
+
+                // Chain Badge (Strictly BTCB2 Mainnet)
+                HStack(spacing: 4) {
+                    Circle()
+                        .fill(Color.orange)
+                        .frame(width: 6, height: 6)
+                    Text("BTCB2 MAINNET")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundColor(.orange)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color.orange.opacity(0.12)))
+
+                // Storage Mode Pill
+                HStack(spacing: 4) {
+                    Image(systemName: "internaldrive.fill")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                    Text(state.storageMode.isArchival ? "Archival" : "Pruned \(state.storageMode.pruneMB)MB")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(Color(NSColor.controlBackgroundColor)))
 
                 // System Health Pill (MacBook Air / Host)
                 if let health = state.systemHealth {
@@ -53,18 +92,6 @@ public struct ContentView: View {
                     .background(Capsule().fill(Color(NSColor.controlBackgroundColor)))
                 }
 
-                // Network Selector
-                Picker("Network", selection: Binding(
-                    get: { state.selectedNetwork },
-                    set: { state.switchNetwork($0) }
-                )) {
-                    Text("Mainnet").tag(BTCB2Network.mainnet)
-                    Text("Regtest").tag(BTCB2Network.regtest)
-                    Text("Testnet4").tag(BTCB2Network.testnet4)
-                }
-                .pickerStyle(.menu)
-                .frame(width: 105)
-
                 // Sync Profile Quick Selector
                 HStack(spacing: 4) {
                     Image(systemName: "leaf.fill")
@@ -76,7 +103,7 @@ public struct ContentView: View {
                         }
                     }
                     .pickerStyle(.menu)
-                    .frame(width: 110)
+                    .frame(width: 105)
                     .onChange(of: state.selectedProfileType) { newProfile in
                         state.applyProfile(newProfile)
                     }
@@ -116,6 +143,7 @@ public struct ContentView: View {
                 .frame(width: 0, height: 0)
             )
         }
+        .navigationTitle("Sentinel Node Wallet - BTCB2")
         .sheet(isPresented: $showAdvancedSheet) {
             AdvancedSheet()
         }

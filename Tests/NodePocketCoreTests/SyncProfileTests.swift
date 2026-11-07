@@ -25,7 +25,6 @@ final class SyncProfileTests: XCTestCase {
 
     func testBitcoinConfRendering() {
         let config = NodeConfig(
-            network: .mainnet,
             rpcPort: 8332,
             rpcUser: "test_user",
             rpcPassword: "test_password_123",
@@ -43,7 +42,8 @@ final class SyncProfileTests: XCTestCase {
         XCTAssertTrue(conf.contains("par=1"))
         XCTAssertTrue(conf.contains("dbcache=256"))
         XCTAssertTrue(conf.contains("maxconnections=8"))
-        XCTAssertTrue(conf.contains("prune=2048"))
+        XCTAssertTrue(conf.contains("prune=550"))
+        XCTAssertTrue(conf.contains("pruneduringinit=550"))
         XCTAssertTrue(conf.contains("[main]"))
     }
 }

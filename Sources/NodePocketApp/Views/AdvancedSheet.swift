@@ -5,33 +5,121 @@ public struct AdvancedSheet: View {
     @EnvironmentObject var state: AppState
     @Environment(\.dismiss) var dismiss
 
+    @State private var storageSelection: Int = 0 // 0 = Compact, 1 = Archival
+    @State private var selectedPrunePreset: Int = 550
+    @State private var customPruneInput: String = "550"
+    @State private var externalArchivalPath: String = ""
     @State private var selectedProfile: SyncProfileType = .quiet
-    @State private var pruneInput: String = "2048"
     @State private var dbCacheInput: String = "256"
     @State private var parInput: String = "1"
     @State private var maxConnectionsInput: String = "8"
     @State private var enableInboundP2P: Bool = false
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
+        VStack(alignment: .leading, spacing: 18) {
             HStack {
-                Text("Advanced Node & Resource Settings")
-                    .font(.title2)
-                    .bold()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Advanced Node & Storage Settings")
+                        .font(.title2)
+                        .bold()
+                    Text("Configure storage modes, pruning limits, and sync intensity")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
                 Spacer()
                 Button("Done") {
                     dismiss()
                 }
-                .keyboardShortcut(.defaultAction)
+                .keyboardShortcut(.cancelAction)
             }
 
             Divider()
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    // Profile Preset Picker
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Sync Profile Preset")
+                VStack(alignment: .leading, spacing: 20) {
+                    // Storage Mode Selection
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Storage Mode & Blockchain Retention")
+                            .font(.headline)
+
+                        Picker("Storage Mode", selection: $storageSelection) {
+                            Text("Compact Pruned (Default)").tag(0)
+                            Text("Full History / Archival").tag(1)
+                        }
+                        .pickerStyle(.segmented)
+
+                        if storageSelection == 0 {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Text("Select Block Retention Limit (Minimum 550 MiB):")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                HStack(spacing: 8) {
+                                    prunePresetButton(550, label: "550 MiB (Default)")
+                                    prunePresetButton(1024, label: "1 GiB")
+                                    prunePresetButton(2048, label: "2 GiB")
+                                    prunePresetButton(4096, label: "4 GiB")
+                                }
+
+                                HStack {
+                                    Text("Custom Retention Limit (MiB ≥ 550):")
+                                        .font(.caption)
+                                    Spacer()
+                                    TextField("MiB", text: $customPruneInput)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 90)
+                                }
+
+                                Text("ℹ️ Note: Pruning limits apply to historical raw block files. A compact pruned node performs 100% cryptographic validation of all blocks and consensus rules.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(12)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+                        } else {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundColor(.orange)
+                                    Text("Archival Mode Requirements")
+                                        .font(.subheadline)
+                                        .bold()
+                                }
+
+                                Text("Full-History / Archival mode requires retaining ~800+ GB of historical blocks. Because internal Mac storage is constrained, archival mode must be hosted on an external drive with ≥ 1 TB free space.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+
+                                HStack {
+                                    TextField("External Drive Target Path", text: $externalArchivalPath)
+                                        .textFieldStyle(.roundedBorder)
+
+                                    Button("Choose Drive...") {
+                                        let openPanel = NSOpenPanel()
+                                        openPanel.title = "Select External Volume for Archival Storage"
+                                        openPanel.canChooseFiles = false
+                                        openPanel.canChooseDirectories = true
+                                        openPanel.canCreateDirectories = true
+                                        if openPanel.runModal() == .OK, let url = openPanel.url {
+                                            externalArchivalPath = url.path
+                                        }
+                                    }
+                                }
+
+                                Text("⚠️ Warning: Enabling archival mode requires a full re-index and redownloading all historical blocks from genesis. Your current pruned wallet and chain data will be preserved as a safe rollback.")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                            .padding(12)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+                        }
+                    }
+
+                    Divider()
+
+                    // Sync Profile Presets
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Sync Profile (Intensity)")
                             .font(.headline)
 
                         Picker("Profile", selection: $selectedProfile) {
@@ -42,7 +130,6 @@ public struct AdvancedSheet: View {
                         .pickerStyle(.segmented)
                         .onChange(of: selectedProfile) { newProfile in
                             let preset = SyncProfile.preset(for: newProfile)
-                            pruneInput = "\(preset.pruneMB)"
                             dbCacheInput = "\(preset.dbCacheMB)"
                             parInput = "\(preset.parThreads)"
                             maxConnectionsInput = "\(preset.maxConnections)"
@@ -55,25 +142,17 @@ public struct AdvancedSheet: View {
 
                     Divider()
 
-                    // Resource Inputs
-                    VStack(alignment: .leading, spacing: 12) {
-                        Text("Custom Resource Limits")
+                    // Resource Limits
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Fine-Tuned Resource Limits")
                             .font(.headline)
-
-                        HStack {
-                            Text("Prune Blockfile Limit (MiB):")
-                            Spacer()
-                            TextField("MiB", text: $pruneInput)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 100)
-                        }
 
                         HStack {
                             Text("Database Cache (MB):")
                             Spacer()
                             TextField("MB", text: $dbCacheInput)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 100)
+                                .frame(width: 90)
                         }
 
                         HStack {
@@ -81,7 +160,7 @@ public struct AdvancedSheet: View {
                             Spacer()
                             TextField("Threads", text: $parInput)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 100)
+                                .frame(width: 90)
                         }
 
                         HStack {
@@ -89,63 +168,116 @@ public struct AdvancedSheet: View {
                             Spacer()
                             TextField("Peers", text: $maxConnectionsInput)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 100)
+                                .frame(width: 90)
                         }
 
                         Toggle("Enable Inbound P2P (Default OFF for portable security)", isOn: $enableInboundP2P)
+                            .font(.caption)
                     }
 
                     Divider()
 
                     // Isolation Assurance
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Image(systemName: "lock.shield.fill")
                                 .foregroundColor(.green)
-                            Text("Strict Isolation & Loopback Parameters")
+                            Text("Strict Loopback & Isolation Parameters")
                                 .font(.headline)
                         }
-                        Text("• RPC Host: 127.0.0.1 (Strict loopback; remote RPC permanently disabled)\n• Datadir: ~/Library/Application Support/NodePocketBTCB2\n• File Permissions: 0700 dir / 0600 config\n• Bundle ID: app.nodepocket.btcb2")
+                        Text("• RPC Host: 127.0.0.1 (Strict loopback; public ingress disabled)\n• Data Directory: ~/Library/Application Support/NodePocketBTCB2\n• File Permissions: 0700 dir / 0600 config\n• Bundle ID: app.nodepocket.btcb2")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
                 }
             }
 
+            Divider()
+
             HStack {
                 Spacer()
-                Button("Apply & Restart Node") {
-                    let prune = Int(pruneInput) ?? 2048
-                    let dbcache = Int(dbCacheInput) ?? 256
-                    let par = Int(parInput) ?? 1
-                    let conns = Int(maxConnectionsInput) ?? 8
-
-                    let customProfile = SyncProfile(
-                        type: selectedProfile,
-                        parThreads: par,
-                        dbCacheMB: dbcache,
-                        maxConnections: conns,
-                        maxUploadTargetMB: 500,
-                        pruneMB: prune
-                    )
-
-                    Task {
-                        try? await state.nodeManager.switchProfile(customProfile)
-                        dismiss()
-                    }
+                Button("Apply Settings & Restart Node") {
+                    applySettings()
                 }
                 .buttonStyle(.borderedProminent)
             }
         }
         .padding(24)
-        .frame(width: 520, height: 500)
+        .frame(width: 540, height: 560)
         .onAppear {
-            let current = state.nodeManager.config.profile
-            selectedProfile = current.type
-            pruneInput = "\(current.pruneMB)"
-            dbCacheInput = "\(current.dbCacheMB)"
-            parInput = "\(current.parThreads)"
-            maxConnectionsInput = "\(current.maxConnections)"
+            loadCurrentSettings()
+        }
+    }
+
+    private func prunePresetButton(_ mb: Int, label: String) -> some View {
+        Button(action: {
+            selectedPrunePreset = mb
+            customPruneInput = "\(mb)"
+        }) {
+            Text(label)
+                .font(.caption2)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+        }
+        .buttonStyle(.bordered)
+        .tint(selectedPrunePreset == mb ? .blue : .primary)
+    }
+
+    private func loadCurrentSettings() {
+        let currentStorage = state.storageMode
+        if currentStorage.isPruned {
+            storageSelection = 0
+            selectedPrunePreset = currentStorage.pruneMB
+            customPruneInput = "\(currentStorage.pruneMB)"
+        } else {
+            storageSelection = 1
+            if case .archival(let url) = currentStorage {
+                externalArchivalPath = url.path
+            }
+        }
+
+        let currentProfile = state.nodeManager.config.profile
+        selectedProfile = currentProfile.type
+        dbCacheInput = "\(currentProfile.dbCacheMB)"
+        parInput = "\(currentProfile.parThreads)"
+        maxConnectionsInput = "\(currentProfile.maxConnections)"
+    }
+
+    private func applySettings() {
+        if storageSelection == 0 {
+            let prune = Int(customPruneInput) ?? 550
+            if prune < 550 {
+                state.alertMessage = "Pruning limit cannot be less than 550 MiB."
+                state.showAlert = true
+                return
+            }
+            state.applyStorageMode(.compact(pruneMB: prune))
+        } else {
+            guard !externalArchivalPath.isEmpty else {
+                state.alertMessage = "Please select an external volume path with at least 1 TB of free space for Archival mode."
+                state.showAlert = true
+                return
+            }
+            let url = URL(fileURLWithPath: externalArchivalPath)
+            state.applyStorageMode(.archival(externalDataDir: url))
+        }
+
+        let dbcache = Int(dbCacheInput) ?? 256
+        let par = Int(parInput) ?? 1
+        let conns = Int(maxConnectionsInput) ?? 8
+
+        let customProfile = SyncProfile(
+            type: selectedProfile,
+            parThreads: par,
+            dbCacheMB: dbcache,
+            maxConnections: conns,
+            maxUploadTargetMB: 500,
+            pruneMB: state.storageMode.pruneMB
+        )
+
+        Task {
+            try? await state.nodeManager.switchProfile(customProfile)
+            dismiss()
         }
     }
 }

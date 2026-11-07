@@ -13,6 +13,7 @@ public final class NodeManager: @unchecked Sendable {
     public var config: NodeConfig
     public private(set) var rpcClient: BitcoinRPCClient
     public let hashrateTracker: HashrateTracker
+    public let etaEngine: AdaptiveETAEngine
 
     private var process: Process?
     private var stdoutPipe: Pipe?
@@ -22,7 +23,7 @@ public final class NodeManager: @unchecked Sendable {
 
     public var onStateChange: (@Sendable (NodeState) -> Void)?
     public var onLogMessage: (@Sendable (String) -> Void)?
-    public var onBlockchainUpdate: (@Sendable (BlockchainInfo, HashrateReport, NetworkInfo?) -> Void)?
+    public var onBlockchainUpdate: (@Sendable (BlockchainInfo, HashrateReport, NetworkInfo?, (state: ETAState, display: String)) -> Void)?
 
     public init(config: NodeConfig = NodeConfig()) {
         self.config = config
@@ -33,18 +34,12 @@ public final class NodeManager: @unchecked Sendable {
             password: config.rpcPassword
         )
         self.hashrateTracker = HashrateTracker(windowSize: 30)
+        self.etaEngine = AdaptiveETAEngine()
     }
 
-    public func updateNetwork(_ network: BTCB2Network) {
-        self.config.network = network
-        self.config.rpcPort = network.defaultRPCPort
-        self.config.p2pPort = network.defaultP2PPort
-        self.rpcClient = BitcoinRPCClient(
-            host: "127.0.0.1",
-            port: config.rpcPort,
-            user: config.rpcUser,
-            password: config.rpcPassword
-        )
+    public func adoptRunningDaemon(pid: Int32 = 0) {
+        updateState(.running(pid: pid))
+        startMonitoring()
     }
 
     private func updateState(_ newState: NodeState) {
@@ -55,6 +50,7 @@ public final class NodeManager: @unchecked Sendable {
     }
 
     /// Starts the node subprocess using the configured bitcoind binary or a simulator if not present.
+    /// Strictly pinned to BTCB2 BIP-110 BLAKE2b MainNet.
     public func start(binaryURL: URL? = nil) throws {
         stateLock.lock()
         guard state == .stopped || caseMatchesError(state) else {
@@ -69,7 +65,6 @@ public final class NodeManager: @unchecked Sendable {
         try config.writeToDisk()
 
         guard let executableURL = binaryURL ?? findBitcoindBinary() else {
-            // If bitcoind is not installed on this host, enter simulated/mock-ready mode
             onLogMessage?("[INFO] bitcoind binary not found on local PATH. Ready for standalone integration or mock RPC.")
             updateState(.stopped)
             return
@@ -77,18 +72,11 @@ public final class NodeManager: @unchecked Sendable {
 
         let proc = Process()
         proc.executableURL = executableURL
-        var arguments = [
+        // Strictly MainNet arguments only
+        let arguments = [
             "-conf=\(config.configFileURL.path)",
             "-datadir=\(config.dataDirectory.path)"
         ]
-        switch config.network {
-        case .regtest:
-            arguments.append("-regtest")
-        case .testnet4:
-            arguments.append("-testnet4")
-        case .mainnet:
-            break
-        }
         proc.arguments = arguments
 
         let outPipe = Pipe()
@@ -166,7 +154,6 @@ public final class NodeManager: @unchecked Sendable {
 
         if let proc = process, proc.isRunning {
             proc.terminate()
-            // Wait up to 5 seconds
             for _ in 0..<10 {
                 if !proc.isRunning { break }
                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -187,9 +174,20 @@ public final class NodeManager: @unchecked Sendable {
         try config.writeToDisk()
         onLogMessage?("[CONFIG] Switched sync profile to \(newProfile.type.rawValue). Configuration written to disk.")
 
-        // If running, restart to apply new thread/cache/prune settings
         if case .running = state {
             onLogMessage?("[CONFIG] Restarting node daemon to apply updated profile parameters...")
+            await stop()
+            try start()
+        }
+    }
+
+    public func switchStorageMode(_ newStorageMode: StorageMode) async throws {
+        self.config.storageMode = newStorageMode
+        try config.writeToDisk()
+        onLogMessage?("[STORAGE] Switched storage mode to \(newStorageMode.isPruned ? "Compact Pruned (\(newStorageMode.pruneMB) MiB)" : "Full History / Archival").")
+
+        if case .running = state {
+            onLogMessage?("[STORAGE] Restarting node daemon to apply updated storage mode...")
             await stop()
             try start()
         }
@@ -204,6 +202,7 @@ public final class NodeManager: @unchecked Sendable {
 
                 do {
                     let binfo = try await self.rpcClient.getBlockchainInfo()
+                    let netInfo = try? await self.rpcClient.getNetworkInfo()
                     let bhash = binfo.bestblockhash
                     if !bhash.isEmpty {
                         let header = try await self.rpcClient.getBlockHeader(hash: bhash)
@@ -217,19 +216,19 @@ public final class NodeManager: @unchecked Sendable {
                         }
                     }
 
-                    let netInfo = try? await self.rpcClient.getNetworkInfo()
                     let report = self.hashrateTracker.generateReport()
-                    self.onBlockchainUpdate?(binfo, report, netInfo)
+
+                    // Adaptive Verification Progress ETA
+                    self.etaEngine.addSample(progress: binfo.verificationprogress, height: binfo.blocks)
+                    let peerCount = netInfo?.connections ?? 8
+                    let eta = self.etaEngine.calculateETA(isIBD: binfo.initialblockdownload, peerCount: peerCount)
+
+                    self.onBlockchainUpdate?(binfo, report, netInfo, eta)
                 } catch {
                     // Suppress connection errors during initial startup
                 }
             }
         }
-    }
-
-    public func adoptRunningDaemon(pid: Int32 = 0) {
-        updateState(.running(pid: pid))
-        startMonitoring()
     }
 
     public func waitForRPCReadiness(timeoutSeconds: TimeInterval = 60.0) async throws {
@@ -249,18 +248,13 @@ public final class NodeManager: @unchecked Sendable {
     public func findBitcoindBinary() -> URL? {
         var candidates: [String] = []
 
-        // 1. App Bundle (Production deployment)
         candidates.append(Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind").path)
 
-        // 2. Sibling of current executable
         if let execURL = Bundle.main.executableURL {
             candidates.append(execURL.deletingLastPathComponent().appendingPathComponent("bitcoind").path)
         }
 
-        // 3. Local build cache in developer workspace
         candidates.append("/Users/computer/Developer/NodePocketBTCB2/.cache/bitcoin-29.4.3.knots20260508/bin/bitcoind")
-
-        // 4. Standard host installations
         candidates.append("/opt/homebrew/bin/bitcoind")
         candidates.append("/usr/local/bin/bitcoind")
 

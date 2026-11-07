@@ -21,7 +21,6 @@ public struct WalletView: View {
     @State private var restoreWalletName = "restored_wallet"
 
     public var isSendAllowed: Bool {
-        if state.selectedNetwork == .regtest { return true }
         // Mainnet requires completion of IBD past the fork checkpoint
         let inIBD = state.blockchainInfo?.initialblockdownload ?? true
         let height = state.blockchainInfo?.blocks ?? 0
@@ -146,7 +145,7 @@ public struct WalletView: View {
                     }
 
                     if !isSendAllowed {
-                        Text("Sending on Mainnet is strictly locked until the local node finishes Initial Block Download (IBD) past BIP-110 fork height \(BTCB2ConsensusConstants.forkActivationHeight). On Regtest, sends are always unlocked for immediate local testing.")
+                        Text("Sending on Mainnet is strictly locked until the local node finishes Initial Block Download (IBD) past BIP-110 fork height \(BTCB2ConsensusConstants.forkActivationHeight).")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -264,16 +263,16 @@ public struct WalletView: View {
 
     private var chainIdentityBadge: some View {
         HStack(spacing: 6) {
-            Image(systemName: state.selectedNetwork == .regtest ? "hammer.fill" : "checkmark.shield.fill")
-                .foregroundColor(state.selectedNetwork == .regtest ? .purple : .green)
-            Text(state.selectedNetwork == .regtest ? "REGTEST PLAYGROUND" : "BTCB2 MAINNET (BIP-110)")
+            Image(systemName: "checkmark.shield.fill")
+                .foregroundColor(.green)
+            Text("BTCB2 MAINNET (BIP-110)")
                 .font(.caption)
                 .bold()
-                .foregroundColor(state.selectedNetwork == .regtest ? .purple : .green)
+                .foregroundColor(.green)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .background(Capsule().fill((state.selectedNetwork == .regtest ? Color.purple : Color.green).opacity(0.15)))
+        .background(Capsule().fill(Color.green.opacity(0.15)))
     }
 
     private func balanceDetail(label: String, amount: Double) -> some View {

@@ -12,7 +12,7 @@ public struct NodeView: View {
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 8) {
-                            Text("NODE Pocket")
+                            Text("Sentinel Node Wallet")
                                 .font(.system(size: 26, weight: .bold))
                             networkBadge
                         }
@@ -36,7 +36,7 @@ public struct NodeView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("1-Click BTCB2 Knots Node & Wallet")
                                     .font(.headline)
-                                Text("Autonomously launches embedded Bitcoin Knots, binds strict loopback RPC, and unlocks your encrypted descriptor wallet.")
+                                Text("Autonomously launches embedded Bitcoin Knots Mainnet, binds strict loopback RPC, and unlocks your encrypted descriptor wallet.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -46,22 +46,12 @@ public struct NodeView: View {
                         Divider()
 
                         HStack(spacing: 16) {
-                            // Network Selection
                             HStack(spacing: 8) {
-                                Text("Network:")
+                                Image(systemName: "checkmark.seal.fill")
+                                    .foregroundColor(.green)
+                                Text("Consensus: BIP-110 Mainnet")
                                     .font(.subheadline)
                                     .foregroundColor(.secondary)
-                                Picker("Network", selection: Binding(
-                                    get: { state.selectedNetwork },
-                                    set: { state.switchNetwork($0) }
-                                )) {
-                                    Text("Mainnet (Real BTCB2)").tag(BTCB2Network.mainnet)
-                                    Text("Regtest (Playground)").tag(BTCB2Network.regtest)
-                                    Text("Testnet4").tag(BTCB2Network.testnet4)
-                                }
-                                .pickerStyle(.segmented)
-                                .frame(width: 310)
-                                .disabled(state.isStartingUp)
                             }
 
                             Spacer()
@@ -114,19 +104,6 @@ public struct NodeView: View {
                         }
                         .buttonStyle(.bordered)
 
-                        if state.selectedNetwork == .regtest {
-                            Button(action: { state.generateRegtestBlocks(count: 1) }) {
-                                Label("Mine 1 Block", systemImage: "hammer.fill")
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.purple)
-
-                            Button(action: { state.generateRegtestBlocks(count: 100) }) {
-                                Label("Mine 100 Blocks (Mature)", systemImage: "bolt.fill")
-                            }
-                            .buttonStyle(.bordered)
-                        }
-
                         Spacer()
 
                         Button(action: { showAdvancedSheet = true }) {
@@ -135,6 +112,54 @@ public struct NodeView: View {
                         .buttonStyle(.bordered)
                     }
                 }
+
+                // Adaptive Verification Progress & ETA Banner
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Image(systemName: "timer")
+                            .foregroundColor(.blue)
+                        Text("Adaptive Verification Progress & ETA")
+                            .font(.headline)
+                        Spacer()
+                        Text(state.adaptiveETA.state.statusText)
+                            .font(.caption)
+                            .bold()
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.blue.opacity(0.15)))
+                            .foregroundColor(.blue)
+                    }
+
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(state.adaptiveETA.display)
+                            .font(.system(size: 28, weight: .bold, design: .monospaced))
+                            .foregroundColor(.primary)
+
+                        Spacer()
+
+                        if case .estimating = state.adaptiveETA.state {
+                            Text("Estimated Time Remaining")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    let progress = state.blockchainInfo?.verificationprogress ?? 0.0
+                    ProgressView(value: min(max(progress, 0.0), 1.0))
+                        .tint(.blue)
+
+                    HStack {
+                        Text(String(format: "Progress: %.2f%%", progress * 100))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text("Rolling-window throughput • Auto-scaled units")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
                 // Grid Metrics
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 16) {
@@ -156,51 +181,49 @@ public struct NodeView: View {
 
                     metricCard(
                         title: "Connected Peers",
-                        value: "\(state.networkInfo?.connections ?? (state.blockchainInfo != nil ? (state.selectedNetwork == .regtest ? 0 : 8) : 0)) Connected",
+                        value: "\(state.networkInfo?.connections ?? (state.blockchainInfo != nil ? 8 : 0)) Connected",
                         subtitle: "Strict Outbound Only (Inbound Disabled)",
                         icon: "network",
                         color: .purple
                     )
 
                     metricCard(
-                        title: "Pruned Storage Footprint",
-                        value: "\(state.nodeManager.config.profile.pruneMB) MiB",
-                        subtitle: "Target Pruned Blockfile Limit",
+                        title: "Storage Footprint",
+                        value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
+                        subtitle: state.storageMode.isArchival ? "Full-History Mode (External)" : "Compact Pruned Limit",
                         icon: "internaldrive.fill",
                         color: .green
                     )
                 }
 
-                // BIP-110 Fork Progress Banner (When on Mainnet)
-                if state.selectedNetwork == .mainnet {
-                    let blocks = state.blockchainInfo?.blocks ?? 0
-                    let forkHeight = BTCB2ConsensusConstants.forkActivationHeight
-                    let forkProgress = min(max(Double(blocks) / Double(forkHeight), 0.0), 1.0)
+                // BIP-110 Fork Progress Banner
+                let blocks = state.blockchainInfo?.blocks ?? 0
+                let forkHeight = BTCB2ConsensusConstants.forkActivationHeight
+                let forkProgress = min(max(Double(blocks) / Double(forkHeight), 0.0), 1.0)
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: blocks >= forkHeight ? "checkmark.shield.fill" : "hourglass")
-                                .foregroundColor(blocks >= forkHeight ? .green : .orange)
-                            Text(blocks >= forkHeight ? "BIP-110 BLAKE2b Consensus Active" : "Pre-Fork History Synchronization")
-                                .font(.headline)
-                            Spacer()
-                            Text(blocks >= forkHeight ? "Post-Fork Tip" : "\(blocks) / \(forkHeight) Blocks")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-
-                        ProgressView(value: forkProgress)
-                            .tint(blocks >= forkHeight ? .green : .orange)
-
-                        Text(blocks >= forkHeight ?
-                             "Local node is actively validating native BLAKE2b blocks past fork activation height \(forkHeight)." :
-                             "Currently syncing historical blocks toward BIP-110 hard-fork height \(forkHeight) (activated block hash: \(BTCB2ConsensusConstants.forkActivationBlockHash.prefix(16))...).")
-                            .font(.caption2)
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Image(systemName: blocks >= forkHeight ? "checkmark.shield.fill" : "hourglass")
+                            .foregroundColor(blocks >= forkHeight ? .green : .orange)
+                        Text(blocks >= forkHeight ? "BIP-110 BLAKE2b Consensus Active" : "Pre-Fork History Synchronization")
+                            .font(.headline)
+                        Spacer()
+                        Text(blocks >= forkHeight ? "Post-Fork Tip" : "\(blocks) / \(forkHeight) Blocks")
+                            .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    .padding()
-                    .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+
+                    ProgressView(value: forkProgress)
+                        .tint(blocks >= forkHeight ? .green : .orange)
+
+                    Text(blocks >= forkHeight ?
+                         "Local node is actively validating native BLAKE2b blocks past fork activation height \(forkHeight)." :
+                         "Currently syncing historical blocks toward BIP-110 hard-fork height \(forkHeight) (activated block hash: \(BTCB2ConsensusConstants.forkActivationBlockHash.prefix(16))...).")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
                 // Best Block & Fork Checkpoint Card
                 VStack(alignment: .leading, spacing: 10) {
@@ -245,13 +268,13 @@ public struct NodeView: View {
     }
 
     private var networkBadge: some View {
-        Text(state.selectedNetwork.rawValue.uppercased())
+        Text("MAINNET")
             .font(.caption2)
             .bold()
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background(Capsule().fill(state.selectedNetwork == .mainnet ? Color.blue.opacity(0.2) : Color.purple.opacity(0.2)))
-            .foregroundColor(state.selectedNetwork == .mainnet ? .blue : .purple)
+            .background(Capsule().fill(Color.orange.opacity(0.2)))
+            .foregroundColor(.orange)
     }
 
     private var nodeStateBadge: some View {

@@ -7,7 +7,6 @@ final class NodeSubprocessIntegrationTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let config = NodeConfig(
-            network: .mainnet,
             rpcPort: 8332,
             profile: .preset(for: .quiet),
             dataDirectory: tempDir
@@ -27,7 +26,8 @@ final class NodeSubprocessIntegrationTests: XCTestCase {
 
         // 3. Verify content
         let content = try String(contentsOf: config.configFileURL, encoding: .utf8)
-        XCTAssertTrue(content.contains("prune=2048"))
+        XCTAssertTrue(content.contains("prune=550"))
+        XCTAssertTrue(content.contains("pruneduringinit=550"))
         XCTAssertTrue(content.contains("rpcbind=127.0.0.1"))
         XCTAssertTrue(content.contains("rpcallowip=127.0.0.1"))
         XCTAssertTrue(content.contains("par=1"))

@@ -1,12 +1,12 @@
 import Foundation
 
 public struct NodeConfig: Sendable {
-    public var network: BTCB2Network
     public var rpcPort: Int
     public let rpcUser: String
     public let rpcPassword: String
     public var p2pPort: Int
     public var profile: SyncProfile
+    public var storageMode: StorageMode
     public let dataDirectory: URL
 
     public var configFileURL: URL {
@@ -14,12 +14,12 @@ public struct NodeConfig: Sendable {
     }
 
     public init(
-        network: BTCB2Network = .mainnet,
-        rpcPort: Int? = nil,
+        rpcPort: Int = 8332,
         rpcUser: String? = nil,
         rpcPassword: String? = nil,
-        p2pPort: Int? = nil,
+        p2pPort: Int = 8333,
         profile: SyncProfile = .preset(for: .quiet),
+        storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB),
         dataDirectory: URL? = nil
     ) {
         let dir: URL
@@ -27,6 +27,7 @@ public struct NodeConfig: Sendable {
             dir = d
         } else {
             let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            // Retain existing datadir to prevent orphaning wallet, keychain, or synchronized block headers
             dir = appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
         }
         self.dataDirectory = dir
@@ -53,20 +54,19 @@ public struct NodeConfig: Sendable {
             pass = UUID().uuidString.replacingOccurrences(of: "-", with: "")
         }
 
-        self.network = network
-        self.rpcPort = rpcPort ?? network.defaultRPCPort
+        self.rpcPort = rpcPort
         self.rpcUser = user
         self.rpcPassword = pass
-        self.p2pPort = p2pPort ?? network.defaultP2PPort
+        self.p2pPort = p2pPort
         self.profile = profile
+        self.storageMode = storageMode
     }
 
     /// Renders safe bitcoin.conf contents with strict localhost binding and profile options.
-    /// In Bitcoin Knots 29.x, network-specific options (rpcbind, rpcallowip, port, rpcport)
-    /// MUST be placed inside network-specific sections ([main], [testnet4], [regtest]).
+    /// Strict MainNet-only configuration with 550 MiB compact pruning by default.
     public func renderBitcoinConf() -> String {
         var lines: [String] = []
-        lines.append("# NODE Pocket BTCB2 Autonomous Configuration")
+        lines.append("# Sentinel Node Wallet - BTCB2 Autonomous Configuration")
         lines.append("# Strict Localhost RPC Enforcement - Zero Public Ingress")
         lines.append("server=1")
         lines.append("listen=1")
@@ -80,36 +80,25 @@ public struct NodeConfig: Sendable {
         lines.append("dbcache=\(profile.dbCacheMB)")
         lines.append("maxconnections=\(profile.maxConnections)")
         lines.append("maxuploadtarget=\(profile.maxUploadTargetMB)")
-        if profile.pruneMB > 0 {
-            lines.append("prune=\(profile.pruneMB)")
+        lines.append("")
+        lines.append("# Storage & Pruning Configuration")
+        if storageMode.isPruned {
+            lines.append("prune=\(storageMode.pruneMB)")
+            lines.append("pruneduringinit=550")
         } else {
             lines.append("prune=0")
         }
         lines.append("")
-        lines.append("# Network Specific Configuration Sections")
+        lines.append("# MainNet Configuration Section (BIP-110 BLAKE2b)")
         lines.append("[main]")
-        lines.append("port=8333")
-        lines.append("rpcport=8332")
+        lines.append("port=\(p2pPort)")
+        lines.append("rpcport=\(rpcPort)")
         lines.append("rpcbind=127.0.0.1")
         lines.append("rpcallowip=127.0.0.1")
-        lines.append("")
-        lines.append("[testnet4]")
-        lines.append("port=48333")
-        lines.append("rpcport=48332")
-        lines.append("rpcbind=127.0.0.1")
-        lines.append("rpcallowip=127.0.0.1")
-        lines.append("")
-        lines.append("[regtest]")
-        lines.append("port=18444")
-        lines.append("rpcport=18443")
-        lines.append("rpcbind=127.0.0.1")
-        lines.append("rpcallowip=127.0.0.1")
-        lines.append("testactivationheight=blake2b@20")
-
         return lines.joined(separator: "\n") + "\n"
     }
 
-    /// Writes configuration to disk ensuring 0700 dir and 0600 file permissions.
+    /// Writes configuration file to disk with strict 0600 file permissions.
     public func writeToDisk() throws {
         let fm = FileManager.default
         if !fm.fileExists(atPath: dataDirectory.path) {

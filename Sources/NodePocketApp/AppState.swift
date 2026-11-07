@@ -5,16 +5,17 @@ import NodePocketCore
 @MainActor
 public final class AppState: ObservableObject {
     @Published public var nodeState: NodeState = .stopped
-    @Published public var selectedNetwork: BTCB2Network = .mainnet
     @Published public var isStartingUp: Bool = false
     @Published public var startupStatus: String = ""
     @Published public var blockchainInfo: BlockchainInfo?
     @Published public var networkInfo: NetworkInfo?
     @Published public var hashrateReport: HashrateReport?
+    @Published public var adaptiveETA: (state: ETAState, display: String) = (.calibrating, "Calibrating...")
     @Published public var walletSnapshot: WalletSnapshot?
     @Published public var transactions: [TransactionRecord] = []
     @Published public var systemHealth: SystemHealthSnapshot?
     @Published public var selectedProfileType: SyncProfileType = .quiet
+    @Published public var storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB)
     @Published public var receiveAddress: String = ""
     @Published public var logs: [String] = []
     @Published public var alertMessage: String?
@@ -26,9 +27,13 @@ public final class AppState: ObservableObject {
     private let timeFormatter: DateFormatter
 
     public init() {
-        let config = NodeConfig(network: .mainnet, profile: .preset(for: .quiet))
+        let config = NodeConfig(
+            profile: .preset(for: .quiet),
+            storageMode: .compact(pruneMB: StorageMode.defaultPruneMB)
+        )
         self.nodeManager = NodeManager(config: config)
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient)
+        self.storageMode = config.storageMode
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
@@ -52,11 +57,12 @@ public final class AppState: ObservableObject {
             }
         }
 
-        nodeManager.onBlockchainUpdate = { [weak self] binfo, report, netInfo in
+        nodeManager.onBlockchainUpdate = { [weak self] binfo, report, netInfo, eta in
             Task { @MainActor in
                 self?.blockchainInfo = binfo
                 self?.hashrateReport = report
                 self?.networkInfo = netInfo
+                self?.adaptiveETA = eta
 
                 // Refresh transactions periodically
                 if let txs = try? await self?.walletManager.fetchRecentTransactions(count: 30) {
@@ -77,8 +83,15 @@ public final class AppState: ObservableObject {
                 self.appendLog("[SYSTEM] Detected battery operation; auto-adjusting to Balanced profile to conserve power.")
                 self.applyProfile(.balanced)
             }
+
+            // Storage safety guard: graceful pause if free space <= 10GB
+            if snapshot.freeDiskGB <= 10.0 && self.nodeState != .stopped {
+                self.appendLog("[STORAGE GUARD] Critical low disk space (<=10GB free). Gracefully stopping node to protect host.")
+                self.stopNode()
+                self.alertMessage = "Low Disk Space Alert: Free disk space is under 10 GB. Node sync has been gracefully paused to protect your Mac."
+                self.showAlert = true
+            }
         }
-        // Initial health check
         self.systemHealth = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
     }
 
@@ -90,13 +103,13 @@ public final class AppState: ObservableObject {
         }
     }
 
-    /// 1-Click Launch: Autonomous node process startup, loopback RPC readiness,
+    /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
     /// and encrypted descriptor wallet onboarding in a single integrated workflow.
     public func startNode() {
         guard nodeState == .stopped || caseMatchesError(nodeState) else { return }
         isStartingUp = true
         startupStatus = "Writing configuration..."
-        appendLog("[BOOTSTRAP] Initiating 1-Click node & wallet startup sequence...")
+        appendLog("[BOOTSTRAP] Initiating Sentinel Node Wallet 1-Click startup sequence...")
 
         Task {
             do {
@@ -152,41 +165,37 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func switchNetwork(_ network: BTCB2Network) {
-        guard network != selectedNetwork else { return }
-        selectedNetwork = network
-        nodeManager.updateNetwork(network)
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient)
-        self.receiveAddress = ""
-        self.walletSnapshot = nil
-        self.transactions = []
-        self.blockchainInfo = nil
-        self.hashrateReport = nil
-        self.networkInfo = nil
-        appendLog("[CONFIG] Switched network to \(network.rawValue).")
+    public func applyStorageMode(_ newMode: StorageMode) {
+        // Validate storage constraints
+        do {
+            switch newMode {
+            case .compact(let mb):
+                guard mb >= StorageMode.minimumPruneMB else {
+                    throw StorageValidationError.belowMinimumPruneSize(mb)
+                }
+            case .archival(let externalURL):
+                // Disk gate: check available space on target volume
+                let freeGB = (systemHealth?.freeDiskGB ?? 50.0)
+                // If on internal drive, refuse archival
+                let isInternal = externalURL.path.hasPrefix("/Users") || externalURL.path.hasPrefix("/System")
+                if isInternal && freeGB < 800.0 {
+                    throw StorageValidationError.internalDriveArchivalProhibited(freeGB: freeGB)
+                }
+            }
 
-        if nodeState != .stopped {
+            self.storageMode = newMode
             Task {
-                await nodeManager.stop()
-                startNode()
+                do {
+                    try await nodeManager.switchStorageMode(newMode)
+                    appendLog("[CONFIG] Successfully applied storage mode: \(newMode.isPruned ? "Compact (\(newMode.pruneMB) MiB)" : "Full History / Archival").")
+                } catch {
+                    alertMessage = "Failed to switch storage mode: \(error.localizedDescription)"
+                    showAlert = true
+                }
             }
-        }
-    }
-
-    public func generateRegtestBlocks(count: Int = 1) {
-        guard selectedNetwork == .regtest else { return }
-        Task {
-            do {
-                let targetAddr = receiveAddress.isEmpty ? try await walletManager.generateReceiveAddress() : receiveAddress
-                let hashes = try await walletManager.generateRegtestBlocks(count: count, address: targetAddr)
-                appendLog("[MINING] Generated \(hashes.count) regtest block(s). Tip: \(hashes.last ?? "")")
-                self.blockchainInfo = try? await nodeManager.rpcClient.getBlockchainInfo()
-                self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
-            } catch {
-                alertMessage = "Block generation failed: \(error.localizedDescription)"
-                showAlert = true
-            }
+        } catch {
+            alertMessage = error.localizedDescription
+            showAlert = true
         }
     }
 
@@ -209,7 +218,9 @@ public final class AppState: ObservableObject {
 
     public func applyProfile(_ profileType: SyncProfileType) {
         selectedProfileType = profileType
-        let profile = SyncProfile.preset(for: profileType)
+        var profile = SyncProfile.preset(for: profileType)
+        // Preserve user's configured prune setting across profiles
+        profile.pruneMB = storageMode.pruneMB
         Task {
             do {
                 try await nodeManager.switchProfile(profile)
