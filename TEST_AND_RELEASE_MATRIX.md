@@ -22,6 +22,16 @@
 
 **No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
 
+## v11 live rolling-history coverage
+
+| Scenario | Required proof | Current status |
+| --- | --- | --- |
+| Actual retained-history age | Compare `pruneheight`, first-retained block header, best tip header timestamps and block count with UI | NOT RUN on real Knots |
+| Selected-size projection | 550 MiB / 1 GiB / 2 GiB / 4 GiB / custom recomputes immediately from sampled block/undo byte density; no additional per-keystroke RPC | Swift tests authored, NOT RUN |
+| Automatic time units | Years/months/weeks/days/hours and combined two-unit bounds; invalid values fail safely | Swift tests authored, NOT RUN |
+| During IBD or missing data | Actual as-of current validated tip where possible, projected coverage displays Calibrating instead of false live-tip forecast | Swift tests authored, NOT RUN |
+| Non-invasive safety | No node restart until Apply, no wallet or chain writes, no extra service or unintended archival mode | NOT RUN on Mac |
+
 ## Candidate bug-fix acceptance (not yet Mac-validated)
 
 | Change | Test evidence required | Current status |
