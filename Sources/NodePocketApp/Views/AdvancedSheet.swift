@@ -189,8 +189,17 @@ public struct AdvancedSheet: View {
                                 .frame(width: 90)
                         }
 
-                        Toggle("Enable Inbound P2P (Default OFF for portable security)", isOn: $enableInboundP2P)
+                        Text(state.nodeManager.isUltraActive
+                             ? "Ultra Power is active: the running Knots node is capped at 4 peers. A new value is saved and becomes effective after Ultra ends on stable AC."
+                             : "Maximum peers is an upper bound, not the number Knots will dial. Applying a new cap restarts the managed node safely; without inbound reachability, outbound peers remain limited by network policy.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+
+                        Toggle("Enable Inbound P2P (does not configure your firewall or router)", isOn: $enableInboundP2P)
                             .font(.caption)
+                        Text("Inbound connections require an open P2P port on your firewall/router. RPC remains loopback-only.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
 
                     Divider()
@@ -297,6 +306,7 @@ public struct AdvancedSheet: View {
         dbCacheInput = "\(currentProfile.dbCacheMB)"
         parInput = "\(currentProfile.parThreads)"
         maxConnectionsInput = "\(currentProfile.maxConnections)"
+        enableInboundP2P = state.nodeManager.config.allowInboundP2P
     }
 
     private func applySettings() {
@@ -333,7 +343,7 @@ public struct AdvancedSheet: View {
 
         Task {
             do {
-                try await state.applyNodeSettings(profile: profile, storageMode: mode)
+                try await state.applyNodeSettings(profile: profile, storageMode: mode, allowInboundP2P: enableInboundP2P)
                 dismiss()
             } catch {
                 state.alertMessage = "Settings were NOT applied: \(error.localizedDescription)"
