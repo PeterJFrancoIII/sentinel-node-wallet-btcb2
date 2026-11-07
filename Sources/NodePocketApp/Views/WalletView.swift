@@ -55,6 +55,7 @@ public struct WalletView: View {
     // V13 Local Login & 2FA State
     @State private var loginUsername: String = ""
     @State private var loginPassword: String = ""
+    @State private var appleSavedPasswordCoordinator: AppleSavedPasswordCoordinator? = nil
     @State private var loginTotpCode: String = ""
     @State private var loginRecoveryCode: String = ""
     @State private var showRecoveryLogin: Bool = false
@@ -88,12 +89,23 @@ public struct WalletView: View {
         }
         .onAppear {
             state.refreshAuthState()
+            if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? "" }
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
         }
         .onChange(of: state.nodeState) { _ in
             state.refreshWalletInventory()
+        }
+        .onChange(of: state.enrolledUsername) { newName in
+            if loginUsername.isEmpty { loginUsername = newName ?? "" }
+        }
+        .onChange(of: state.isWalletTabUnlocked) { unlocked in
+            if !unlocked {
+                loginPassword = ""
+                loginTotpCode = ""
+                loginRecoveryCode = ""
+            }
         }
         .sheet(isPresented: $showPreviewSheet) {
             sendPreviewSheet
@@ -825,24 +837,59 @@ public struct WalletView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Username").font(.caption).bold()
                     TextField("Username", text: $loginUsername)
+                        .textContentType(.username)
+                        .autocorrectionDisabled(true)
                         .textFieldStyle(.roundedBorder)
                         .accessibilityIdentifier("user-login-name")
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Password").font(.caption).bold()
-                    SecureField("Password", text: $loginPassword)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("user-login-password")
+                    Group {
+                        if #available(macOS 14.0, *) {
+                            SecureField("Password", text: $loginPassword)
+                                .textContentType(.password)
+                        } else {
+                            SecureField("Password", text: $loginPassword)
+                        }
+                    }
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("user-login-password")
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("6-Digit 2FA Verification Code").font(.caption).bold()
                     TextField("000000", text: $loginTotpCode)
+                        .textContentType(.oneTimeCode)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 140)
                         .accessibilityIdentifier("user-login-totp")
                 }
+
+                Button("Fill from Apple Passwords…") {
+                    // macOS controls user consent and any Touch ID or Mac-password prompt.
+                    // A signed webcredentials associated domain is required before access.
+                    let picker = AppleSavedPasswordCoordinator()
+                    picker.onCredential = { username, password in
+                        loginUsername = username
+                        loginPassword = password
+                        authLocalError = nil
+                        appleSavedPasswordCoordinator = nil
+                    }
+                    picker.onFailure = { message in
+                        authLocalError = message
+                        appleSavedPasswordCoordinator = nil
+                    }
+                    appleSavedPasswordCoordinator = picker
+                    picker.requestSavedLogin()
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("user-login-apple-passwords")
+                .disabled(isAuthActionInProgress)
+
+                Text("macOS handles saved-login approval through Touch ID or the Mac password. Apple Passwords access requires a signed webcredentials association. Enter a 6-digit verification code to finish signing in.")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
 
                 if let err = authLocalError {
                     Text(err)
@@ -858,6 +905,8 @@ public struct WalletView: View {
                             defer { isAuthActionInProgress = false }
                             do {
                                 try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                loginPassword = ""
+                                loginTotpCode = ""
                             } catch {
                                 authLocalError = error.localizedDescription
                             }
@@ -887,6 +936,7 @@ public struct WalletView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Username").font(.caption).bold()
                     TextField("Username", text: $loginUsername)
+                        .textContentType(.username)
                         .textFieldStyle(.roundedBorder)
                 }
 
