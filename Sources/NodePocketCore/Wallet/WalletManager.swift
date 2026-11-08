@@ -546,17 +546,26 @@ public actor WalletManager {
         // 4. Staged Digest Computation
         let stagedDigest = try computeSHA256(url: stagedBackupURL)
 
-        // 5. Secure Temporary Delivery in Destination Directory
-        let tempFilename = ".\(fileURL.lastPathComponent).tmp.\(UUID().uuidString)"
+        // 5. Open and Anchor Parent Destination Directory
+        let parentDirFd = open(parentDir.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        guard parentDirFd >= 0 else {
+            let err = errno
+            throw WalletSecurityError.backupDestinationInvalid("Could not open parent destination directory: errno \(err)")
+        }
+        defer { close(parentDirFd) }
+
+        // 6. Secure Temporary Delivery Anchored to parentDirFd
+        let finalFilename = fileURL.lastPathComponent
+        let tempFilename = ".\(finalFilename).tmp.\(UUID().uuidString)"
         let tempURL = parentDir.appendingPathComponent(tempFilename)
 
-        let dstFd = open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        let dstFd = openat(parentDirFd, tempFilename, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         if dstFd < 0 {
             let err = errno
             if err == EEXIST {
-                throw WalletSecurityError.backupDestinationAlreadyExists(tempURL.path)
+                throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
             } else if err == ELOOP {
-                throw WalletSecurityError.backupDestinationInvalid("Temporary destination path is a symbolic link (rejected by kernel).")
+                throw WalletSecurityError.backupDestinationInvalid("Destination path is a symbolic link (rejected by kernel).")
             } else {
                 throw WalletSecurityError.backupDestinationInvalid("Failed to create temporary destination file: errno \(err)")
             }
@@ -565,7 +574,7 @@ public actor WalletManager {
         var publishedSuccessfully = false
         defer {
             if !publishedSuccessfully {
-                unlink(tempURL.path)
+                _ = unlinkat(parentDirFd, tempFilename, 0)
             }
         }
 
@@ -582,14 +591,17 @@ public actor WalletManager {
             throw WalletSecurityError.backupDestinationInvalid("Data copy from staging failed with code \(copyResult)")
         }
 
-        guard fsync(dstFd) == 0 else {
-            let syncErr = errno
-            close(dstFd)
-            throw WalletSecurityError.backupDestinationInvalid("fsync failed on temporary backup: errno \(syncErr)")
+        // Flushes data to physical media: fcntl(F_FULLFSYNC) on Darwin, falling back to fsync
+        if fcntl(dstFd, F_FULLFSYNC) != 0 {
+            guard fsync(dstFd) == 0 else {
+                let syncErr = errno
+                close(dstFd)
+                throw WalletSecurityError.backupDestinationInvalid("fsync failed on temporary backup: errno \(syncErr)")
+            }
         }
         close(dstFd)
 
-        // 6. Post-Copy Integrity & Digest Verification
+        // 7. Post-Copy Integrity & Digest Verification
         let tempAttrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
         let tempSize = (tempAttrs[.size] as? NSNumber)?.int64Value ?? 0
         guard tempSize == createdSize else {
@@ -600,8 +612,8 @@ public actor WalletManager {
             throw WalletSecurityError.backupDestinationInvalid("Integrity checksum mismatch: staged=\(stagedDigest), delivered=\(tempDigest)")
         }
 
-        // 7. Atomic Publication via Darwin renameatx_np(RENAME_EXCL)
-        let renameResult = renameatx_np(AT_FDCWD, tempURL.path, AT_FDCWD, fileURL.path, UInt32(RENAME_EXCL))
+        // 8. Atomic Publication Anchored to parentDirFd via renameatx_np(RENAME_EXCL)
+        let renameResult = renameatx_np(parentDirFd, tempFilename, parentDirFd, finalFilename, UInt32(RENAME_EXCL))
         if renameResult != 0 {
             let renErr = errno
             if renErr == EEXIST {
@@ -612,11 +624,16 @@ public actor WalletManager {
         }
         publishedSuccessfully = true
 
-        // 8. Fsync Parent Directory to commit directory entry
-        let parentFd = open(parentDir.path, O_RDONLY)
-        if parentFd >= 0 {
-            _ = fsync(parentFd)
-            close(parentFd)
+        // 9. Verified Directory Durability Sync
+        // On Darwin APFS and HFS+, directory fsync returns 0.
+        // On external/network filesystems that do not support directory metadata sync (e.g. exFAT/MSDOS/SMB),
+        // fsync returns EINVAL or ENOTSUP. In those cases atomic publication has already succeeded, but
+        // directory persistence cannot be confirmed via kernel fsync. Fail closed on actual I/O errors (e.g. EIO).
+        if fsync(parentDirFd) != 0 {
+            let syncDirErr = errno
+            if syncDirErr != EINVAL && syncDirErr != ENOTSUP && syncDirErr != EOPNOTSUPP {
+                throw WalletSecurityError.backupDestinationInvalid("Directory durability fsync failed: errno \(syncDirErr) (published but directory persistence unconfirmed)")
+            }
         }
     }
 

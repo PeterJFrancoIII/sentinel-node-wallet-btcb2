@@ -1060,4 +1060,119 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
     }
+
+    func testExportBackupEndToEndPipelineWithStagingAndAtomicPublish() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_pipeline_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stagingDir = tempDir.appendingPathComponent("staging")
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockBackupURLProtocol.self]
+        let mockSession = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: 8332,
+            user: "test_op",
+            password: "test_password",
+            urlSession: mockSession
+        )
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "e2e_wallet",
+            stagingDirectory: stagingDir
+        )
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "operator_e2e")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        let capability = try await coordinator.enroll(
+            username: "operator_e2e",
+            password: "SecurePassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "e2e_wallet",
+            reason: "Testing end-to-end pipeline"
+        )
+
+        let destinationDir = tempDir.appendingPathComponent("user_backups")
+        try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+        let finalDestinationURL = destinationDir.appendingPathComponent("e2e_wallet_backup.dat")
+
+        // Execute exportBackup through staging -> temp -> fcopyfile -> fsync -> renameatx_np
+        try await manager.exportBackup(to: finalDestinationURL, capability: capability, approval: approval)
+
+        // 1. Verify destination file exists and contains expected mock data
+        XCTAssertTrue(FileManager.default.fileExists(atPath: finalDestinationURL.path), "Final destination file must exist")
+        let publishedData = try String(contentsOf: finalDestinationURL, encoding: .utf8)
+        XCTAssertEqual(publishedData, "MOCK_DESCRIPTOR_WALLET_DATA_BIP110_SECURE", "Delivered backup must match staged data exactly")
+
+        // 2. Verify destination permissions are 0600
+        let attrs = try FileManager.default.attributesOfItem(atPath: finalDestinationURL.path)
+        let perms = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? 0
+        XCTAssertEqual(perms, 0o600, "Delivered file must have strict 0600 permissions")
+
+        // 3. Verify no temporary hidden files remain in destination directory
+        let destDirContents = try FileManager.default.contentsOfDirectory(atPath: destinationDir.path)
+        XCTAssertEqual(destDirContents, ["e2e_wallet_backup.dat"], "No leftover temporary files in destination directory")
+
+        // 4. Verify staging directory is cleaned up
+        let stagingContents = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
+        XCTAssertTrue(stagingContents.isEmpty, "Staging directory must have all session directories cleaned up")
+    }
+}
+
+final class MockBackupURLProtocol: URLProtocol {
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        var bodyData = request.httpBody
+        if bodyData == nil, let stream = request.httpBodyStream {
+            stream.open()
+            var data = Data()
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: buffer.count)
+                if read > 0 { data.append(buffer, count: read) } else { break }
+            }
+            stream.close()
+            bodyData = data
+        }
+
+        if let data = bodyData,
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let method = json["method"] as? String,
+           method == "backupwallet",
+           let params = json["params"] as? [String],
+           let destPath = params.first {
+            try? "MOCK_DESCRIPTOR_WALLET_DATA_BIP110_SECURE".write(toFile: destPath, atomically: true, encoding: .utf8)
+        }
+
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        let responseBody = """
+        {"result":null,"error":null,"id":"1"}
+        """.data(using: .utf8)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: responseBody)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
 }
