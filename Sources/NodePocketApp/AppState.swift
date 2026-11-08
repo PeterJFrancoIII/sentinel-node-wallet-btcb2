@@ -239,7 +239,7 @@ public final class AppState: ObservableObject {
                 ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
                 ultraStatusSubtitle = "Active (\(snapshot.powerState.displayLabel)): 1 thread, 128 MiB dbcache, max 4 peers, listen=0 • Preferred \(userPreferredProfile.rawValue) resumes on AC"
             }
-        } else {
+        } else if snapshot.powerState == .acNotCharging {
             // Stable AC
             if isUltraActive {
                 ultraStatusTitle = "\(userPreferredProfile.rawValue) Profile Resuming"
@@ -267,6 +267,10 @@ public final class AppState: ObservableObject {
                 ultraStatusTitle = "\(pref.type.rawValue) Profile Active"
                 ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
             }
+        } else {
+            // Unknown or unconfirmed power state: operating conservatively without claiming an unverified profile
+            ultraStatusTitle = "Power State Unknown"
+            ultraStatusSubtitle = "Operating conservatively; profile changes held until power state is confirmed."
         }
     }
 
@@ -388,10 +392,18 @@ public final class AppState: ObservableObject {
                 // Check if background daemon is already responding
                 let isAlreadyRunning = (try? await nodeManager.rpcClient.getBlockchainInfo()) != nil
                 if isAlreadyRunning {
-                    nodeManager.adoptRunningDaemon()
-                    appendLog("[BOOTSTRAP] Connected to active bitcoind daemon.")
+                    let isVerified = await nodeManager.verifyAdoptedDaemon()
+                    if isVerified {
+                        nodeManager.adoptRunningDaemon()
+                        appendLog("[BOOTSTRAP] Verified and connected to active Knots BTCB2 daemon.")
+                    } else {
+                        throw RPCClientError.serializationError(
+                            "An unverified process is responding on port \(nodeManager.config.rpcPort). " +
+                            "Refusing to adopt an unverified daemon. Stop the external process before launching Sentinel Node Wallet."
+                        )
+                    }
                 } else {
-                    try nodeManager.start()
+                    try nodeManager.start(ultraOverride: self.isUltraActive)
                     startupStatus = "Awaiting loopback RPC connection..."
                     try await nodeManager.waitForRPCReadiness(timeoutSeconds: 60)
                 }
@@ -399,11 +411,18 @@ public final class AppState: ObservableObject {
                 startupStatus = "Checking for an existing wallet..."
                 var needsWalletSetup = false
                 do {
-                    let walletName = try await walletManager.ensureDefaultWalletLoaded()
-                    appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded.")
-                    receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-                    walletSnapshot = try await walletManager.refreshWalletInfo()
-                    transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                    let walletName = try await walletManager.ensureDefaultWalletLoaded(capability: self.authSession)
+                    if self.isWalletTabUnlocked && self.authSession != nil {
+                        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+                        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+                        transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                        appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded and ready.")
+                    } else {
+                        walletSnapshot = nil
+                        receiveAddress = ""
+                        transactions = []
+                        appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' discovered. Locked.")
+                    }
                 } catch WalletSecurityError.walletOnboardingRequired {
                     // No wallet exists yet. This is normal, NOT a failed node startup.
                     needsWalletSetup = true

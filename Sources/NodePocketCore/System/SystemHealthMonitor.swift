@@ -56,12 +56,18 @@ public struct SystemHealthSnapshot: Sendable {
         powerState.isUltraRequired || isLowPowerMode
     }
 
+    public var isDiskSpaceUnknown: Bool {
+        freeDiskBytes < 0
+    }
+
     public var freeDiskGB: Double {
-        Double(freeDiskBytes) / (1024.0 * 1024.0 * 1024.0)
+        guard freeDiskBytes >= 0 else { return -1.0 }
+        return Double(freeDiskBytes) / (1024.0 * 1024.0 * 1024.0)
     }
 
     public var isDiskSpaceLow: Bool {
-        freeDiskGB < 10.0
+        guard !isDiskSpaceUnknown else { return false }
+        return freeDiskGB < 10.0
     }
 
     public var thermalDescription: String {
@@ -89,8 +95,11 @@ public final class SystemHealthMonitor: @unchecked Sendable {
         if let values = try? dataDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
            let avail = values.volumeAvailableCapacityForImportantUsage {
             freeBytes = avail
+        } else if let values = try? dataDirectory.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
+                  let avail = values.volumeAvailableCapacity {
+            freeBytes = Int64(avail)
         } else {
-            freeBytes = 50 * 1024 * 1024 * 1024 // Fallback 50GB
+            freeBytes = -1 // Unknown / unmeasured - do not invent fallback
         }
 
         // Power source

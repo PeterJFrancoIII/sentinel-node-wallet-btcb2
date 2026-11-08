@@ -13,6 +13,11 @@ public enum NodeState: Equatable, Sendable {
     }
 }
 
+#if os(macOS)
+@_silgen_name("proc_pidpath")
+func proc_pidpath(_ pid: Int32, _ buffer: UnsafeMutableRawPointer, _ buffersize: UInt32) -> Int32
+#endif
+
 public final class NodeManager: @unchecked Sendable {
     public private(set) var state: NodeState = .stopped
     public var config: NodeConfig
@@ -73,12 +78,43 @@ public final class NodeManager: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: config.dataDirectory.path) else { return false }
         let cookieFile = config.dataDirectory.appendingPathComponent(".cookie")
         guard FileManager.default.fileExists(atPath: cookieFile.path) else { return false }
+
+        // PID liveness and executable identity
+        if let pid = readPidFile() {
+            guard kill(pid, 0) == 0 else { return false }
+            #if os(macOS)
+            var pathBuffer = [CChar](repeating: 0, count: 4096)
+            let ret = pathBuffer.withUnsafeMutableBytes { ptr in
+                proc_pidpath(pid, ptr.baseAddress!, UInt32(ptr.count))
+            }
+            if ret > 0 {
+                let execPath = String(cString: pathBuffer)
+                guard execPath.hasSuffix("bitcoind") else { return false }
+            }
+            #endif
+        }
+
+        // Chain identity: must be mainnet
         guard let binfo = try? await rpcClient.getBlockchainInfo(), binfo.chain == "main" else {
             return false
         }
-        if let pid = readPidFile() {
-            guard kill(pid, 0) == 0 else { return false }
+
+        // Subversion identity: must be Knots
+        guard let netInfo = try? await rpcClient.getNetworkInfo(),
+              netInfo.subversion.contains("Knots") else {
+            return false
         }
+
+        // BTCB2 Fork Checkpoint
+        if binfo.blocks >= BTCB2ConsensusConstants.forkActivationHeight {
+            guard let hash = try? await rpcClient.getBlockHash(height: BTCB2ConsensusConstants.forkActivationHeight),
+                  hash == BTCB2ConsensusConstants.forkActivationBlockHash else {
+                return false
+            }
+        } else {
+            guard binfo.headers >= binfo.blocks else { return false }
+        }
+
         return true
     }
 
@@ -208,9 +244,20 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
+    private func shouldProceedWithStop() -> Bool {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        if state == .stopping || state == .stopped {
+            return false
+        }
+        return true
+    }
+
     /// Graceful shutdown is mandatory for a node writing chainstate.
     /// Never SIGKILL the owned bitcoind on an ordinary stop or upgrade.
     public func stop() async {
+        guard shouldProceedWithStop() else { return }
+
         updateState(.stopping)
         monitorTask?.cancel()
         monitorTask = nil

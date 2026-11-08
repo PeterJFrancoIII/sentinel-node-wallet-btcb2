@@ -371,7 +371,11 @@ public actor WalletInventory {
         }
         try Self.validateWalletName(name)
         if let loaded = try? await rpcClient.listWallets(), loaded.contains(name) {
-            _ = try? await rpcClient.unloadWallet(name: name, loadOnStartup: false)
+            _ = try await rpcClient.unloadWallet(name: name, loadOnStartup: false)
+            let remaining = (try? await rpcClient.listWallets()) ?? []
+            if remaining.contains(name) {
+                throw WalletInventoryError.stillLoadedAfterUnload(name)
+            }
         }
         metadata.archivedWallets.insert(name)
         saveMetadata()
@@ -390,9 +394,9 @@ public actor WalletInventory {
             try await coord.consumeHighRiskApproval(app, action: "unarchive", target: name)
         }
         try Self.validateWalletName(name)
+        _ = try await rpcClient.loadWallet(name: name)
         metadata.archivedWallets.remove(name)
         saveMetadata()
-        _ = try await rpcClient.loadWallet(name: name)
     }
 
     public func preflightDeleteCheck(name: String) async throws -> URL {
@@ -465,14 +469,34 @@ public actor WalletInventory {
             throw WalletInventoryError.confirmationMismatch(expected: name, got: typedConfirmation)
         }
 
-        // Verify backup exists and is non-empty
+        // Verify backup exists, is not a symlink, and is a regular file
         guard FileManager.default.fileExists(atPath: verifiedBackupPath) else {
             throw WalletInventoryError.backupNotFound(verifiedBackupPath)
         }
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: verifiedBackupPath)) != nil {
+            throw WalletInventoryError.symlinkNotPermitted(verifiedBackupPath)
+        }
         let attrs = try FileManager.default.attributesOfItem(atPath: verifiedBackupPath)
+        guard let fileType = attrs[.type] as? FileAttributeType, fileType == .typeRegular else {
+            throw WalletInventoryError.backupNotFound("Backup path is not a regular file: \(verifiedBackupPath)")
+        }
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        guard size > 0 else {
+        guard size >= 1024 else {
             throw WalletInventoryError.backupEmpty(verifiedBackupPath)
+        }
+
+        // Verify database format (SQLite or BDB header)
+        if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: verifiedBackupPath)) {
+            defer { try? handle.close() }
+            let header = (try? handle.read(upToCount: 16)) ?? Data()
+            let sqliteMagic = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
+            let bdbMagicLE = Data([0x62, 0x31, 0x05, 0x00])
+            let bdbMagicBE = Data([0x00, 0x05, 0x31, 0x62])
+            let isSqlite = header.starts(with: sqliteMagic)
+            let isBdb = header.prefix(4) == bdbMagicLE || header.prefix(4) == bdbMagicBE || (header.count >= 16 && header[12..<16] == bdbMagicLE)
+            guard isSqlite || isBdb else {
+                throw WalletInventoryError.backupEmpty("Backup is corrupted or not a valid wallet database: \(verifiedBackupPath)")
+            }
         }
 
         // Run preflight check

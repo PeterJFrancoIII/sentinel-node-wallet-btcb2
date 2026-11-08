@@ -92,6 +92,41 @@ public struct BackupExportResult: Sendable, Equatable {
         self.isDurabilityConfirmed = isDurabilityConfirmed
         self.durabilityWarning = durabilityWarning
     }
+
+    public func verifiedReceipt(for walletName: String) -> VerifiedBackupReceipt {
+        VerifiedBackupReceipt(
+            walletName: walletName,
+            backupPath: destinationURL.path,
+            sha256Digest: sha256Digest,
+            bytesWritten: bytesWritten,
+            isDurabilityConfirmed: isDurabilityConfirmed
+        )
+    }
+}
+
+public struct VerifiedBackupReceipt: Sendable, Codable, Equatable {
+    public let walletName: String
+    public let backupPath: String
+    public let sha256Digest: String
+    public let bytesWritten: Int64
+    public let createdAt: Date
+    public let isDurabilityConfirmed: Bool
+
+    public init(
+        walletName: String,
+        backupPath: String,
+        sha256Digest: String,
+        bytesWritten: Int64,
+        createdAt: Date = Date(),
+        isDurabilityConfirmed: Bool = true
+    ) {
+        self.walletName = walletName
+        self.backupPath = backupPath
+        self.sha256Digest = sha256Digest
+        self.bytesWritten = bytesWritten
+        self.createdAt = createdAt
+        self.isDurabilityConfirmed = isDurabilityConfirmed
+    }
 }
 
 public enum WalletSecurityError: Error, LocalizedError, Sendable {
@@ -178,6 +213,19 @@ public actor WalletManager {
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     private var isCreatingWallet = false
+    private var activeStagingSessionIDs = Set<String>()
+
+    public func registerStagingSession(_ id: String) {
+        activeStagingSessionIDs.insert(id)
+    }
+
+    public func unregisterStagingSession(_ id: String) {
+        activeStagingSessionIDs.remove(id)
+    }
+
+    public func isStagingSessionActive(_ id: String) -> Bool {
+        activeStagingSessionIDs.contains(id)
+    }
 
     public init(
         rpcClient: BitcoinRPCClient,
@@ -199,10 +247,18 @@ public actor WalletManager {
     }
 
     /// Purges any abandoned staging session directories from previous unexpected terminations.
+    /// Strictly protects active export sessions and rejects symlink traversal.
     public func purgeStaleStagingDirectories() {
         guard FileManager.default.fileExists(atPath: stagingDirectory.path) else { return }
         if let items = try? FileManager.default.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil) {
             for item in items {
+                let sessionName = item.lastPathComponent
+                if activeStagingSessionIDs.contains(sessionName) {
+                    continue
+                }
+                if (try? FileManager.default.destinationOfSymbolicLink(atPath: item.path)) != nil {
+                    continue
+                }
                 try? FileManager.default.removeItem(at: item)
             }
         }
@@ -219,12 +275,14 @@ public actor WalletManager {
     /// Automatically loads an existing descriptor wallet on node startup.
     /// If no wallet exists on disk or in memory, fails closed rather than creating a silently unencrypted default.
     @discardableResult
-    public func ensureDefaultWalletLoaded(preferredName: String = "default_wallet") async throws -> String {
+    public func ensureDefaultWalletLoaded(preferredName: String = "default_wallet", capability: WalletAuthCapability? = nil) async throws -> String {
         // 1. Check if any wallet is already loaded in memory
         let loaded = try await rpcClient.listWallets()
         if let first = loaded.first, !first.isEmpty {
             self.currentWalletName = first
-            _ = try await refreshWalletInfo()
+            if capability != nil {
+                _ = try? await refreshWalletInfo(capability: capability)
+            }
             return first
         }
 
@@ -234,12 +292,16 @@ public actor WalletManager {
         if dir.wallets.contains(where: { $0.name == preferredName }) {
             _ = try await rpcClient.loadWallet(name: preferredName)
             self.currentWalletName = preferredName
-            _ = try await refreshWalletInfo()
+            if capability != nil {
+                _ = try? await refreshWalletInfo(capability: capability)
+            }
             return preferredName
         } else if let firstDisk = dir.wallets.first {
             _ = try await rpcClient.loadWallet(name: firstDisk.name)
             self.currentWalletName = firstDisk.name
-            _ = try await refreshWalletInfo()
+            if capability != nil {
+                _ = try? await refreshWalletInfo(capability: capability)
+            }
             return firstDisk.name
         }
 
@@ -260,7 +322,7 @@ public actor WalletManager {
     }
 
     /// Explicit user-consented wallet creation. Never overwrites a wallet with
-    /// the same name, and never confuses an encryption phrase with a seed.
+    /// the same name, and recovers idempotently from interrupted creation attempts.
     public func createEncryptedDescriptorWallet(
         name: String,
         passphrase: String,
@@ -281,17 +343,44 @@ public actor WalletManager {
         defer { isCreatingWallet = false }
 
         // Check actual loaded and on-disk wallets before touching Keychain.
-        // Do not swallow RPC failures as an "empty list" result.
         let loaded = try await rpcClient.listWallets()
         let walletDir = try await rpcClient.listWalletDir()
-        guard !loaded.contains(name),
-              !walletDir.wallets.contains(where: { $0.name == name }) else {
-            throw WalletSecurityError.walletAlreadyExists(name)
+        let isLoaded = loaded.contains(name)
+        let existsOnDisk = walletDir.wallets.contains(where: { $0.name == name })
+
+        if isLoaded || existsOnDisk {
+            // Idempotent recovery: If an interrupted previous attempt succeeded on bitcoind,
+            // verify whether it is a valid encrypted descriptor wallet matching this passphrase.
+            if !isLoaded && existsOnDisk {
+                _ = try await rpcClient.loadWallet(name: name)
+            }
+            if let info = try? await rpcClient.getWalletInfo(walletName: name),
+               info.descriptors == true,
+               info.unlocked_until != nil {
+                // Verify passphrase unlocks the existing wallet
+                do {
+                    try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 1, walletName: name)
+                    try await rpcClient.walletLock(walletName: name)
+                    // Successfully unlocked with matching passphrase! Adopt idempotently.
+                    if storeInKeychain {
+                        try? keychainHelper.savePassphrase(passphrase, account: name)
+                    }
+                    self.currentWalletName = name
+                    let snapshot = try await refreshWalletInfo(capability: capability)
+                    guard snapshot.isEncrypted, snapshot.descriptors else {
+                        throw WalletSecurityError.walletCreationVerificationFailed
+                    }
+                    return
+                } catch {
+                    throw WalletSecurityError.walletAlreadyExists(name)
+                }
+            } else {
+                throw WalletSecurityError.walletAlreadyExists(name)
+            }
         }
 
         // Save before the RPC call, so if the daemon processes creation but
         // the reply is lost, the user still has the exact encryption passphrase.
-        // Never delete or overwrite an existing item on a duplicate.
         if storeInKeychain {
             do {
                 try keychainHelper.savePassphrase(passphrase, account: name)
@@ -303,8 +392,6 @@ public actor WalletManager {
             }
         }
 
-        // Some RPC calls can create the wallet before returning a transport
-        // error. A retry must inspect listwalletdir and load, not recreate.
         _ = try await rpcClient.createWallet(
             name: name, passphrase: passphrase, descriptors: true,
             loadOnStartup: true
@@ -317,7 +404,7 @@ public actor WalletManager {
         }
 
         self.currentWalletName = name
-        let snapshot = try await refreshWalletInfo()
+        let snapshot = try await refreshWalletInfo(capability: capability)
         guard snapshot.isEncrypted, snapshot.descriptors else {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
@@ -400,16 +487,27 @@ public actor WalletManager {
     }
 
     /// Evaluates coinbase reward maturities from recent transactions.
-    public func fetchCoinbaseRewards(currentTipHeight: Int, isIBD: Bool = false) async throws -> [CoinbaseRewardDetail] {
+    public func fetchCoinbaseRewards(currentTipHeight: Int, isIBD: Bool = false, capability: WalletAuthCapability? = nil) async throws -> [CoinbaseRewardDetail] {
+        try await ensureAuthenticated(capability: capability)
         let txs = try await rpcClient.listTransactions(walletName: currentWalletName, count: 60)
         var rewards: [CoinbaseRewardDetail] = []
+        var mtpCache: [String: Int64] = [:]
 
         for tx in txs where tx.category == "generate" || tx.category == "immature" {
             // A reward's creation height MUST be known. Never substitute the current tip.
             guard let originHeight = tx.blockheight else { continue }
-            let epoch = CoinbaseMaturityCalculator.epoch(forOriginHeight: originHeight)
-            let matHeight = CoinbaseMaturityCalculator.maturityHeight(originHeight: originHeight)
-            let remaining = CoinbaseMaturityCalculator.remainingBlocks(originHeight: originHeight, currentTipHeight: currentTipHeight)
+            var originMTP: Int64? = nil
+            if let bhash = tx.blockhash, !bhash.isEmpty {
+                if let cached = mtpCache[bhash] {
+                    originMTP = cached
+                } else if let header = try? await rpcClient.getBlockHeader(hash: bhash), let mtp = header.mediantime {
+                    mtpCache[bhash] = Int64(mtp)
+                    originMTP = Int64(mtp)
+                }
+            }
+            let epoch = CoinbaseMaturityCalculator.epoch(forOriginHeight: originHeight, originMTP: originMTP)
+            let matHeight = CoinbaseMaturityCalculator.maturityHeight(originHeight: originHeight, originMTP: originMTP)
+            let remaining = CoinbaseMaturityCalculator.remainingBlocks(originHeight: originHeight, currentTipHeight: currentTipHeight, originMTP: originMTP)
             let isMature = (remaining == 0)
             let (etaDisplay, lowConf) = CoinbaseMaturityCalculator.estimatedTimeRemaining(
                 remainingBlocks: remaining,
@@ -562,7 +660,11 @@ public actor WalletManager {
         }
 
         // 3. Staged Backup Generation in Private Staging Directory
-        let sessionStagingDir = stagingDirectory.appendingPathComponent(UUID().uuidString)
+        let sessionID = UUID().uuidString
+        registerStagingSession(sessionID)
+        defer { unregisterStagingSession(sessionID) }
+
+        let sessionStagingDir = stagingDirectory.appendingPathComponent(sessionID)
         try FileManager.default.createDirectory(at: sessionStagingDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: sessionStagingDir) }
 

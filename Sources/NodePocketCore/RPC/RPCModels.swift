@@ -44,6 +44,7 @@ public struct BlockHeader: Codable, Sendable {
     public let confirmations: Int
     public let height: Int
     public let time: Int
+    public let mediantime: Int?
     public let bits: String
     public let difficulty: Double?
     public let chainwork: String

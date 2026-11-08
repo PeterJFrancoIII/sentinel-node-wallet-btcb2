@@ -133,7 +133,19 @@ public final class HashrateTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let previousTimestamp = samples.last?.timestamp
+        // Deduplicate unchanged tip polling
+        if let last = samples.last, last.hash == hash || last.height == height {
+            return
+        }
+
+        // Handle reorgs: prune invalid branches
+        if let last = samples.last, height <= last.height {
+            samples.removeAll(where: { $0.height >= height })
+        }
+
+        let isContiguous = (samples.last == nil) || (height == (samples.last!.height + 1))
+        let previousTimestamp = isContiguous ? samples.last?.timestamp : nil
+
         let sample = BlockSample(
             height: height,
             hash: hash,

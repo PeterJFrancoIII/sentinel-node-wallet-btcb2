@@ -125,19 +125,8 @@ public final class AddressBook: @unchecked Sendable {
 
     public static func isValidBTCB2MainnetAddress(_ address: String) -> Bool {
         // BTCB2 MainNet addresses MUST be native SegWit Bech32 or Bech32m starting with 'bc1'
-        // Prohibit testnet 'tb1', regtest 'bcrt1', legacy '1' or '3' addresses
-        let lower = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard lower.hasPrefix("bc1") else {
-            return false
-        }
-        // Native SegWit addresses are between 14 and 74 characters long (P2WPKH: 42 chars, P2WSH/Taproot: 62 chars)
-        guard lower.count >= 14 && lower.count <= 74 else {
-            return false
-        }
-        // Valid Bech32 character set check (no 1, b, i, o in data part)
-        let dataPart = lower.dropFirst(3)
-        let validBech32Chars = CharacterSet(charactersIn: "023456789acdefghjklmnpqrstuvwxyz")
-        return CharacterSet(charactersIn: String(dataPart)).isSubset(of: validBech32Chars)
+        // Verified via full BIP-173 (v0) and BIP-350 (v1+) polymod checksum and witness rules
+        return Bech32.validateMainnetAddress(address)
     }
 
     private struct StorageData: Codable {

@@ -23,21 +23,25 @@ mkdir -p "${APP_BUNDLE}/Contents/Resources"
 cp "${BIN_PATH}" "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet"
 chmod +x "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet"
 
+# Run binary provenance verification
+"${SCRIPT_DIR}/fetch-verify-knots.sh"
+
 # Embed official verified Bitcoin Knots binaries
 KNOTS_CACHE_DIR="${ROOT_DIR}/.cache/bitcoin-29.4.3.knots20260508/bin"
-if [ -f "${KNOTS_CACHE_DIR}/bitcoind" ]; then
-    echo "Embedding official Bitcoin Knots bitcoind into bundle..."
-    cp "${KNOTS_CACHE_DIR}/bitcoind" "${APP_BUNDLE}/Contents/MacOS/bitcoind"
-    chmod +x "${APP_BUNDLE}/Contents/MacOS/bitcoind"
-    codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+if [ ! -f "${KNOTS_CACHE_DIR}/bitcoind" ] || [ ! -f "${KNOTS_CACHE_DIR}/bitcoin-cli" ]; then
+    echo "ERROR: Required Bitcoin Knots binaries missing in ${KNOTS_CACHE_DIR}. Packaging aborted." >&2
+    exit 1
 fi
 
-if [ -f "${KNOTS_CACHE_DIR}/bitcoin-cli" ]; then
-    echo "Embedding official Bitcoin Knots bitcoin-cli into bundle..."
-    cp "${KNOTS_CACHE_DIR}/bitcoin-cli" "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
-    chmod +x "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
-    codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
-fi
+echo "Embedding official Bitcoin Knots bitcoind into bundle..."
+cp "${KNOTS_CACHE_DIR}/bitcoind" "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+chmod +x "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoind"
+
+echo "Embedding official Bitcoin Knots bitcoin-cli into bundle..."
+cp "${KNOTS_CACHE_DIR}/bitcoin-cli" "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
+chmod +x "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
+codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli"
 
 codesign --force --sign - "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet"
 
@@ -87,4 +91,26 @@ EOF
 # Code sign with ad-hoc signature for local arm64 execution
 codesign --force --deep --sign - "${APP_BUNDLE}"
 
+# Generate reproducible Build Manifest
+GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
+BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+APP_SHA="$(shasum -a 256 "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet" | awk '{print $1}')"
+BITCOIND_SHA="$(shasum -a 256 "${APP_BUNDLE}/Contents/MacOS/bitcoind" | awk '{print $1}')"
+BITCOIN_CLI_SHA="$(shasum -a 256 "${APP_BUNDLE}/Contents/MacOS/bitcoin-cli" | awk '{print $1}')"
+CONSENSUS_SHA="$(shasum -a 256 "${ROOT_DIR}/Resources/consensus-manifest.json" | awk '{print $1}')"
+
+cat <<EOF > "${ROOT_DIR}/dist/BUILD_MANIFEST.json"
+{
+  "build_timestamp": "${BUILD_DATE}",
+  "git_commit": "${GIT_COMMIT}",
+  "artifacts": {
+    "SentinelNodeWallet_sha256": "${APP_SHA}",
+    "bitcoind_sha256": "${BITCOIND_SHA}",
+    "bitcoin_cli_sha256": "${BITCOIN_CLI_SHA}",
+    "consensus_manifest_sha256": "${CONSENSUS_SHA}"
+  }
+}
+EOF
+
 echo "=== Successfully built ${APP_BUNDLE} ==="
+cat "${ROOT_DIR}/dist/BUILD_MANIFEST.json"

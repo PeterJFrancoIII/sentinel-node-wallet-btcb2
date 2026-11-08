@@ -387,16 +387,20 @@ public struct WalletView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text(isSendAllowed ? "BIP-110 Armed" : "IBD Incomplete")
+                        Text(isSendAllowed ? "Sending Gated (Safety Lock)" : "IBD Incomplete")
                             .font(.caption2)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill((isSendAllowed ? Color.green : Color.orange).opacity(0.15)))
-                            .foregroundColor(isSendAllowed ? .green : .orange)
+                            .background(Capsule().fill((isSendAllowed ? Color.secondary : Color.orange).opacity(0.15)))
+                            .foregroundColor(isSendAllowed ? .secondary : .orange)
                     }
 
                     if !isSendAllowed {
                         Text("Sending on Mainnet is strictly locked until Initial Block Download passes BIP-110 hard-fork height \(BTCB2ConsensusConstants.forkActivationHeight).")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("Sending is disabled: The BTCB2 fork signing path remains unverified (Safety Lock). 0 real-funds transactions authorized.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -1241,9 +1245,9 @@ public struct WalletView: View {
                             do {
                                 let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
                                 let backupFile = downloads.appendingPathComponent("Sentinel_Backup_\(name)_\(Int(Date().timeIntervalSince1970)).dat")
-                                try await state.nodeManager.rpcClient.backupWallet(destinationPath: backupFile.path, walletName: name)
-                                if FileManager.default.fileExists(atPath: backupFile.path) {
-                                    deleteBackupPath = backupFile.path
+                                let result = try await state.exportBackup(to: backupFile)
+                                if FileManager.default.fileExists(atPath: result.destinationURL.path) {
+                                    deleteBackupPath = result.destinationURL.path
                                 }
                             } catch {
                                 deleteErrorMessage = "Backup failed: \(error.localizedDescription)"
@@ -1610,40 +1614,13 @@ public struct WalletView: View {
                     }
                     .buttonStyle(.bordered)
 
-                    Button(action: {
-                        isBroadcasting = true
-                        Task {
-                            do {
-                                let txid = try await state.executeAuthorizedSend(preview: preview, explicitPassphrase: sendPassphraseInput.isEmpty ? nil : sendPassphraseInput)
-                                await MainActor.run {
-                                    self.isBroadcasting = false
-                                    self.showPreviewSheet = false
-                                    self.activePreview = nil
-                                    self.sendPassphraseInput = ""
-                                    self.sendAddressInput = ""
-                                    self.sendAmountInput = ""
-                                    self.state.alertMessage = "Transaction successfully broadcasted!\n\nTXID: \(txid)\n\nTrack on mempool.guide."
-                                    self.state.showAlert = true
-                                }
-                            } catch {
-                                await MainActor.run {
-                                    self.isBroadcasting = false
-                                    self.sendErrorMessage = error.localizedDescription
-                                }
-                            }
-                        }
-                    }) {
-                        if isBroadcasting {
-                            ProgressView()
-                                .controlSize(.small)
-                        } else {
-                            Label("Authenticate & Broadcast Spend", systemImage: "touchid")
-                                .bold()
-                        }
+                    Button(action: {}) {
+                        Label("Sending Gated (Signing Path Unverified)", systemImage: "lock.shield.fill")
+                            .bold()
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.green)
-                    .disabled(isBroadcasting)
+                    .tint(.secondary)
+                    .disabled(true)
                 }
             }
         }
