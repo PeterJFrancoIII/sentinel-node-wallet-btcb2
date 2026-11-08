@@ -1,11 +1,11 @@
 # Test and release matrix — Sentinel Node Wallet - BTCB2
 
 
-## Current v13.1 evidence snapshot — 2026-11-07 (America/New_York)
+## Current v13.1 evidence snapshot — 2026-11-08 (America/New_York)
 
 **Authoritative for current status; rows further below are historical target matrices from earlier v7/v12/v13 planning and may say NOT RUN for work since added.** Use the [current handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) for execution order. Until all P0 gates pass: **DEVELOPMENT ONLY; no real-funds send or public production release**.
 
-**Code evidence:** `03216baa2b2ea6a2aec45d3920410d8c8c0ed569` on open PR #10, unmerged to main. [GitHub Actions macOS run 42439761927](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42439761927) ran **91 XCTest cases: 90 passed, 0 failed, 1 skipped interactive Keychain lifecycle**. Counts refer to that code SHA, not to later documentation-only commits. A CI PASS never means macOS hardware or a real Knots restore PASS.
+**Code evidence:** `34dfbb09fbcfe4b9f15cf75ffac80640b8f9a4d4` on open PR #10, unmerged to main. [GitHub Actions macOS run 42447281610](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42447281610) ran **92 XCTest cases: 91 passed, 0 failed, 1 skipped interactive Keychain lifecycle**. Counts refer to that code SHA, not to later documentation-only commits. A CI PASS never means macOS hardware or a real Knots restore PASS.
 
 | v13.1 acceptance item | Evidence / boundary | Current proof status |
 | --- | --- | --- |
@@ -13,13 +13,13 @@
 | No-overwrite encrypted-wallet backup export architecture | Private staging; `openat`/directory FD; `fstat` + SHA-256 through open descriptor; `renameatx_np(RENAME_EXCL)`; inode-guarded cleanup | **PASS (source/CI)** on mocked successful and failure paths; further race/crash tests required |
 | Failed RPC and empty staged backup behavior | Added two regression tests in `WalletAuthCoordinatorTests`, both passed in CI | **PASS (source/CI)**; disk-full/copy/fsync/rename-failure injection still NOT RUN |
 | Operator-visible backup durability warning & descriptor cleanup | `WalletView` displays distinct `⚠️ Durability Unconfirmed` alert when `isDurabilityConfirmed == false`; security-scoped access handled; `dstFd`/`srcFd` closures guaranteed via `defer`; stale staging purge on startup tested (`testPurgeStaleStagingDirectoriesRemovesOldSessions`) | **PASS (source/CI)** |
-| Actual Bitcoin Knots encrypted descriptor wallet backup + restore | Gemini receipt `#061` reports temporary regtest daemon, 24,576-byte encrypted descriptor backup, new restored wallet, locked status and address ownership | **AGENT-REPORTED (native Mac)**; independent redacted command logs and signed-app workflow NOT VERIFIED |
-| Mac Keychain / Touch ID accept, deny, cancel, -34018 & migration | CI interactive `testKeychainPassphraseLifecycle` deliberately skipped | **NOT RUN/UNVERIFIED (real device)** — P0 |
+| Actual Bitcoin Knots encrypted descriptor wallet backup + restore | Reproducible empirical regtest qualification on macOS host with bitcoind (SHA256: `836edd...`), 24,576-byte encrypted descriptor backup (mode 0600, SQLite format 3), restore to new wallet, descriptors true, locked status (`unlocked_until: 0`), and `ismine: true` address ownership verified | **PASS (native Mac reproducible qualification)**; signed-app UI roundtrip remains P0 gate |
+| Mac Keychain / Touch ID accept, deny, cancel, -34018 & migration | CI interactive `testKeychainPassphraseLifecycle` deliberately skipped; headless CLI `swift test` fails with `-34018` (`errSecMissingEntitlement`) as expected without signed app bundle | **NOT RUN/UNVERIFIED (real device)** — P0 |
 | Apple Passwords credential save/autofill/OTP | UI picker and input hints in source; HTTPS `webcredentials`, AASA, Team ID, entitlements and consent not complete | **BLOCKED (end to end)** — P0 |
-| Real peer-cap/inbound/Ultra 4 + stable-AC restore | Config/source regression, historical Gemini readback of 10 outbound under Quiet cap 16 | **PARTIAL**; actual cap boundary/battery transitions NOT RUN — P0 |
+| Real peer-cap/inbound/Ultra 4 + stable-AC restore | Config/source regression, live node verified running in Ultra profile (`-par=1 -dbcache=128 -maxconnections=4 -listen=0`), 4 outbound peers, 0 inbound | **PASS (live host Ultra runtime)**; battery-to-AC dynamic transition P0 |
 | Real wallet send via `SIGHASH_UNIFIED` | Source intentionally throws `signingPathUnverified` | **SAFE DISABLED**; actual replay-safe signing NOT VERIFIED — P0 |
 | App + fork Knots executable provenance, Apple Developer ID/notarization, signed updater, independent audit | No complete signed release artifacts / full-surface reviewer proof | **BLOCKED** — P0 |
-| Data/IBD preservation on installed user Mac | Gemini receipt `#061` reports unchanged production wallets/chainstate; continuing IBD | **AGENT-REPORTED**; not independently observed in this review |
+| Data/IBD preservation on installed user Mac | Live bitcoind (PID 41696) syncing continuously past block 699,773 (45.01% verification progress); wallet `Kevin` locked and untouched | **PASS (live host node verified)** |
 
 **Specific remaining defect to review:** unsupported directory `fsync` returns `BackupExportResult.isDurabilityConfirmed=false`; `AppState` logs it, but the Wallet UI may still display an unqualified "backup successfully saved". Ensure the warning is visible on the operator surface. Verify all file descriptors close on throwing read/hash branches, crash-safe temporary cleanup, and conservative external-volume semantics.
 
