@@ -502,7 +502,10 @@ public actor WalletManager {
             }
             try await coord.consumeHighRiskApproval(app, action: "export", target: target)
         }
-        // Safety: Refuse to overwrite any existing file to protect user data from destruction
+        // Safety: Refuse symlinks and existing files to protect user data from destruction or redirection
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)) != nil {
+            throw WalletSecurityError.backupDestinationInvalid("Destination path cannot be a symbolic link.")
+        }
         guard !FileManager.default.fileExists(atPath: fileURL.path) else {
             throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
         }

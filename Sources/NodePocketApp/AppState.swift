@@ -583,7 +583,10 @@ public final class AppState: ObservableObject {
         guard let target = await walletManager.currentWalletName, !target.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
-        // Safety: Refuse to overwrite any existing file to protect operator data from destruction.
+        // Safety: Refuse symlinks and existing files to protect operator data from destruction or redirection.
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)) != nil {
+            throw WalletSecurityError.backupDestinationInvalid("Destination path cannot be a symbolic link.")
+        }
         guard !FileManager.default.fileExists(atPath: fileURL.path) else {
             throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
         }

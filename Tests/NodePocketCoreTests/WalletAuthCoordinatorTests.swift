@@ -862,7 +862,58 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let preservedContent = try String(contentsOf: existingFileURL, encoding: .utf8)
         XCTAssertEqual(preservedContent, originalContent, "Original file content must remain completely unharmed")
 
-        // 3. Restore fails closed on missing and empty backup files
+        // 3. Consumed token replay is strictly rejected for exportBackup
+        let anotherDestURL = tempDir.appendingPathComponent("another_dest.dat")
+        do {
+            try await activeManager.exportBackup(to: anotherDestURL, capability: capability, approval: exportApproval)
+            XCTFail("exportBackup must reject replayed/consumed approval token")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected: exportApproval was already consumed
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction for consumed token replay, got \(err)")
+            }
+        }
+
+        // 4. Approval target mismatch for export is strictly rejected
+        let mismatchExportApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "unrelated_wallet",
+            reason: "Testing target mismatch"
+        )
+        do {
+            try await activeManager.exportBackup(to: anotherDestURL, capability: capability, approval: mismatchExportApproval)
+            XCTFail("exportBackup must reject approval target mismatch (approval for 'unrelated_wallet', active is 'protected_wallet')")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected: target mismatch
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction for export target mismatch, got \(err)")
+            }
+        }
+
+        // 5. Symbolic link destination is strictly rejected
+        let symlinkURL = tempDir.appendingPathComponent("symlink_backup.dat")
+        try FileManager.default.createSymbolicLink(at: symlinkURL, withDestinationURL: existingFileURL)
+        let symlinkApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "protected_wallet",
+            reason: "Testing symlink rejection"
+        )
+        do {
+            try await activeManager.exportBackup(to: symlinkURL, capability: capability, approval: symlinkApproval)
+            XCTFail("exportBackup must reject symbolic link destination")
+        } catch let err as WalletSecurityError {
+            if case .backupDestinationInvalid = err {
+                // Expected: symlink rejected
+            } else {
+                XCTFail("Expected backupDestinationInvalid for symlink, got \(err)")
+            }
+        }
+
+        // 6. Restore fails closed on missing and empty backup files
         let missingURL = tempDir.appendingPathComponent("non_existent.dat")
         let restoreApproval = try await coordinator.requestHighRiskApproval(
             capability: capability,
@@ -881,6 +932,39 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
 
+        // 7. Consumed token replay is strictly rejected for restoreWallet
+        // Legitimate consumption of restoreApproval
+        try await coordinator.consumeHighRiskApproval(restoreApproval, action: "restore", target: "new_wallet")
+        do {
+            _ = try await activeManager.restoreWallet(name: "new_wallet", backupFile: existingFileURL, capability: capability, approval: restoreApproval)
+            XCTFail("restoreWallet must reject replayed/consumed approval token")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected: restoreApproval was already consumed
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction for consumed restore token replay, got \(err)")
+            }
+        }
+
+        // 8. Approval target mismatch for restore is strictly rejected
+        let mismatchRestoreApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "restore",
+            target: "wallet_alpha",
+            reason: "Testing restore mismatch"
+        )
+        do {
+            _ = try await activeManager.restoreWallet(name: "wallet_beta", backupFile: existingFileURL, capability: capability, approval: mismatchRestoreApproval)
+            XCTFail("restoreWallet must reject approval target mismatch (approval for 'wallet_alpha', requested 'wallet_beta')")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected: target mismatch
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction for restore target mismatch, got \(err)")
+            }
+        }
+
+        // 9. Restore fails closed on empty backup files
         let emptyURL = tempDir.appendingPathComponent("empty_backup.dat")
         try Data().write(to: emptyURL)
         let restoreApproval2 = try await coordinator.requestHighRiskApproval(
@@ -900,7 +984,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
 
-        // 4. Restore fails closed on invalid wallet name
+        // 10. Restore fails closed on invalid wallet name
         let restoreApproval3 = try await coordinator.requestHighRiskApproval(
             capability: capability,
             action: "restore",
