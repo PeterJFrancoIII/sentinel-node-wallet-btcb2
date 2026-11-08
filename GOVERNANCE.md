@@ -2,13 +2,25 @@
 
 **Scope:** A minimal, independent, native macOS **BTCB2 BLAKE2b/BIP-110 MainNet-only** validating node and self-custodial wallet. No mining pool, Admin Node Console runtime, TestNet/RegTest/Signet, DATUM gateway or cloud account in this release.
 
+
+## Current v13.1 governance checkpoint — 2026-11-07 (America/New_York)
+
+**Status: DEVELOPMENT ONLY, NOT PUBLIC/REAL-FUNDS-READY.** The current incoming-main-agent source of truth is [v13.1 agent-transfer handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md). Read it before executing old v12/v13 notes below, which remain contracts/history but may describe superseded implementation status.
+
+- Development [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10): `fix/v13-1-security-remediation-20261107`, **open and not merged into `main`** at evidence commit `03216baa2b2ea6a2aec45d3920410d8c8c0ed569`.
+- Evidence [macOS CI 42439761927](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42439761927): **91 executed, 90 passed, zero failed, one interactive hardware-Keychain test skipped**. This is source/automated-test evidence only.
+- Implemented in the review branch: core local-auth enforcement; multi-wallet operator fixes; configured/effective peer ceiling with Ultra 4/`listen=0` in source; user profile placement; encrypted-wallet backup using isolated staging, descriptor-anchored verification, no-overwrite atomic publication, recovery guards and mocked failure-path tests. `WalletManager` real-funds send is still **fail-closed / disabled**.
+- Gemini [receipt #061](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) **reports** a real isolated Knots regtest encrypted descriptor-wallet backup/restore and undisturbed MainNet sync. The native test is **agent-reported**, not independently reproduced by this governance review; request reproducible redacted artifacts before upgrading its status.
+- Remaining blockers: operator-visible backup durability warning and fault/recovery review; signed-app Keychain/Touch ID and Apple Passwords save/autofill; native Ultra/peer transition; fork-binary provenance and `SIGHASH_UNIFIED` audit; independent security and signed/notarized distribution. [Current release evidence matrix](TEST_AND_RELEASE_MATRIX.md).
+- This is **no-feature-addition / release freeze**: only bug fixes, evidence, safety and compliance work. Preserve existing wallets, Keychain, chainstate, datadir, IBD and user configuration. Isolated temporary regtest is allowed for development-only verification; do not ship or expose alternative networks in the public application.
+
 ## Canonical documents
 
 1. [V12 Ultra Power Policy & All-Wallet Inventory](docs/POWER_WALLET_INVENTORY_V12.md) is the authoritative power management, multi-wallet inventory, and UI contract.
 2. [Wallet Manager v7](docs/WALLET_MANAGER_V7.md) is the authoritative wallet functional and security contract.
 3. [Security policy](SECURITY.md) defines hard release blockers and vulnerability reporting.
 4. [Test and release matrix](TEST_AND_RELEASE_MATRIX.md) demands reproducible evidence.
-5. [Gemini completion handoff](GEMINI_COMPLETION_HANDOFF.md) defines the next implementation order.
+5. [Current v13.1 main-agent handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) is the authoritative current-state and next-work instruction. [Gemini completion handoff](GEMINI_COMPLETION_HANDOFF.md) is historical.
 6. README communicates current honest status; it must never overstate code coverage or notarization.
 
 ## Minimal engineering rules
@@ -20,7 +32,7 @@
 - BTCB2 MainNet identity requires consensus checkpoint at block 961,640, subsequent trusted anchors and fresh tip; `chain=main` or `bc1` alone is insufficient.
 - Compact validating node by default: NEW installs `prune=2048` MiB, `pruneduringinit=550` MiB; custom >=550 MiB. Preserve every EXISTING user's 550/custom retention and archive state, and keep storage independent of Quiet/Balanced/Fast. Monitor full datadir, warn near 35 GiB and gracefully stop by 40 GiB or <=10–12 GiB host free. Block retention is **not** a complete datadir limit.
 - Optional full-history archive: explicit opt-in, validated high-capacity external SSD where needed, wallet backup and fresh full-history download/reindex; preserve rollback.
-- The entire user-facing app is BTCB2 MainNet only. No alternative-network profiles or binaries exposed through UI. Deterministic mocked RPC tests are allowed without running alternative chains.
+- The entire user-facing app is BTCB2 MainNet only. No alternative-network profiles or binaries exposed through UI. Deterministic mocked RPC tests and isolated temporary developer-run regtest wallets are allowed for development verification only; neither is exposed or distributed as a consumer network.
 - Adaptive synchronization and coinbase-maturity ETAs must be labeled estimates, calibrated from observed network/sync data, with unknown/stalled states.
 - **No DATUM Gateway in the current scope.** Reserve future capability only as roadmap text, with its own threat model, UI and acceptance gates if authorized later.
 
@@ -44,7 +56,7 @@ The **Storage Footprint** selector must show two separate quantities: (1) the *o
 ## Development and change control
 
 - Source commits: minimal diffs, code review, full test evidence, and one exact SHA per reported build. Do not count static unit tests as real fork, fee-policy, user-presence or wallet-restore verification.
-- Main branch must be reviewed, with CI required when available. This documentation-only branch should merge after audit, independently of app code.
+- Main branch must be reviewed, with CI required when available. The current PR #10 is an app-code development branch, not a documentation-only release; it must not merge as a production build until P0 gates and independent audit are cleared. Separately reviewed documentation may be cherry-picked without deploying unsafe wallet code.
 - Security regressions block new packaged distributions even when the prior development DMG launches successfully.
 - Avoid collecting private destination addresses, TXIDs, wallet passphrases or metadata in public issue descriptions, screenshots, CI logs or Shared Memory.
 

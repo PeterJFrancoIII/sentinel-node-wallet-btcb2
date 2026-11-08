@@ -2,6 +2,13 @@
 
 **Development wallet: do not store real funds until independent audit and signed release gates are complete.** Report vulnerabilities privately through GitHub's repository security advisory or a verified maintainer contact, never a public issue containing exploitable details or user secrets.
 
+
+## Current v13.1 source-security evidence and release hold
+
+Read the [current transfer and risk register](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) and the [current release matrix](TEST_AND_RELEASE_MATRIX.md) before treating the older "currently" source observations below as up-to-date. Code baseline `03216baa2b2ea6a2aec45d3920410d8c8c0ed569` has source/CI remedies for earlier Keychain/auth and backup issues, but still lacks full hardware, signed-app and independent wallet-restore assurance. The previously unsafe user-funds send path is intentionally disabled in core.
+
+**Open gates:** real macOS device-owner/Keychain consent tests; actual Apple Passwords `webcredentials`/AASA/Team ID/signing; honest user-visible backup durability and safe crash/race recovery; independent encrypted-wallet clean-room restore evidence; pinned Knots fork-binary provenance; audited `SIGHASH_UNIFIED`; Apple notarization and supply-chain/release security review. No public or real-funds-safe claim while any P0 remains.
+
 ## Threat model
 
 Assume hostile websites, malicious browser extensions, clipboard substitution, compromised RPC peers, untrusted dependencies, unattended Mac sessions, stolen/unlocked devices, user tricked into approval and partial malware compromise. **No local hot wallet can guarantee security if the user account, process, memory or operating system is fully controlled by an attacker.** An independently controlled external signer is stronger than software-only controls for high-value funds.

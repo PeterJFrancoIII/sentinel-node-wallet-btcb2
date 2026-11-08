@@ -1,6 +1,30 @@
 # Test and release matrix — Sentinel Node Wallet - BTCB2
 
-**Current status:** a published development repository exists. The previous v6 receipt of 35 passing tests does **not** cover the new Wallet Manager v7 requirements, genuine security-device consent, nor release notarization. This file specifies **required** results; unmeasured items are NOT RUN.
+
+## Current v13.1 evidence snapshot — 2026-11-07 (America/New_York)
+
+**Authoritative for current status; rows further below are historical target matrices from earlier v7/v12/v13 planning and may say NOT RUN for work since added.** Use the [current handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) for execution order. Until all P0 gates pass: **DEVELOPMENT ONLY; no real-funds send or public production release**.
+
+**Code evidence:** `03216baa2b2ea6a2aec45d3920410d8c8c0ed569` on open PR #10, unmerged to main. [GitHub Actions macOS run 42439761927](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42439761927) ran **91 XCTest cases: 90 passed, 0 failed, 1 skipped interactive Keychain lifecycle**. Counts refer to that code SHA, not to later documentation-only commits. A CI PASS never means macOS hardware or a real Knots restore PASS.
+
+| v13.1 acceptance item | Evidence / boundary | Current proof status |
+| --- | --- | --- |
+| Local operator auth, TOTP, high-risk single-use approvals | Branch source + security unit tests; old unsafe send path locked | **PASS (source/CI)**; real device consent incomplete |
+| No-overwrite encrypted-wallet backup export architecture | Private staging; `openat`/directory FD; `fstat` + SHA-256 through open descriptor; `renameatx_np(RENAME_EXCL)`; inode-guarded cleanup | **PASS (source/CI)** on mocked successful and failure paths; further race/crash tests required |
+| Failed RPC and empty staged backup behavior | Added two regression tests in `WalletAuthCoordinatorTests`, both passed in CI | **PASS (source/CI)**; disk-full/copy/fsync/rename-failure injection still NOT RUN |
+| Actual Bitcoin Knots encrypted descriptor wallet backup + restore | Gemini receipt `#061` reports temporary regtest daemon, 24,576-byte encrypted descriptor backup, new restored wallet, locked status and address ownership | **AGENT-REPORTED (native Mac)**; independent redacted command logs and signed-app workflow NOT VERIFIED |
+| Mac Keychain / Touch ID accept, deny, cancel, -34018 & migration | CI interactive `testKeychainPassphraseLifecycle` deliberately skipped | **NOT RUN/UNVERIFIED (real device)** — P0 |
+| Apple Passwords credential save/autofill/OTP | UI picker and input hints in source; HTTPS `webcredentials`, AASA, Team ID, entitlements and consent not complete | **BLOCKED (end to end)** — P0 |
+| Real peer-cap/inbound/Ultra 4 + stable-AC restore | Config/source regression, historical Gemini readback of 10 outbound under Quiet cap 16 | **PARTIAL**; actual cap boundary/battery transitions NOT RUN — P0 |
+| Real wallet send via `SIGHASH_UNIFIED` | Source intentionally throws `signingPathUnverified` | **SAFE DISABLED**; actual replay-safe signing NOT VERIFIED — P0 |
+| App + fork Knots executable provenance, Apple Developer ID/notarization, signed updater, independent audit | No complete signed release artifacts / full-surface reviewer proof | **BLOCKED** — P0 |
+| Data/IBD preservation on installed user Mac | Gemini receipt `#061` reports unchanged production wallets/chainstate; continuing IBD | **AGENT-REPORTED**; not independently observed in this review |
+
+**Specific remaining defect to review:** unsupported directory `fsync` returns `BackupExportResult.isDurabilityConfirmed=false`; `AppState` logs it, but the Wallet UI may still display an unqualified "backup successfully saved". Ensure the warning is visible on the operator surface. Verify all file descriptors close on throwing read/hash branches, crash-safe temporary cleanup, and conservative external-volume semantics.
+
+**Test environment rule:** consumer app remains MainNet-only. An isolated, no-funds temporary regtest node is permissible only for development verification, never as a shipped alternate chain profile or as a substitute for MainNet consensus/signing validation.
+
+**Historical planning note (v7-era):** a published development repository exists. The previous v6 receipt of 35 passing tests does **not** cover the new Wallet Manager v7 requirements, genuine security-device consent, nor release notarization. This file specifies **required** results; unmeasured items are NOT RUN.
 
 | Gate / scenario | Evidence required | Current v7 status |
 | --- | --- | --- |
@@ -47,7 +71,7 @@
 
 See [v13 login contract](docs/FINAL_WALLET_AUTH_V13.md) and [full production security audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md). A mocked test pass or prior Gemini handoff is not proof of installed/macOS Apple Passwords behavior.
 
-**No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet distributed or used for execution. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
+**No real-funds test sends.** Python mock RPC and Swift XCTest should cover failures and formatting; actual Mac user-presence and fork signature need separate authenticated tests. No RegTest/TestNet/Signet network is shipped or presented in the consumer application; isolated temporary regtest is permitted for zero-funds developer-only backup/restore verification. Maintain an evidence receipt with full commit SHA, macOS build, test commands, redacted outputs, storage, historical compatibility, DMG hash, independent review and explicit PASS/FAIL/NOT RUN.
 
 ## v12 Ultra Power Policy, All-Wallet Inventory & Single Settings UI
 

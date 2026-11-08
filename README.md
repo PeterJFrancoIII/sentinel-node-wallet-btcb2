@@ -4,6 +4,9 @@
 
 **Development status — not approved for real funds or public binary distribution.** Swift/Python test receipts document development progress, not independent wallet-security certification. Apple Developer ID signing, notarization, secured auto-updates, full wallet recovery and an independent security review are release gates. [Security policy](SECURITY.md) · [Release matrix](TEST_AND_RELEASE_MATRIX.md) · [V12 Specification](docs/POWER_WALLET_INVENTORY_V12.md).
 
+
+**Current development checkpoint (2026-11-07):** [v13.1 main-agent handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) · [live evidence matrix](TEST_AND_RELEASE_MATRIX.md) · [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10). At code commit `03216baa2b2ea6a2aec45d3920410d8c8c0ed569`, macOS CI recorded **90 pass, 1 interactive Keychain skip, 0 failures**. Source includes local wallet auth, wallet inventory and atomic no-overwrite backup delivery. An isolated encrypted-wallet restore was reported by the development agent but is not independently audited. **Spending remains deliberately disabled, Apple Passwords end-to-end saving is blocked, and no signed/notarized public distribution is approved.**
+
 ## Three screens. No unnecessary services.
 
 | Screen | Purpose |
@@ -12,11 +15,11 @@
 | **Wallet** | All-Wallet Inventory listing all local wallets with per-wallet balances, reversible **Archive**, safe **Delete from this Mac** via macOS Trash, local encrypted descriptor wallet, receive QR, coinbase maturity countdown, fee-aware sending, and full transaction history. See [V12 Specification](docs/POWER_WALLET_INVENTORY_V12.md) and [Wallet Manager v7](docs/WALLET_MANAGER_V7.md). |
 | **Network** | Locally derived BLAKE2b network hashrate, 30/120-block trends, freshness, P2P peer topology, and difficulty. |
 
-One native **SwiftUI** application supervises one official, verified fork-compatible **Bitcoin Knots** node. Its dedicated app data and Keychain items are isolated from external mining pools, admin consoles, enterprise networks, ASIC firmware and all other projects. No Electron, Docker, hosted wallet, miner, gateway or analytics service.
+One native **SwiftUI** application is designed to supervise one fork-compatible **Bitcoin Knots** node; independently audited binary provenance remains a release gate. Its dedicated app data and Keychain items are isolated from external mining pools, admin consoles, enterprise networks, ASIC firmware and all other projects. No Electron, Docker, hosted wallet, miner, gateway or analytics service.
 
 ### Automatic Ultra Power Policy (V12)
 - **Continuous IOKit Monitoring:** Queries `IOPSCopyPowerSourcesInfo` for battery power, active charging, and macOS Low Power Mode.
-- **Ephemeral Resource Clamps:** When on battery or actively charging, Knots automatically applies lightweight parameters (`par=1`, `dbcache=128MiB`, `maxconnections=12`, `maxuploadtarget=128MiB`) ephemerally without modifying `bitcoin.conf`.
+- **Ephemeral Resource Clamps:** When on battery or actively charging, Knots automatically applies lightweight parameters (`par=1`, `dbcache=128MiB`, `maxconnections=4`, `listen=0`, `maxuploadtarget=128MiB`) ephemerally without modifying `bitcoin.conf`.
 - **Preferred Profile Preservation:** User's preferred Quiet/Balanced/Fast profile remains safely stored and automatically resumes when the Mac returns to stable AC power without charging.
 
 ### All-Wallet Inventory & Multi-Wallet Safety (V12)

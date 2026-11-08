@@ -3,6 +3,17 @@
 **Canonical current wallet contract:** [docs/POWER_WALLET_INVENTORY_V12.md](docs/POWER_WALLET_INVENTORY_V12.md) · [docs/WALLET_MANAGER_V7.md](docs/WALLET_MANAGER_V7.md)  
 **Primary project:** Native SwiftUI macOS Bitcoin Knots **BTCB2 BLAKE2b/BIP-110 MainNet-only** validating node and non-custodial wallet.
 
+
+## Incoming main agent — mandatory current-state entrypoint (2026-11-07)
+
+**Read [the current v13.1 transfer](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) and [current CI/release matrix](TEST_AND_RELEASE_MATRIX.md) before following older implementation orders below.** Previous agents have implemented much of the earlier P0 backlog; do not rebuild or re-enable unsafe paths based on historical headings.
+
+- Working development PR: [#10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch `fix/v13-1-security-remediation-20261107`. Last code-baseline SHA `03216baa2b2ea6a2aec45d3920410d8c8c0ed569`. `main` is not production-released.
+- [CI 42439761927](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42439761927): **90 tests passed, one interactive Keychain test skipped, no failures**. Real encrypted Knots restore is **Gemini-reported on an isolated regtest node**, not proved by CI and not independently reproduced in this review.
+- First work: make backup durability warning visible in Wallet UI, review FD/cleanup/error paths; gather real signed-Mac backup/restore + Keychain evidence; then Apple Passwords associated domain/signing, Ultra native peer transitions, fork/signing audit and final notarized supply-chain/security audit.
+- Mandatory STOP: never touch existing operator wallets/keys, restore over existing wallets, reset IBD/chainstate, alter external-project infrastructure or enable actual funds sending. `WalletManager` send remains intentionally disabled until verified `SIGHASH_UNIFIED` and all P0 approvals.
+- Every receipt identifies exact code SHA, CI URL/pass/fail/skip, agent-reported vs independently verified native observations, and remaining P0s. Handoff is role-neutral; previous Gemini notes are historical.
+
 ## What is in scope
 
 Maintain exactly three main surfaces: **Node, Wallet, Network**, plus one small Advanced sheet opened by a single header gear button. The Wallet surface must support All-Wallet Inventory, per-wallet isolation, reversible Archive, and fail-closed reversible Delete to macOS Trash. Automatic Ultra Power Policy monitors `IOKit.ps` for battery/charging and preserves preferred profiles. Python is permitted as a test/mocking and automation tool; **no Python runtime or web backend** is shipped to consumers.
@@ -13,7 +24,7 @@ Maintain exactly three main surfaces: **Node, Wallet, Network**, plus one small 
 
 Original private Admin Node Console Wallet Manager (`src/status_server.py` and `src/wallet_registry.py`) may be read for behavioral parity; NEVER copy its live code, database, real wallet data/addresses, credentials or integration services. No writes to external mining pools, corporate parent repos, Admin Console, ASIC firmware, or other project repos/runtimes. Retain historical app bundle ID, Keychain service and datadir until a reversible migration is proved. Existing running node and wallet are not disposable test fixtures.
 
-## Immediate P0 items
+## Historical P0 requirements (see v13.1 checkpoint for achieved and outstanding status)
 
 1. Remove empty-passphrase wallet creation, unencrypted default wallet, `tb1`/`bcrt1` acceptance and insecure auto-Keychain unlocking.
 2. Validate actual BLAKE2b fork, new chain anchor/fresh tip, encrypted wallet, BTCB2 replay-safe `SIGHASH_UNIFIED` signing and allowlist **inside core send pipeline**; UI badges or local height are insufficient.
@@ -33,6 +44,6 @@ After v13 is implemented, **FREEZE new features**, inventory every source/binary
 
 ## Release and reporting
 
-No public or real-funds-safe release before P0s, clean wallet restore, Apple Developer ID signing and notarization, Gatekeeper, secure updates and independent audit. Read [GOVERNANCE.md](GOVERNANCE.md), [SECURITY.md](SECURITY.md), [TEST_AND_RELEASE_MATRIX.md](TEST_AND_RELEASE_MATRIX.md) and [GEMINI_COMPLETION_HANDOFF.md](GEMINI_COMPLETION_HANDOFF.md).
+No public or real-funds-safe release before P0s, clean wallet restore, Apple Developer ID signing and notarization, Gatekeeper, secure updates and independent audit. Read [GOVERNANCE.md](GOVERNANCE.md), [SECURITY.md](SECURITY.md), [TEST_AND_RELEASE_MATRIX.md](TEST_AND_RELEASE_MATRIX.md) and [the current v13.1 handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md). The [older Gemini handoff](GEMINI_COMPLETION_HANDOFF.md) is history.
 
 Follow existing Shared Cognitive Memory rules. Post one redacted evidence receipt with exact commit, test results and PASS/FAIL/NOT RUN, not unverified 'complete' claims. Do not leak addresses, keys or user-specific transaction data into Shared Memory or GitHub.
