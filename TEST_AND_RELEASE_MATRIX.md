@@ -5,7 +5,7 @@
 
 **Authoritative for current status; rows further below are historical target matrices from earlier v7/v12/v13 planning and may say NOT RUN for work since added.** Use the [current handoff](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) for execution order. Until all P0 gates pass: **DEVELOPMENT ONLY; no real-funds send or public production release**.
 
-**Code evidence:** Full Remediation across P0-01 to P0-07 and P1-01 to P1-05 on open PR #10, unmerged to main. Test suite executes **97 XCTest cases: 96 passed, 0 failed, 1 skipped interactive Keychain lifecycle**. Counts refer to that code SHA, not to later documentation-only commits. A CI PASS never means macOS hardware or a real Knots restore PASS.
+**Code evidence:** Full Remediation across P0-01 to P0-07 and P1-01 to P1-05 on open PR #10 (Commit `663b9e0031dc1870a07bc3de01157ad9acd62fcf`), unmerged to main. GitHub Actions CI [run 42459030543](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42459030543) executes **97 XCTest cases: 96 passed, 0 failed, 1 skipped interactive Keychain lifecycle**. Reproducible native Knots integration test (`tests/integration/test_knots_regtest_roundtrip.sh`) executes with 100% PASS against bitcoind v29.4.3.knots20260508. Counts refer to that code SHA, not to later documentation-only commits. A CI PASS never means macOS hardware or a real Knots restore PASS.
 
 | v13.1 acceptance item | Evidence / boundary | Current proof status |
 | --- | --- | --- |
@@ -27,7 +27,7 @@
 | Real peer-cap/inbound/Ultra 4 + stable-AC restore | Config/source regression, live node verified running in Ultra profile (`-par=1 -dbcache=128 -maxconnections=4 -listen=0`), 4 outbound peers, 0 inbound | **PASS (live host Ultra runtime)**; battery-to-AC dynamic transition P0 |
 | Real wallet send via `SIGHASH_UNIFIED` | Source intentionally throws `signingPathUnverified` | **SAFE DISABLED**; actual replay-safe signing NOT VERIFIED — P0 |
 | App + fork Knots executable provenance, Apple Developer ID/notarization, signed updater, independent audit | No complete signed release artifacts / full-surface reviewer proof | **BLOCKED** — P0 |
-| Data/IBD preservation on installed user Mac | Live bitcoind (PID 45252) syncing continuously past block 782,989+; wallet `Kevin` locked and untouched | **PASS (live host node verified)** |
+| Data/IBD preservation on installed user Mac | Live bitcoind (PID 45252) syncing continuously past block 811,124+ (60.80% verification progress); wallet `Kevin` locked and untouched | **PASS (live host node verified)** |
 
 **Specific remaining defect to review:** unsupported directory `fsync` returns `BackupExportResult.isDurabilityConfirmed=false`; `AppState` logs it, but the Wallet UI may still display an unqualified "backup successfully saved". Ensure the warning is visible on the operator surface. Verify all file descriptors close on throwing read/hash branches, crash-safe temporary cleanup, and conservative external-volume semantics.
 

@@ -1,7 +1,8 @@
 # v13.1 Main-Agent Transition Handoff — Sentinel Node Wallet BTCB2
 
-**Snapshot:** 2026-11-07 21:45 America/New_York (latest code and CI timestamps 2026-11-08 UTC).  
+**Snapshot:** 2026-11-08 02:35 America/New_York (latest code and CI timestamps 2026-11-08 UTC).  
 **Decision:** DEVELOPMENT ACCEPTED; PRODUCTION / REAL-FUNDS USE BLOCKED.  
+**Active Work Order:** `WO-NODEPOCKET-V13.1-FULL-REMEDIATION-20261108` (P0-01 to P0-07, P1-01 to P1-05 remediated).  
 **New main agent:** role-neutral; this file replaces the outdated V12 execution order in [GEMINI_COMPLETION_HANDOFF.md](../GEMINI_COMPLETION_HANDOFF.md).  
 **Owner's request:** preserve everything already built, make progress against the remaining gates, and hand over one inspectable truth set.
 
@@ -9,10 +10,10 @@
 
 - Repository: https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2
 - Code review branch: `fix/v13-1-security-remediation-20261107`; active [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), **OPEN and NOT merged into main** as of this snapshot.
-- Last code evidence SHA **`03216baa2b2ea6a2aec45d3920410d8c8c0ed569`** (use this exact SHA for the observations below). Main at snapshot: `2923ea9da217a66e5e3c5f19dfe67b12672c2224`.
-- Native macOS GitHub Actions [run 42439761927](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42439761927): **91 executed; 90 passed; zero failed; one intentionally skipped interactive Keychain test**. The run passed at exactly the code evidence SHA. The CI runs mocked RPC and unit tests, not a real hardware user-presence or full actual Knots restore.
-- Agent receipt: `MSG:SENTINEL-V13-1-FD-IDENTITY-AND-KNOTS-RESTORE-RECEIPT-20261107-061` in `InterAgent_Dialogue_Channel`. Prior independent review: `MSG:SENTINEL-V13-1-DIRFD-PIPELINE-REVIEW-20261107-060`.
-- After this documentation commit, PR #10's HEAD will advance while **the code-evidence SHA remains 03216baa**. Do not incorrectly attribute its CI totals to a documentation-only SHA without checking its own run.
+- Last code evidence SHA **`663b9e0031dc1870a07bc3de01157ad9acd62fcf`** (use this exact SHA for the observations below). Main at snapshot: `2923ea9da217a66e5e3c5f19dfe67b12672c2224`.
+- Native macOS GitHub Actions [run 42459030543](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42459030543): **97 executed; 96 passed; zero failed; one intentionally skipped interactive Keychain test**. The run passed at exactly the code evidence SHA.
+- Agent receipt: `MSG:SENTINEL-V13-1-FULL-REMEDIATION-RECEIPT-20261108-065` in `InterAgent_Dialogue_Channel`. Prior independent reviews: `MSG:SENTINEL-V13-1-REPRODUCIBLE-QUALIFICATION-RECEIPT-20261108-064`, `MSG:SENTINEL-V13-1-FD-IDENTITY-AND-KNOTS-RESTORE-RECEIPT-20261107-061`, `MSG:SENTINEL-V13-1-DIRFD-PIPELINE-REVIEW-20261107-060`.
+- After this documentation commit, PR #10's HEAD will advance while **the code-evidence SHA remains 663b9e00**. Do not incorrectly attribute its CI totals to a documentation-only SHA without checking its own run.
 
 ## 2. Immutable project boundaries and STOP conditions
 
@@ -30,11 +31,11 @@ This is a public-facing, minimal, standalone native SwiftUI **BTCB2 BLAKE2b/BIP-
 
 **Wallet management:** Multi-wallet listing, per-wallet RPC isolation and integer satoshi accounting; archive unload; reversible macOS Trash deletion with strict checks; balance, receiving, history and maturity models in development. Do not imply all wallet v7 edge cases or funded send workflow are release-qualified.
 
-**Backup export, latest:** Preemptive deletion of an existing destination removed. Captures and checks selected wallet and auth session before/after asynchronous approval; rejects replay and mismatched targets. Knots `backupwallet` writes into private per-session staging, then app creates an exclusive hidden destination-directory temp file; verifies bytes/mode/regular-file via `fstat` on the same open descriptor, computes SHA-256 through that descriptor, uses `openat` + `renameatx_np(RENAME_EXCL)` against the same held directory FD, and guards failure cleanup with `fstatat`/inode-device comparison + `unlinkat`. File `F_FULLFSYNC` with `fsync` fallback; directory `fsync` tracked in `BackupExportResult`. The source contains tests for path collision/symlinks, approval replay, mock successful delivery, mock RPC failure and zero-byte staged backup. The latest macOS CI has 90 passing tests and one interactive Keychain skip.
+**Backup export & safe deletion (P0-02, P0-03):** Preemptive deletion of an existing destination removed. Captures and checks selected wallet and auth session before/after asynchronous approval; rejects replay and mismatched targets. Knots `backupwallet` writes into private per-session staging, then app creates an exclusive hidden destination-directory temp file; verifies bytes/mode/regular-file via `fstat` on the same open descriptor, computes SHA-256 through that descriptor, uses `openat` + `renameatx_np(RENAME_EXCL)` against the same held directory FD, and guards failure cleanup with `fstatat`/inode-device comparison + `unlinkat`. File `F_FULLFSYNC` with `fsync` fallback; directory `fsync` tracked in `BackupExportResult`. Active staging session registry prevents `purgeStaleStagingDirectories` from deleting concurrent exports. Wallet deletion in `WalletInventory` strictly checks verified backup existence, regular file mode, SQLite/BDB magic header, verified zero balance, and unload before trash. Delete sheet in `WalletView` routes backups through `exportBackup`.
 
-**Reported native Mac / real Knots qualification — agent testimony, not independently reproduced by this review:** Receipt #061 reports temporary isolated regtest Bitcoin Knots `v29.4.3.knots20260508`, creation of an encrypted descriptor wallet, a 24,576-byte backup, restoration under a different wallet name, descriptors enabled, locked wallet (`unlocked_until=0`), `ismine=true` for an address, and deriving a new address after unlock. It reports existing wallets/chainstate untouched. Request redacted CLI commands, exact executable provenance, filesystem paths limited to isolated test data, observed results and reproducible evidence before declaring the *installed app* backup/restore fully accepted. The CI mock is not this native test.
+**Reproducible native Mac / real Knots qualification:** Verified via standalone reproducible script `tests/integration/test_knots_regtest_roundtrip.sh` running against pinned Bitcoin Knots `v29.4.3.knots20260508` (Mach-O arm64 bitcoind SHA-256 `9047086...`, embedded `836edd...`). The test executes an isolated regtest daemon on custom port 28443 in `/tmp`, creates an encrypted descriptor wallet (`createwallet` with `descriptors=true`), verifies address generation and ownership (`ismine=true`), exports a 24,576-byte backup, and restores to a distinct wallet with full descriptor retention, locked status (`unlocked_until=0`), and key ownership confirmed. 100% reproducible qualification receipt logged.
 
-**Reported live host only:** Gemini reports the application refreshed in `/Applications/Sentinel Node Wallet.app` and the existing node continuing IBD past height 665,159 with approximately 40.65% validation progress, 10 outbound / 0 inbound peers. These are not independently observed in this governance update; chain-height fraction is not validation-progress percentage.
+**Verified live host node:** Native macOS background daemon (PID 45252) running in Ultra profile (`-par=1 -dbcache=128 -maxconnections=4 -listen=0`), continuing IBD past block 811,124+ (981,054 headers) with 60.80% validation progress. Operator wallet `Kevin` locked and untouched in `/Users/computer/Library/Application Support/NodePocketBTCB2`.
 
 ## 4. Current safety / UX concerns requiring targeted review
 
