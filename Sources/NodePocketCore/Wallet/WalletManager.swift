@@ -506,10 +506,12 @@ public actor WalletManager {
         if (try? FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)) != nil {
             throw WalletSecurityError.backupDestinationInvalid("Destination path cannot be a symbolic link.")
         }
-        guard !FileManager.default.fileExists(atPath: fileURL.path) else {
+        let resolvedURL = fileURL.resolvingSymlinksInPath()
+        guard !FileManager.default.fileExists(atPath: fileURL.path),
+              !FileManager.default.fileExists(atPath: resolvedURL.path) else {
             throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
         }
-        let parentDir = fileURL.deletingLastPathComponent()
+        let parentDir = resolvedURL.deletingLastPathComponent()
         guard FileManager.default.fileExists(atPath: parentDir.path) else {
             throw WalletSecurityError.backupDestinationInvalid("Destination directory does not exist: \(parentDir.path)")
         }
@@ -517,16 +519,16 @@ public actor WalletManager {
             throw WalletSecurityError.backupDestinationInvalid("Destination directory is not writable: \(parentDir.path)")
         }
 
-        try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: target)
+        try await rpcClient.backupWallet(destinationPath: resolvedURL.path, walletName: target)
 
-        // Verify backup was actually created and is non-empty
-        guard FileManager.default.fileExists(atPath: fileURL.path) else {
-            throw WalletSecurityError.backupDestinationInvalid("Backup file was not created by daemon at \(fileURL.path).")
+        // Verify backup was actually created and is non-empty at canonical destination
+        guard FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            throw WalletSecurityError.backupDestinationInvalid("Backup file was not created by daemon at \(resolvedURL.path).")
         }
-        let createdAttrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let createdAttrs = try FileManager.default.attributesOfItem(atPath: resolvedURL.path)
         let createdSize = (createdAttrs[.size] as? NSNumber)?.int64Value ?? 0
         guard createdSize > 0 else {
-            throw WalletSecurityError.backupDestinationInvalid("Generated backup file at \(fileURL.path) is 0 bytes.")
+            throw WalletSecurityError.backupDestinationInvalid("Generated backup file at \(resolvedURL.path) is 0 bytes.")
         }
     }
 

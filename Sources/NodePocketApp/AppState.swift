@@ -587,7 +587,9 @@ public final class AppState: ObservableObject {
         if (try? FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)) != nil {
             throw WalletSecurityError.backupDestinationInvalid("Destination path cannot be a symbolic link.")
         }
-        guard !FileManager.default.fileExists(atPath: fileURL.path) else {
+        let resolvedURL = fileURL.resolvingSymlinksInPath()
+        guard !FileManager.default.fileExists(atPath: fileURL.path),
+              !FileManager.default.fileExists(atPath: resolvedURL.path) else {
             throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
         }
         let initialSessionId = session.id

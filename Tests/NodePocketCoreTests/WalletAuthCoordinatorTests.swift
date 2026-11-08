@@ -913,6 +913,31 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
 
+        // 5b. Destination resolving to existing file via symlink parent is rejected
+        let realSubdir = tempDir.appendingPathComponent("real_dir")
+        try FileManager.default.createDirectory(at: realSubdir, withIntermediateDirectories: true)
+        let targetFileInReal = realSubdir.appendingPathComponent("target_backup.dat")
+        try "EXISTING_IN_REAL".write(to: targetFileInReal, atomically: true, encoding: .utf8)
+        let symlinkSubdir = tempDir.appendingPathComponent("symlink_dir")
+        try FileManager.default.createSymbolicLink(at: symlinkSubdir, withDestinationURL: realSubdir)
+        let pathViaSymlinkParent = symlinkSubdir.appendingPathComponent("target_backup.dat")
+        let parentSymlinkApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "protected_wallet",
+            reason: "Testing symlink parent resolution"
+        )
+        do {
+            try await activeManager.exportBackup(to: pathViaSymlinkParent, capability: capability, approval: parentSymlinkApproval)
+            XCTFail("exportBackup must reject destination whose resolved canonical path already exists")
+        } catch let err as WalletSecurityError {
+            if case .backupDestinationAlreadyExists = err {
+                // Expected: resolved canonical path targetFileInReal already exists!
+            } else {
+                XCTFail("Expected backupDestinationAlreadyExists for symlink parent collision, got \(err)")
+            }
+        }
+
         // 6. Restore fails closed on missing and empty backup files
         let missingURL = tempDir.appendingPathComponent("non_existent.dat")
         let restoreApproval = try await coordinator.requestHighRiskApproval(
