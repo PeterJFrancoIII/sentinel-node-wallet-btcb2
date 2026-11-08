@@ -958,6 +958,19 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
 
+        // 5d. Atomic publication refusal via renameatx_np(RENAME_EXCL) when destination collides
+        let raceSrc = tempDir.appendingPathComponent("race_src.tmp")
+        let raceDst = tempDir.appendingPathComponent("race_dst.dat")
+        try "SRC_DATA".write(to: raceSrc, atomically: true, encoding: .utf8)
+        try "EXISTING_DST".write(to: raceDst, atomically: true, encoding: .utf8)
+        let renameRes = renameatx_np(AT_FDCWD, raceSrc.path, AT_FDCWD, raceDst.path, UInt32(RENAME_EXCL))
+        XCTAssertNotEqual(renameRes, 0, "renameatx_np with RENAME_EXCL must refuse to overwrite existing destination")
+        XCTAssertEqual(errno, EEXIST, "errno must be EEXIST when destination exists")
+        let preservedDst = try String(contentsOf: raceDst, encoding: .utf8)
+        XCTAssertEqual(preservedDst, "EXISTING_DST", "Destination content must remain completely unharmed")
+        try? FileManager.default.removeItem(at: raceSrc)
+        try? FileManager.default.removeItem(at: raceDst)
+
         // 6. Restore fails closed on missing and empty backup files
         let missingURL = tempDir.appendingPathComponent("non_existent.dat")
         let restoreApproval = try await coordinator.requestHighRiskApproval(

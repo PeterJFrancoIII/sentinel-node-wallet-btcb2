@@ -1,5 +1,6 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 public struct WalletSnapshot: Sendable {
     public let name: String
@@ -542,39 +543,94 @@ public actor WalletManager {
             throw WalletSecurityError.backupDestinationInvalid("Generated backup file in staging is 0 bytes.")
         }
 
-        // 4. Atomic Delivery to Final Destination with O_CREAT | O_EXCL | O_NOFOLLOW
-        let dstFd = open(fileURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        // 4. Staged Digest Computation
+        let stagedDigest = try computeSHA256(url: stagedBackupURL)
+
+        // 5. Secure Temporary Delivery in Destination Directory
+        let tempFilename = ".\(fileURL.lastPathComponent).tmp.\(UUID().uuidString)"
+        let tempURL = parentDir.appendingPathComponent(tempFilename)
+
+        let dstFd = open(tempURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         if dstFd < 0 {
             let err = errno
             if err == EEXIST {
-                throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
+                throw WalletSecurityError.backupDestinationAlreadyExists(tempURL.path)
             } else if err == ELOOP {
-                throw WalletSecurityError.backupDestinationInvalid("Destination path is a symbolic link (rejected by kernel).")
+                throw WalletSecurityError.backupDestinationInvalid("Temporary destination path is a symbolic link (rejected by kernel).")
             } else {
-                throw WalletSecurityError.backupDestinationInvalid("Failed to create destination file: errno \(err)")
+                throw WalletSecurityError.backupDestinationInvalid("Failed to create temporary destination file: errno \(err)")
             }
         }
 
-        var copySucceeded = false
+        var publishedSuccessfully = false
         defer {
-            close(dstFd)
-            if !copySucceeded {
-                unlink(fileURL.path)
+            if !publishedSuccessfully {
+                unlink(tempURL.path)
             }
         }
 
         let srcFd = open(stagedBackupURL.path, O_RDONLY | O_NOFOLLOW)
         guard srcFd >= 0 else {
+            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("Could not open staged backup for delivery.")
         }
-        defer { close(srcFd) }
 
         let copyResult = fcopyfile(srcFd, dstFd, nil, copyfile_flags_t(COPYFILE_DATA))
+        close(srcFd)
         guard copyResult == 0 else {
-            throw WalletSecurityError.backupDestinationInvalid("Atomic data copy to destination failed with code \(copyResult)")
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("Data copy from staging failed with code \(copyResult)")
         }
-        fsync(dstFd)
-        copySucceeded = true
+
+        guard fsync(dstFd) == 0 else {
+            let syncErr = errno
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("fsync failed on temporary backup: errno \(syncErr)")
+        }
+        close(dstFd)
+
+        // 6. Post-Copy Integrity & Digest Verification
+        let tempAttrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
+        let tempSize = (tempAttrs[.size] as? NSNumber)?.int64Value ?? 0
+        guard tempSize == createdSize else {
+            throw WalletSecurityError.backupDestinationInvalid("Delivered backup size (\(tempSize)) does not match staged size (\(createdSize)).")
+        }
+        let tempDigest = try computeSHA256(url: tempURL)
+        guard tempDigest == stagedDigest else {
+            throw WalletSecurityError.backupDestinationInvalid("Integrity checksum mismatch: staged=\(stagedDigest), delivered=\(tempDigest)")
+        }
+
+        // 7. Atomic Publication via Darwin renameatx_np(RENAME_EXCL)
+        let renameResult = renameatx_np(AT_FDCWD, tempURL.path, AT_FDCWD, fileURL.path, UInt32(RENAME_EXCL))
+        if renameResult != 0 {
+            let renErr = errno
+            if renErr == EEXIST {
+                throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
+            } else {
+                throw WalletSecurityError.backupDestinationInvalid("Atomic publication failed: errno \(renErr)")
+            }
+        }
+        publishedSuccessfully = true
+
+        // 8. Fsync Parent Directory to commit directory entry
+        let parentFd = open(parentDir.path, O_RDONLY)
+        if parentFd >= 0 {
+            _ = fsync(parentFd)
+            close(parentFd)
+        }
+    }
+
+    private func computeSHA256(url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while autoreleasepool(invoking: {
+            let chunk = handle.readData(ofLength: 64 * 1024)
+            if chunk.isEmpty { return false }
+            hasher.update(data: chunk)
+            return true
+        }) {}
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     #if DEBUG
