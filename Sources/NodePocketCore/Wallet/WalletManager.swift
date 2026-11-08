@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public struct WalletSnapshot: Sendable {
     public let name: String
@@ -147,6 +148,7 @@ public actor WalletManager {
     public let addressBook: AddressBook
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
+    public let stagingDirectory: URL
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     private var isCreatingWallet = false
@@ -157,7 +159,8 @@ public actor WalletManager {
         addressBook: AddressBook = AddressBook(),
         authCoordinator: WalletAuthCoordinator? = nil,
         allowUnauthenticatedForTesting: Bool = false,
-        initialWalletName: String? = nil
+        initialWalletName: String? = nil,
+        stagingDirectory: URL? = nil
     ) {
         self.rpcClient = rpcClient
         self.keychainHelper = keychainHelper
@@ -165,6 +168,8 @@ public actor WalletManager {
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
         self.currentWalletName = initialWalletName
+        self.stagingDirectory = stagingDirectory ?? URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Application Support/NodePocketBTCB2/backups/staging")
     }
 
     public func ensureAuthenticated(capability: WalletAuthCapability?) async throws {
@@ -519,17 +524,57 @@ public actor WalletManager {
             throw WalletSecurityError.backupDestinationInvalid("Destination directory is not writable: \(parentDir.path)")
         }
 
-        try await rpcClient.backupWallet(destinationPath: resolvedURL.path, walletName: target)
+        // 3. Staged Backup Generation in Private Staging Directory
+        let sessionStagingDir = stagingDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: sessionStagingDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? FileManager.default.removeItem(at: sessionStagingDir) }
 
-        // Verify backup was actually created and is non-empty at canonical destination
-        guard FileManager.default.fileExists(atPath: resolvedURL.path) else {
-            throw WalletSecurityError.backupDestinationInvalid("Backup file was not created by daemon at \(resolvedURL.path).")
+        let stagedBackupURL = sessionStagingDir.appendingPathComponent("backup.dat")
+        try await rpcClient.backupWallet(destinationPath: stagedBackupURL.path, walletName: target)
+
+        // Verify staged backup was actually created and is non-empty
+        guard FileManager.default.fileExists(atPath: stagedBackupURL.path) else {
+            throw WalletSecurityError.backupDestinationInvalid("Backup file was not created by daemon in staging at \(stagedBackupURL.path).")
         }
-        let createdAttrs = try FileManager.default.attributesOfItem(atPath: resolvedURL.path)
+        let createdAttrs = try FileManager.default.attributesOfItem(atPath: stagedBackupURL.path)
         let createdSize = (createdAttrs[.size] as? NSNumber)?.int64Value ?? 0
         guard createdSize > 0 else {
-            throw WalletSecurityError.backupDestinationInvalid("Generated backup file at \(resolvedURL.path) is 0 bytes.")
+            throw WalletSecurityError.backupDestinationInvalid("Generated backup file in staging is 0 bytes.")
         }
+
+        // 4. Atomic Delivery to Final Destination with O_CREAT | O_EXCL | O_NOFOLLOW
+        let dstFd = open(fileURL.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        if dstFd < 0 {
+            let err = errno
+            if err == EEXIST {
+                throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
+            } else if err == ELOOP {
+                throw WalletSecurityError.backupDestinationInvalid("Destination path is a symbolic link (rejected by kernel).")
+            } else {
+                throw WalletSecurityError.backupDestinationInvalid("Failed to create destination file: errno \(err)")
+            }
+        }
+
+        var copySucceeded = false
+        defer {
+            close(dstFd)
+            if !copySucceeded {
+                unlink(fileURL.path)
+            }
+        }
+
+        let srcFd = open(stagedBackupURL.path, O_RDONLY | O_NOFOLLOW)
+        guard srcFd >= 0 else {
+            throw WalletSecurityError.backupDestinationInvalid("Could not open staged backup for delivery.")
+        }
+        defer { close(srcFd) }
+
+        let copyResult = fcopyfile(srcFd, dstFd, nil, copyfile_flags_t(COPYFILE_DATA))
+        guard copyResult == 0 else {
+            throw WalletSecurityError.backupDestinationInvalid("Atomic data copy to destination failed with code \(copyResult)")
+        }
+        fsync(dstFd)
+        copySucceeded = true
     }
 
     #if DEBUG

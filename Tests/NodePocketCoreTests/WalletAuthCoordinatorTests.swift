@@ -938,6 +938,26 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
 
+        // 5c. Dangling symlink destination is rejected
+        let danglingSymlinkURL = tempDir.appendingPathComponent("dangling_symlink.dat")
+        try FileManager.default.createSymbolicLink(at: danglingSymlinkURL, withDestinationURL: tempDir.appendingPathComponent("non_existent_target.dat"))
+        let danglingApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "protected_wallet",
+            reason: "Testing dangling symlink"
+        )
+        do {
+            try await activeManager.exportBackup(to: danglingSymlinkURL, capability: capability, approval: danglingApproval)
+            XCTFail("exportBackup must reject dangling symbolic link destination")
+        } catch let err as WalletSecurityError {
+            if case .backupDestinationInvalid = err {
+                // Expected: dangling symlink rejected
+            } else {
+                XCTFail("Expected backupDestinationInvalid for dangling symlink, got \(err)")
+            }
+        }
+
         // 6. Restore fails closed on missing and empty backup files
         let missingURL = tempDir.appendingPathComponent("non_existent.dat")
         let restoreApproval = try await coordinator.requestHighRiskApproval(
