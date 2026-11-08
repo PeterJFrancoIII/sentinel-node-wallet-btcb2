@@ -553,9 +553,19 @@ public struct WalletView: View {
                         savePanel.nameFieldStringValue = "\(targetWallet)_backup_\(Int(Date().timeIntervalSince1970)).dat"
                         if savePanel.runModal() == .OK, let url = savePanel.url {
                             Task {
+                                let didStartAccessing = url.startAccessingSecurityScopedResource()
+                                defer {
+                                    if didStartAccessing {
+                                        url.stopAccessingSecurityScopedResource()
+                                    }
+                                }
                                 do {
-                                    try await state.exportBackup(to: url)
-                                    state.alertMessage = "Wallet backup successfully saved to:\n\(url.path)"
+                                    let result = try await state.exportBackup(to: url)
+                                    if result.isDurabilityConfirmed {
+                                        state.alertMessage = "Wallet backup successfully saved to:\n\(url.path)\n\nPersistence: Fully verified on storage volume."
+                                    } else {
+                                        state.alertMessage = "Wallet backup published to:\n\(url.path)\n\n⚠️ Durability Unconfirmed: \(result.durabilityWarning ?? "Underlying volume does not support directory persistence sync.")\n\nPlease keep an additional verified copy."
+                                    }
                                     state.showAlert = true
                                 } catch {
                                     state.alertMessage = "Backup failed: \(error.localizedDescription)"

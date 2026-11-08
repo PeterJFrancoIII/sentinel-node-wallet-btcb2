@@ -84,6 +84,10 @@ public final class AppState: ObservableObject {
         setupBindings()
         startHealthMonitoring()
         refreshAuthState()
+
+        Task { [walletManager] in
+            await walletManager.purgeStaleStagingDirectories()
+        }
     }
 
     private func setupBindings() {
@@ -576,7 +580,8 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func exportBackup(to fileURL: URL) async throws {
+    @discardableResult
+    public func exportBackup(to fileURL: URL) async throws -> BackupExportResult {
         guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
@@ -612,6 +617,7 @@ public final class AppState: ObservableObject {
         } else {
             appendLog("[WALLET] Backup of '\(target)' exported to \(fileURL.path), but directory persistence is unconfirmed: \(result.durabilityWarning ?? "volume unsupported")")
         }
+        return result
     }
 
     public func restoreWallet(name: String, backupFile: URL) async throws -> String {

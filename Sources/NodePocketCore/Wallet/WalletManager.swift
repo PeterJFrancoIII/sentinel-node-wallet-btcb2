@@ -198,6 +198,16 @@ public actor WalletManager {
             .appendingPathComponent("Library/Application Support/NodePocketBTCB2/backups/staging")
     }
 
+    /// Purges any abandoned staging session directories from previous unexpected terminations.
+    public func purgeStaleStagingDirectories() {
+        guard FileManager.default.fileExists(atPath: stagingDirectory.path) else { return }
+        if let items = try? FileManager.default.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil) {
+            for item in items {
+                try? FileManager.default.removeItem(at: item)
+            }
+        }
+    }
+
     public func ensureAuthenticated(capability: WalletAuthCapability?) async throws {
         if allowUnauthenticatedForTesting { return }
         guard let coordinator = self.authCoordinator else {
@@ -597,11 +607,20 @@ public actor WalletManager {
             }
         }
 
+        var dstFdClosed = false
+        func closeDstFdIfNeeded() {
+            if !dstFdClosed {
+                close(dstFd)
+                dstFdClosed = true
+            }
+        }
+        defer { closeDstFdIfNeeded() }
+
         // Anchor exact inode and device identity of the created temporary file
         var createdStat = stat()
         guard fstat(dstFd, &createdStat) == 0 else {
             let statErr = errno
-            close(dstFd)
+            closeDstFdIfNeeded()
             _ = unlinkat(parentDirFd, tempFilename, 0)
             throw WalletSecurityError.backupDestinationInvalid("Failed to fstat created temporary destination: errno \(statErr)")
         }
@@ -611,6 +630,8 @@ public actor WalletManager {
         var publishedSuccessfully = false
         defer {
             if !publishedSuccessfully {
+                // Ensure descriptor is closed before unlinking
+                closeDstFdIfNeeded()
                 // Inode-verified cleanup: ensure we only unlink the exact inode we created
                 var cleanupStat = stat()
                 if fstatat(parentDirFd, tempFilename, &cleanupStat, AT_SYMLINK_NOFOLLOW) == 0 {
@@ -623,14 +644,12 @@ public actor WalletManager {
 
         let srcFd = open(stagedBackupURL.path, O_RDONLY | O_NOFOLLOW)
         guard srcFd >= 0 else {
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("Could not open staged backup for delivery.")
         }
+        defer { close(srcFd) }
 
         let copyResult = fcopyfile(srcFd, dstFd, nil, copyfile_flags_t(COPYFILE_DATA))
-        close(srcFd)
         guard copyResult == 0 else {
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("Data copy from staging failed with code \(copyResult)")
         }
 
@@ -638,7 +657,6 @@ public actor WalletManager {
         if fcntl(dstFd, F_FULLFSYNC) != 0 {
             guard fsync(dstFd) == 0 else {
                 let syncErr = errno
-                close(dstFd)
                 throw WalletSecurityError.backupDestinationInvalid("fsync failed on temporary backup: errno \(syncErr)")
             }
         }
@@ -647,32 +665,27 @@ public actor WalletManager {
         var postStat = stat()
         guard fstat(dstFd, &postStat) == 0 else {
             let statErr = errno
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("fstat failed on temporary backup: errno \(statErr)")
         }
         let deliveredSize = Int64(postStat.st_size)
         guard deliveredSize == createdSize else {
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("Delivered backup size (\(deliveredSize)) does not match staged size (\(createdSize)).")
         }
         guard (postStat.st_mode & S_IFMT) == S_IFREG else {
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("Delivered backup is not a regular file.")
         }
         guard (postStat.st_mode & 0o777) == 0o600 else {
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("Delivered backup permissions are insecure (expected 0600).")
         }
 
         // Rewind dstFd to start and compute SHA-256 directly through the open descriptor
         guard lseek(dstFd, 0, SEEK_SET) == 0 else {
             let seekErr = errno
-            close(dstFd)
             throw WalletSecurityError.backupDestinationInvalid("lseek failed on temporary backup: errno \(seekErr)")
         }
 
         let tempDigest = try computeSHA256(fd: dstFd)
-        close(dstFd)
+        closeDstFdIfNeeded()
 
         guard tempDigest == stagedDigest else {
             throw WalletSecurityError.backupDestinationInvalid("Integrity checksum mismatch: staged=\(stagedDigest), delivered=\(tempDigest)")

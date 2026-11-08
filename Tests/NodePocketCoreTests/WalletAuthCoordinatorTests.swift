@@ -1304,6 +1304,41 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let stagingContents = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
         XCTAssertTrue(stagingContents.isEmpty, "Staging session directory must be deleted on error")
     }
+
+    func testPurgeStaleStagingDirectoriesRemovesOldSessions() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_purge_stale_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stagingDir = tempDir.appendingPathComponent("staging")
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        // Create stale session directories simulating previous crashes
+        let staleSession1 = stagingDir.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: staleSession1, withIntermediateDirectories: true)
+        try "STALE_DATA_1".write(to: staleSession1.appendingPathComponent("backup.dat"), atomically: true, encoding: .utf8)
+
+        let staleSession2 = stagingDir.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: staleSession2, withIntermediateDirectories: true)
+        try "STALE_DATA_2".write(to: staleSession2.appendingPathComponent("backup.dat"), atomically: true, encoding: .utf8)
+
+        let rpc = BitcoinRPCClient(user: "test", password: "pwd")
+        let manager = WalletManager(
+            rpcClient: rpc,
+            stagingDirectory: stagingDir
+        )
+
+        // Verify staging directory initially contains the stale directories
+        let initialItems = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
+        XCTAssertEqual(initialItems.count, 2, "Staging directory must contain the two simulated abandoned sessions")
+
+        // Execute purge
+        await manager.purgeStaleStagingDirectories()
+
+        // Assert all abandoned directories are completely purged
+        let remainingItems = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
+        XCTAssertTrue(remainingItems.isEmpty, "purgeStaleStagingDirectories must purge all abandoned session directories")
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {
