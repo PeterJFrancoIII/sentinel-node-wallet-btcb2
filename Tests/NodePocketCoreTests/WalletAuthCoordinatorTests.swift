@@ -1118,12 +1118,15 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let finalDestinationURL = destinationDir.appendingPathComponent("e2e_wallet_backup.dat")
 
         // Execute exportBackup through staging -> temp -> fcopyfile -> fsync -> renameatx_np
-        try await manager.exportBackup(to: finalDestinationURL, capability: capability, approval: approval)
+        let result = try await manager.exportBackup(to: finalDestinationURL, capability: capability, approval: approval)
 
         // 1. Verify destination file exists and contains expected mock data
         XCTAssertTrue(FileManager.default.fileExists(atPath: finalDestinationURL.path), "Final destination file must exist")
         let publishedData = try String(contentsOf: finalDestinationURL, encoding: .utf8)
         XCTAssertEqual(publishedData, "MOCK_DESCRIPTOR_WALLET_DATA_BIP110_SECURE", "Delivered backup must match staged data exactly")
+        XCTAssertEqual(result.bytesWritten, Int64(publishedData.utf8.count))
+        XCTAssertTrue(result.isDurabilityConfirmed, "Local directory must confirm directory entry durability")
+        XCTAssertFalse(result.sha256Digest.isEmpty)
 
         // 2. Verify destination permissions are 0600
         let attrs = try FileManager.default.attributesOfItem(atPath: finalDestinationURL.path)
@@ -1138,12 +1141,194 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let stagingContents = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
         XCTAssertTrue(stagingContents.isEmpty, "Staging directory must have all session directories cleaned up")
     }
+
+    func testExportBackupRPCFailureLeavesDestinationClean() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer {
+            WalletAuthCoordinator.clearTestOverrides()
+            MockBackupURLProtocol.reset()
+        }
+
+        MockBackupURLProtocol.reset()
+        MockBackupURLProtocol.simulateServerError = true
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_rpc_fail_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stagingDir = tempDir.appendingPathComponent("staging")
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockBackupURLProtocol.self]
+        let mockSession = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: 8332,
+            user: "test_op",
+            password: "test_password",
+            urlSession: mockSession
+        )
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "fail_wallet",
+            stagingDirectory: stagingDir
+        )
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "operator_fail")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        let capability = try await coordinator.enroll(
+            username: "operator_fail",
+            password: "SecurePassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "fail_wallet",
+            reason: "Testing RPC failure path"
+        )
+
+        let destinationDir = tempDir.appendingPathComponent("user_backups")
+        try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+        let finalDestinationURL = destinationDir.appendingPathComponent("fail_wallet_backup.dat")
+
+        do {
+            try await manager.exportBackup(to: finalDestinationURL, capability: capability, approval: approval)
+            XCTFail("exportBackup must throw when daemon RPC returns server error")
+        } catch {
+            // Expected
+        }
+
+        // Assert destination directory has zero files
+        let destContents = try FileManager.default.contentsOfDirectory(atPath: destinationDir.path)
+        XCTAssertTrue(destContents.isEmpty, "Destination directory must be empty after RPC error")
+
+        // Assert staging directory is cleaned up
+        let stagingContents = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
+        XCTAssertTrue(stagingContents.isEmpty, "Staging session directory must be deleted on error")
+    }
+
+    func testExportBackupEmptyStagedFileFailsClosed() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer {
+            WalletAuthCoordinator.clearTestOverrides()
+            MockBackupURLProtocol.reset()
+        }
+
+        MockBackupURLProtocol.reset()
+        MockBackupURLProtocol.mockPayload = "" // 0 bytes
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_empty_staged_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let stagingDir = tempDir.appendingPathComponent("staging")
+        try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [MockBackupURLProtocol.self]
+        let mockSession = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: 8332,
+            user: "test_op",
+            password: "test_password",
+            urlSession: mockSession
+        )
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "empty_wallet",
+            stagingDirectory: stagingDir
+        )
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "operator_empty")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        let capability = try await coordinator.enroll(
+            username: "operator_empty",
+            password: "SecurePassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "empty_wallet",
+            reason: "Testing empty staged backup path"
+        )
+
+        let destinationDir = tempDir.appendingPathComponent("user_backups")
+        try FileManager.default.createDirectory(at: destinationDir, withIntermediateDirectories: true)
+        let finalDestinationURL = destinationDir.appendingPathComponent("empty_wallet_backup.dat")
+
+        do {
+            try await manager.exportBackup(to: finalDestinationURL, capability: capability, approval: approval)
+            XCTFail("exportBackup must throw when staged backup is 0 bytes")
+        } catch let error as WalletSecurityError {
+            switch error {
+            case .backupDestinationInvalid(let reason):
+                XCTAssertTrue(reason.contains("0 bytes"), "Error reason must specify 0 bytes: \(reason)")
+            default:
+                XCTFail("Unexpected error type: \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        // Assert destination directory has zero files
+        let destContents = try FileManager.default.contentsOfDirectory(atPath: destinationDir.path)
+        XCTAssertTrue(destContents.isEmpty, "Destination directory must remain clean after empty staged backup rejection")
+
+        // Assert staging directory is cleaned up
+        let stagingContents = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
+        XCTAssertTrue(stagingContents.isEmpty, "Staging session directory must be deleted on error")
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {
+    static var mockPayload: String? = "MOCK_DESCRIPTOR_WALLET_DATA_BIP110_SECURE"
+    static var simulateServerError: Bool = false
+
+    static func reset() {
+        mockPayload = "MOCK_DESCRIPTOR_WALLET_DATA_BIP110_SECURE"
+        simulateServerError = false
+    }
+
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if MockBackupURLProtocol.simulateServerError {
+            let response = HTTPURLResponse(url: request.url!, statusCode: 500, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            let responseBody = """
+            {"result":null,"error":{"code":-1,"message":"Mock daemon error"},"id":"1"}
+            """.data(using: .utf8)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: responseBody)
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
+
         var bodyData = request.httpBody
         if bodyData == nil, let stream = request.httpBodyStream {
             stream.open()
@@ -1163,7 +1348,9 @@ final class MockBackupURLProtocol: URLProtocol {
            method == "backupwallet",
            let params = json["params"] as? [String],
            let destPath = params.first {
-            try? "MOCK_DESCRIPTOR_WALLET_DATA_BIP110_SECURE".write(toFile: destPath, atomically: true, encoding: .utf8)
+            if let payload = MockBackupURLProtocol.mockPayload {
+                try? payload.write(toFile: destPath, atomically: true, encoding: .utf8)
+            }
         }
 
         let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!

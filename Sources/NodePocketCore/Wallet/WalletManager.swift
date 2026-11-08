@@ -72,6 +72,28 @@ public struct CoinbaseRewardDetail: Sendable, Identifiable {
     }
 }
 
+public struct BackupExportResult: Sendable, Equatable {
+    public let destinationURL: URL
+    public let bytesWritten: Int64
+    public let sha256Digest: String
+    public let isDurabilityConfirmed: Bool
+    public let durabilityWarning: String?
+
+    public init(
+        destinationURL: URL,
+        bytesWritten: Int64,
+        sha256Digest: String,
+        isDurabilityConfirmed: Bool,
+        durabilityWarning: String? = nil
+    ) {
+        self.destinationURL = destinationURL
+        self.bytesWritten = bytesWritten
+        self.sha256Digest = sha256Digest
+        self.isDurabilityConfirmed = isDurabilityConfirmed
+        self.durabilityWarning = durabilityWarning
+    }
+}
+
 public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case unencryptedWalletProhibited
     case walletOnboardingRequired
@@ -91,6 +113,7 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case noWalletLoaded
     case backupDestinationAlreadyExists(String)
     case backupDestinationInvalid(String)
+    case backupDurabilityUnverified(path: String, reason: String)
     case restoreSourceNotFound(String)
     case restoreSourceEmpty(String)
     case restoreTargetWalletAlreadyExists(String)
@@ -103,6 +126,8 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
             return "A file already exists at '\(path)'. Backups will not overwrite an existing file to prevent data loss. Please choose a new, non-existent destination filename."
         case .backupDestinationInvalid(let reason):
             return "Backup destination is invalid or unverified: \(reason)"
+        case .backupDurabilityUnverified(let path, let reason):
+            return "Backup file was published to '\(path)', but storage durability could not be verified: \(reason). Do not assume power-loss persistence without volume verification."
         case .restoreSourceNotFound(let path):
             return "Backup file not found at '\(path)'."
         case .restoreSourceEmpty(let path):
@@ -493,11 +518,12 @@ public actor WalletManager {
     }
 
     /// Backs up the wallet database to an isolated, operator-specified path.
+    @discardableResult
     public func exportBackup(
         to fileURL: URL,
         capability: WalletAuthCapability? = nil,
         approval: HighRiskApproval? = nil
-    ) async throws {
+    ) async throws -> BackupExportResult {
         try await ensureAuthenticated(capability: capability)
         guard let target = currentWalletName, !target.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
@@ -557,9 +583,9 @@ public actor WalletManager {
         // 6. Secure Temporary Delivery Anchored to parentDirFd
         let finalFilename = fileURL.lastPathComponent
         let tempFilename = ".\(finalFilename).tmp.\(UUID().uuidString)"
-        let tempURL = parentDir.appendingPathComponent(tempFilename)
 
-        let dstFd = openat(parentDirFd, tempFilename, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+        // Open temporary file with O_RDWR so we can stream, flush, verify fstat, and read back for SHA256 directly on dstFd
+        let dstFd = openat(parentDirFd, tempFilename, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         if dstFd < 0 {
             let err = errno
             if err == EEXIST {
@@ -571,10 +597,27 @@ public actor WalletManager {
             }
         }
 
+        // Anchor exact inode and device identity of the created temporary file
+        var createdStat = stat()
+        guard fstat(dstFd, &createdStat) == 0 else {
+            let statErr = errno
+            close(dstFd)
+            _ = unlinkat(parentDirFd, tempFilename, 0)
+            throw WalletSecurityError.backupDestinationInvalid("Failed to fstat created temporary destination: errno \(statErr)")
+        }
+        let createdInode = createdStat.st_ino
+        let createdDev = createdStat.st_dev
+
         var publishedSuccessfully = false
         defer {
             if !publishedSuccessfully {
-                _ = unlinkat(parentDirFd, tempFilename, 0)
+                // Inode-verified cleanup: ensure we only unlink the exact inode we created
+                var cleanupStat = stat()
+                if fstatat(parentDirFd, tempFilename, &cleanupStat, AT_SYMLINK_NOFOLLOW) == 0 {
+                    if cleanupStat.st_ino == createdInode && cleanupStat.st_dev == createdDev {
+                        _ = unlinkat(parentDirFd, tempFilename, 0)
+                    }
+                }
             }
         }
 
@@ -599,15 +642,38 @@ public actor WalletManager {
                 throw WalletSecurityError.backupDestinationInvalid("fsync failed on temporary backup: errno \(syncErr)")
             }
         }
+
+        // 7. Post-Copy Integrity & Digest Verification Directly on dstFd (No Path Re-lookup)
+        var postStat = stat()
+        guard fstat(dstFd, &postStat) == 0 else {
+            let statErr = errno
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("fstat failed on temporary backup: errno \(statErr)")
+        }
+        let deliveredSize = Int64(postStat.st_size)
+        guard deliveredSize == createdSize else {
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("Delivered backup size (\(deliveredSize)) does not match staged size (\(createdSize)).")
+        }
+        guard (postStat.st_mode & S_IFMT) == S_IFREG else {
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("Delivered backup is not a regular file.")
+        }
+        guard (postStat.st_mode & 0o777) == 0o600 else {
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("Delivered backup permissions are insecure (expected 0600).")
+        }
+
+        // Rewind dstFd to start and compute SHA-256 directly through the open descriptor
+        guard lseek(dstFd, 0, SEEK_SET) == 0 else {
+            let seekErr = errno
+            close(dstFd)
+            throw WalletSecurityError.backupDestinationInvalid("lseek failed on temporary backup: errno \(seekErr)")
+        }
+
+        let tempDigest = try computeSHA256(fd: dstFd)
         close(dstFd)
 
-        // 7. Post-Copy Integrity & Digest Verification
-        let tempAttrs = try FileManager.default.attributesOfItem(atPath: tempURL.path)
-        let tempSize = (tempAttrs[.size] as? NSNumber)?.int64Value ?? 0
-        guard tempSize == createdSize else {
-            throw WalletSecurityError.backupDestinationInvalid("Delivered backup size (\(tempSize)) does not match staged size (\(createdSize)).")
-        }
-        let tempDigest = try computeSHA256(url: tempURL)
         guard tempDigest == stagedDigest else {
             throw WalletSecurityError.backupDestinationInvalid("Integrity checksum mismatch: staged=\(stagedDigest), delivered=\(tempDigest)")
         }
@@ -625,16 +691,47 @@ public actor WalletManager {
         publishedSuccessfully = true
 
         // 9. Verified Directory Durability Sync
-        // On Darwin APFS and HFS+, directory fsync returns 0.
-        // On external/network filesystems that do not support directory metadata sync (e.g. exFAT/MSDOS/SMB),
-        // fsync returns EINVAL or ENOTSUP. In those cases atomic publication has already succeeded, but
-        // directory persistence cannot be confirmed via kernel fsync. Fail closed on actual I/O errors (e.g. EIO).
-        if fsync(parentDirFd) != 0 {
+        var durabilityConfirmed = false
+        var durabilityWarning: String? = nil
+
+        if fsync(parentDirFd) == 0 {
+            durabilityConfirmed = true
+        } else {
             let syncDirErr = errno
-            if syncDirErr != EINVAL && syncDirErr != ENOTSUP && syncDirErr != EOPNOTSUPP {
-                throw WalletSecurityError.backupDestinationInvalid("Directory durability fsync failed: errno \(syncDirErr) (published but directory persistence unconfirmed)")
+            if syncDirErr == EINVAL || syncDirErr == ENOTSUP || syncDirErr == EOPNOTSUPP {
+                durabilityConfirmed = false
+                durabilityWarning = "Directory metadata persistence sync unsupported on destination volume (errno \(syncDirErr)). Backup file was published atomically to the directory catalog, but filesystem durability across power-loss cannot be confirmed."
+            } else {
+                throw WalletSecurityError.backupDurabilityUnverified(
+                    path: fileURL.path,
+                    reason: "Atomic publication succeeded, but parent directory metadata sync failed with I/O error (errno \(syncDirErr)). The file exists at '\(fileURL.path)', but power-loss durability cannot be confirmed."
+                )
             }
         }
+
+        return BackupExportResult(
+            destinationURL: fileURL,
+            bytesWritten: deliveredSize,
+            sha256Digest: tempDigest,
+            isDurabilityConfirmed: durabilityConfirmed,
+            durabilityWarning: durabilityWarning
+        )
+    }
+
+    private func computeSHA256(fd: Int32) throws -> String {
+        var hasher = SHA256()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let bytesRead = read(fd, &buffer, buffer.count)
+            if bytesRead < 0 {
+                let err = errno
+                throw WalletSecurityError.backupDestinationInvalid("Failed reading file descriptor for SHA256 computation: errno \(err)")
+            }
+            if bytesRead == 0 { break }
+            hasher.update(data: Data(buffer[0..<bytesRead]))
+        }
+        let digest = hasher.finalize()
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     private func computeSHA256(url: URL) throws -> String {

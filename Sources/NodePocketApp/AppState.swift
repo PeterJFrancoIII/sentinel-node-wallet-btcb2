@@ -606,8 +606,12 @@ public final class AppState: ObservableObject {
             throw WalletAuthError.unauthorizedHighRiskAction("Wallet selection changed during approval from '\(target)' to '\(await walletManager.currentWalletName ?? "none")'.")
         }
 
-        try await walletManager.exportBackup(to: fileURL, capability: currentSession, approval: approval)
-        appendLog("[WALLET] Successfully exported backup of '\(target)' to \(fileURL.path)")
+        let result = try await walletManager.exportBackup(to: fileURL, capability: currentSession, approval: approval)
+        if result.isDurabilityConfirmed {
+            appendLog("[WALLET] Successfully exported backup of '\(target)' to \(fileURL.path) (verified persistence, SHA-256: \(result.sha256Digest.prefix(12))...)")
+        } else {
+            appendLog("[WALLET] Backup of '\(target)' exported to \(fileURL.path), but directory persistence is unconfirmed: \(result.durabilityWarning ?? "volume unsupported")")
+        }
     }
 
     public func restoreWallet(name: String, backupFile: URL) async throws -> String {
