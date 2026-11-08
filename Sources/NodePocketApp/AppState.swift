@@ -580,16 +580,28 @@ public final class AppState: ObservableObject {
         guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
-        let target = (await walletManager.currentWalletName) ?? walletSnapshot?.name ?? "default_wallet"
+        guard let target = await walletManager.currentWalletName, !target.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
+        // Safety: Refuse to overwrite any existing file to protect operator data from destruction.
+        guard !FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
+        }
+        let initialSessionId = session.id
         let approval = try await requestHighRiskApproval(
             action: "export",
             target: target,
             reason: "Authorize exporting encrypted backup of wallet '\(target)'"
         )
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            try? FileManager.default.removeItem(at: fileURL)
+        // Verify wallet and session identity DID NOT change during async device-owner challenge
+        guard isWalletTabUnlocked, let currentSession = self.authSession, currentSession.id == initialSessionId else {
+            throw WalletAuthError.authAbortedByLock
         }
-        try await walletManager.exportBackup(to: fileURL, capability: session, approval: approval)
+        guard let currentTarget = await walletManager.currentWalletName, currentTarget == target else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Wallet selection changed during approval from '\(target)' to '\(await walletManager.currentWalletName ?? "none")'.")
+        }
+
+        try await walletManager.exportBackup(to: fileURL, capability: currentSession, approval: approval)
         appendLog("[WALLET] Successfully exported backup of '\(target)' to \(fileURL.path)")
     }
 
@@ -597,21 +609,32 @@ public final class AppState: ObservableObject {
         guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, WalletManager.isValidWalletName(trimmedName) else {
+            throw WalletSecurityError.invalidWalletName
+        }
+        guard FileManager.default.fileExists(atPath: backupFile.path) else {
+            throw WalletSecurityError.restoreSourceNotFound(backupFile.path)
+        }
+        let initialSessionId = session.id
         let approval = try await requestHighRiskApproval(
             action: "restore",
-            target: name,
-            reason: "Authorize restoring wallet '\(name)' from backup"
+            target: trimmedName,
+            reason: "Authorize restoring wallet '\(trimmedName)' from backup file '\(backupFile.lastPathComponent)'"
         )
+        guard isWalletTabUnlocked, let currentSession = self.authSession, currentSession.id == initialSessionId else {
+            throw WalletAuthError.authAbortedByLock
+        }
         let restoredName = try await walletManager.restoreWallet(
-            name: name,
+            name: trimmedName,
             backupFile: backupFile,
-            capability: session,
+            capability: currentSession,
             approval: approval
         )
         appendLog("[WALLET] Successfully restored wallet '\(restoredName)' from \(backupFile.lastPathComponent)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: session)
-        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: session)) ?? ""
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: session)) ?? []
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: currentSession)
+        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: currentSession)) ?? ""
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: currentSession)) ?? []
         return restoredName
     }
 

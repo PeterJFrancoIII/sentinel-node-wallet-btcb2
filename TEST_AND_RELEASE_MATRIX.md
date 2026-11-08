@@ -54,7 +54,7 @@ See [v13 login contract](docs/FINAL_WALLET_AUTH_V13.md) and [full production sec
 | Scenario | Required proof | Current status |
 | --- | --- | --- |
 | IOKit power state classification | Battery, Charging, AC Not Charging, Unknown, Low Power Mode | **PASS** (Swift + Python tests) |
-| Ephemeral Ultra resource bounds | `par=1`, `dbcache=128MiB`, `maxconnections=12`, `maxuploadtarget=128MiB`, `prune=2048` | **PASS** (Swift + Python tests) |
+| Ephemeral Ultra resource bounds | `par=1`, `dbcache=128MiB`, `maxconnections=4` (authoritative override replacing draft 12), `listen=0`, `maxuploadtarget=128MiB`, `prune=2048`, low CPU/IO priority | **PASS** (Swift + Python tests) |
 | Preferred profile preservation | User-selected Quiet/Balanced/Fast saved; resumes on stable AC | **PASS** (Swift + Python tests) |
 | Multi-wallet discovery & per-wallet isolation | Knots `listwalletdir` + `listwallets`, `/wallet/<name>` RPC calls | **PASS** (Swift + Python tests) |
 | Unloaded wallet stale/unavailable labeling | Shows timestamped last known or `Unavailable — Load to refresh` (never 0) | **PASS** (Swift + Python tests) |

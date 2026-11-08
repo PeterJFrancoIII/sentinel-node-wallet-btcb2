@@ -86,9 +86,27 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case forkCheckpointUnverified(Int)
     case insufficientFunds(availableSats: Int64, requiredSats: Int64)
     case passphrasesDoNotMatch
+    case noWalletLoaded
+    case backupDestinationAlreadyExists(String)
+    case backupDestinationInvalid(String)
+    case restoreSourceNotFound(String)
+    case restoreSourceEmpty(String)
+    case restoreTargetWalletAlreadyExists(String)
 
     public var errorDescription: String? {
         switch self {
+        case .noWalletLoaded:
+            return "No wallet is currently loaded in memory. Load or create an encrypted wallet first."
+        case .backupDestinationAlreadyExists(let path):
+            return "A file already exists at '\(path)'. Backups will not overwrite an existing file to prevent data loss. Please choose a new, non-existent destination filename."
+        case .backupDestinationInvalid(let reason):
+            return "Backup destination is invalid or unverified: \(reason)"
+        case .restoreSourceNotFound(let path):
+            return "Backup file not found at '\(path)'."
+        case .restoreSourceEmpty(let path):
+            return "Backup file at '\(path)' is empty (0 bytes)."
+        case .restoreTargetWalletAlreadyExists(let name):
+            return "A wallet named '\(name)' already exists. Restore will not overwrite existing wallet data. Please choose a unique target wallet name."
         case .unencryptedWalletProhibited:
             return "An encryption passphrase is required; unencrypted wallets cannot be created."
         case .walletOnboardingRequired:
@@ -138,13 +156,15 @@ public actor WalletManager {
         keychainHelper: KeychainHelper = .shared,
         addressBook: AddressBook = AddressBook(),
         authCoordinator: WalletAuthCoordinator? = nil,
-        allowUnauthenticatedForTesting: Bool = false
+        allowUnauthenticatedForTesting: Bool = false,
+        initialWalletName: String? = nil
     ) {
         self.rpcClient = rpcClient
         self.keychainHelper = keychainHelper
         self.addressBook = addressBook
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
+        self.currentWalletName = initialWalletName
     }
 
     public func ensureAuthenticated(capability: WalletAuthCapability?) async throws {
@@ -436,13 +456,31 @@ public actor WalletManager {
         approval: HighRiskApproval? = nil
     ) async throws -> String {
         try await ensureAuthenticated(capability: capability)
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, Self.isValidWalletName(trimmedName) else {
+            throw WalletSecurityError.invalidWalletName
+        }
+        guard FileManager.default.fileExists(atPath: backupFile.path) else {
+            throw WalletSecurityError.restoreSourceNotFound(backupFile.path)
+        }
+        let attrs = try FileManager.default.attributesOfItem(atPath: backupFile.path)
+        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
+        guard size > 0 else {
+            throw WalletSecurityError.restoreSourceEmpty(backupFile.path)
+        }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet restoration.")
             }
-            try await coord.consumeHighRiskApproval(app, action: "restore", target: name)
+            try await coord.consumeHighRiskApproval(app, action: "restore", target: trimmedName)
         }
-        let resp = try await rpcClient.restoreWallet(name: name, backupFile: backupFile.path)
+        let loaded = try await rpcClient.listWallets()
+        let walletDir = try await rpcClient.listWalletDir()
+        guard !loaded.contains(trimmedName),
+              !walletDir.wallets.contains(where: { $0.name == trimmedName }) else {
+            throw WalletSecurityError.restoreTargetWalletAlreadyExists(trimmedName)
+        }
+        let resp = try await rpcClient.restoreWallet(name: trimmedName, backupFile: backupFile.path)
         self.currentWalletName = resp.name
         _ = try await refreshWalletInfo(capability: capability)
         return resp.name
@@ -455,14 +493,38 @@ public actor WalletManager {
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
-        let target = currentWalletName ?? "default_wallet"
+        guard let target = currentWalletName, !target.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet backup export.")
             }
             try await coord.consumeHighRiskApproval(app, action: "export", target: target)
         }
-        try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: currentWalletName)
+        // Safety: Refuse to overwrite any existing file to protect user data from destruction
+        guard !FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
+        }
+        let parentDir = fileURL.deletingLastPathComponent()
+        guard FileManager.default.fileExists(atPath: parentDir.path) else {
+            throw WalletSecurityError.backupDestinationInvalid("Destination directory does not exist: \(parentDir.path)")
+        }
+        guard FileManager.default.isWritableFile(atPath: parentDir.path) else {
+            throw WalletSecurityError.backupDestinationInvalid("Destination directory is not writable: \(parentDir.path)")
+        }
+
+        try await rpcClient.backupWallet(destinationPath: fileURL.path, walletName: target)
+
+        // Verify backup was actually created and is non-empty
+        guard FileManager.default.fileExists(atPath: fileURL.path) else {
+            throw WalletSecurityError.backupDestinationInvalid("Backup file was not created by daemon at \(fileURL.path).")
+        }
+        let createdAttrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+        let createdSize = (createdAttrs[.size] as? NSNumber)?.int64Value ?? 0
+        guard createdSize > 0 else {
+            throw WalletSecurityError.backupDestinationInvalid("Generated backup file at \(fileURL.path) is 0 bytes.")
+        }
     }
 
     #if DEBUG

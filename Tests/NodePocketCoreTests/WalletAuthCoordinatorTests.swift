@@ -700,7 +700,8 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let manager = WalletManager(
             rpcClient: rpc,
             authCoordinator: coordinator,
-            allowUnauthenticatedForTesting: false
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "default_wallet"
         )
 
         let destURL = tempDir.appendingPathComponent("test_backup.dat")
@@ -756,23 +757,164 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         // 4. Same for restoreWallet: nil capability and nil approval must throw
         let dummyRestoreFile = tempDir.appendingPathComponent("restore.dat")
-        try "dummy".write(to: dummyRestoreFile, atomically: true, encoding: .utf8)
+        try "dummy_encrypted_data".write(to: dummyRestoreFile, atomically: true, encoding: .utf8)
 
         do {
-            _ = try await manager.restoreWallet(name: "restored", backupFile: dummyRestoreFile, capability: nil, approval: nil)
+            _ = try await manager.restoreWallet(name: "restored_wallet", backupFile: dummyRestoreFile, capability: nil, approval: nil)
             XCTFail("restoreWallet without capability must throw .unauthenticated")
         } catch let err as WalletAuthError {
             XCTAssertEqual(err, .unauthenticated)
         }
 
         do {
-            _ = try await manager.restoreWallet(name: "restored", backupFile: dummyRestoreFile, capability: capability, approval: nil)
+            _ = try await manager.restoreWallet(name: "restored_wallet", backupFile: dummyRestoreFile, capability: capability, approval: nil)
             XCTFail("restoreWallet without approval must throw .unauthorizedHighRiskAction")
         } catch let err as WalletAuthError {
             if case .unauthorizedHighRiskAction = err {
                 // Expected
             } else {
                 XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+    }
+
+    func testExportBackupRefusesDestructiveOverwriteAndGuardsTargetIdentity() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_backup_overwrite_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "safety_operator")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        let capability = try await coordinator.enroll(
+            username: "safety_operator",
+            password: "SafetyPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        let rpc = BitcoinRPCClient(user: "test", password: "pwd")
+
+        // 1. Fail closed when no wallet is loaded
+        let unselectedManager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: nil
+        )
+        let testDestURL = tempDir.appendingPathComponent("new_backup.dat")
+        let validApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "default_wallet",
+            reason: "Testing approval"
+        )
+        do {
+            try await unselectedManager.exportBackup(to: testDestURL, capability: capability, approval: validApproval)
+            XCTFail("exportBackup must fail closed when currentWalletName is nil")
+        } catch let err as WalletSecurityError {
+            if case .noWalletLoaded = err {
+                // Expected
+            } else {
+                XCTFail("Expected noWalletLoaded, got \(err)")
+            }
+        }
+
+        // 2. Refuse to overwrite existing file and PRESERVE original data intact
+        let activeManager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "protected_wallet"
+        )
+        let existingFileURL = tempDir.appendingPathComponent("existing_backup.dat")
+        let originalContent = "CRITICAL_ORIGINAL_BACKUP_DO_NOT_DESTROY"
+        try originalContent.write(to: existingFileURL, atomically: true, encoding: .utf8)
+
+        let exportApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "export",
+            target: "protected_wallet",
+            reason: "Testing overwrite protection"
+        )
+
+        do {
+            try await activeManager.exportBackup(to: existingFileURL, capability: capability, approval: exportApproval)
+            XCTFail("exportBackup must throw backupDestinationAlreadyExists when destination file exists")
+        } catch let err as WalletSecurityError {
+            if case .backupDestinationAlreadyExists = err {
+                // Expected
+            } else {
+                XCTFail("Expected backupDestinationAlreadyExists, got \(err)")
+            }
+        }
+
+        // Verify the original file was NOT deleted or modified
+        XCTAssertTrue(FileManager.default.fileExists(atPath: existingFileURL.path), "Original file must exist")
+        let preservedContent = try String(contentsOf: existingFileURL, encoding: .utf8)
+        XCTAssertEqual(preservedContent, originalContent, "Original file content must remain completely unharmed")
+
+        // 3. Restore fails closed on missing and empty backup files
+        let missingURL = tempDir.appendingPathComponent("non_existent.dat")
+        let restoreApproval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "restore",
+            target: "new_wallet",
+            reason: "Testing restore validation"
+        )
+        do {
+            _ = try await activeManager.restoreWallet(name: "new_wallet", backupFile: missingURL, capability: capability, approval: restoreApproval)
+            XCTFail("restoreWallet must throw restoreSourceNotFound for nonexistent backup")
+        } catch let err as WalletSecurityError {
+            if case .restoreSourceNotFound = err {
+                // Expected
+            } else {
+                XCTFail("Expected restoreSourceNotFound, got \(err)")
+            }
+        }
+
+        let emptyURL = tempDir.appendingPathComponent("empty_backup.dat")
+        try Data().write(to: emptyURL)
+        let restoreApproval2 = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "restore",
+            target: "new_wallet2",
+            reason: "Testing empty restore validation"
+        )
+        do {
+            _ = try await activeManager.restoreWallet(name: "new_wallet2", backupFile: emptyURL, capability: capability, approval: restoreApproval2)
+            XCTFail("restoreWallet must throw restoreSourceEmpty for 0-byte backup")
+        } catch let err as WalletSecurityError {
+            if case .restoreSourceEmpty = err {
+                // Expected
+            } else {
+                XCTFail("Expected restoreSourceEmpty, got \(err)")
+            }
+        }
+
+        // 4. Restore fails closed on invalid wallet name
+        let restoreApproval3 = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "restore",
+            target: "bad name with spaces!",
+            reason: "Testing invalid name"
+        )
+        do {
+            _ = try await activeManager.restoreWallet(name: "bad name with spaces!", backupFile: existingFileURL, capability: capability, approval: restoreApproval3)
+            XCTFail("restoreWallet must throw invalidWalletName for malformed name")
+        } catch let err as WalletSecurityError {
+            if case .invalidWalletName = err {
+                // Expected
+            } else {
+                XCTFail("Expected invalidWalletName, got \(err)")
             }
         }
     }
