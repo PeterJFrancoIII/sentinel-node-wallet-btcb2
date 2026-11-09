@@ -77,21 +77,43 @@ public final class NodeManager: @unchecked Sendable {
     public func verifyAdoptedDaemon() async -> Bool {
         guard FileManager.default.fileExists(atPath: config.dataDirectory.path) else { return false }
         let cookieFile = config.dataDirectory.appendingPathComponent(".cookie")
-        guard FileManager.default.fileExists(atPath: cookieFile.path) else { return false }
+        let confFile = config.dataDirectory.appendingPathComponent("bitcoin.conf")
+        let hasCookie = FileManager.default.fileExists(atPath: cookieFile.path)
+        let hasConf = FileManager.default.fileExists(atPath: confFile.path)
 
-        // Datadir and cookie ownership verification
+        // At least one valid authentication credential file (.cookie or bitcoin.conf) must exist
+        guard hasCookie || hasConf else { return false }
+
+        // Datadir and credential file ownership verification
         #if os(macOS)
         var dirStat = stat()
         if stat(config.dataDirectory.path, &dirStat) != 0 || dirStat.st_uid != getuid() {
             return false
         }
-        var cookieStat = stat()
-        if stat(cookieFile.path, &cookieStat) != 0 || cookieStat.st_uid != getuid() {
-            return false
+        if hasCookie {
+            var cookieStat = stat()
+            if stat(cookieFile.path, &cookieStat) != 0 || cookieStat.st_uid != getuid() {
+                return false
+            }
+        }
+        if hasConf {
+            var confStat = stat()
+            if stat(confFile.path, &confStat) != 0 || confStat.st_uid != getuid() {
+                return false
+            }
         }
         #endif
 
         // Process identity and executable provenance: PID MUST be present, alive, and end in bitcoind
+        let pidFile = config.dataDirectory.appendingPathComponent("bitcoind.pid")
+        guard FileManager.default.fileExists(atPath: pidFile.path) else { return false }
+        #if os(macOS)
+        var pidStat = stat()
+        if stat(pidFile.path, &pidStat) != 0 || pidStat.st_uid != getuid() {
+            return false
+        }
+        #endif
+
         guard let pid = readPidFile(), pid > 0, kill(pid, 0) == 0 else {
             return false
         }
@@ -410,7 +432,7 @@ public final class NodeManager: @unchecked Sendable {
             } else {
                 let isVerified = await verifyAdoptedDaemon()
                 guard isVerified else {
-                    throw RPCClientError.serializationError(
+                    throw RPCClientError.unverifiedDaemon(
                         "Cannot safely apply settings: running node daemon is unverified. " +
                         "Stop the background node manually and relaunch Sentinel Node Wallet."
                     )

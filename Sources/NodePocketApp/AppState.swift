@@ -455,7 +455,7 @@ public final class AppState: ObservableObject {
                         nodeManager.adoptRunningDaemon()
                         appendLog("[BOOTSTRAP] Verified and connected to active Knots BTCB2 daemon.")
                     } else {
-                        throw RPCClientError.serializationError(
+                        throw RPCClientError.unverifiedDaemon(
                             "An unverified process is responding on port \(nodeManager.config.rpcPort). " +
                             "Refusing to adopt an unverified daemon. Stop the external process before launching Sentinel Node Wallet."
                         )

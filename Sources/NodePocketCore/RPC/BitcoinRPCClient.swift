@@ -6,6 +6,7 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     case serverError(code: Int, message: String)
     case invalidResponse
     case serializationError(String)
+    case unverifiedDaemon(String)
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +20,8 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
             return "Invalid response from RPC server."
         case .serializationError(let msg):
             return "JSON Serialization error: \(msg)"
+        case .unverifiedDaemon(let msg):
+            return "Daemon verification rejected: \(msg)"
         }
     }
 }

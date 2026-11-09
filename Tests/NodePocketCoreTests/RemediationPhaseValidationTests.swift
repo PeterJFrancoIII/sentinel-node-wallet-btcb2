@@ -305,6 +305,57 @@ final class RemediationPhaseValidationTests: XCTestCase {
         XCTAssertFalse(verifiedDeadPid, "Adopting daemon with dead PID must fail closed")
     }
 
+    func testAdoptedDaemonVerificationFailsWithoutAnyCredentialFile() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("node_adopt_no_cred_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Write a valid live PID file pointing to current process, but NO .cookie and NO bitcoin.conf
+        let pidURL = tempDir.appendingPathComponent("bitcoind.pid")
+        try "\(getpid())\n".write(to: pidURL, atomically: true, encoding: .utf8)
+
+        let config = NodeConfig(dataDirectory: tempDir)
+        let nodeManager = NodeManager(config: config)
+
+        // Without any credential file (.cookie or bitcoin.conf), verifyAdoptedDaemon must fail closed
+        let verifiedNoCred = await nodeManager.verifyAdoptedDaemon()
+        XCTAssertFalse(verifiedNoCred, "Adopting daemon without .cookie or bitcoin.conf must fail closed")
+    }
+
+    func testAdoptedDaemonVerificationAllowsBitcoinConfCredentials() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("node_adopt_conf_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Write bitcoin.conf (no .cookie)
+        let confURL = tempDir.appendingPathComponent("bitcoin.conf")
+        try "rpcuser=u\nrpcpassword=p\n".write(to: confURL, atomically: true, encoding: .utf8)
+
+        let config = NodeConfig(dataDirectory: tempDir)
+        let nodeManager = NodeManager(config: config)
+
+        // Without bitcoind.pid, must fail closed
+        let verifiedNoPid = await nodeManager.verifyAdoptedDaemon()
+        XCTAssertFalse(verifiedNoPid, "Adopting daemon with bitcoin.conf but without bitcoind.pid must fail closed")
+
+        // With dead PID, must fail closed
+        let pidURL = tempDir.appendingPathComponent("bitcoind.pid")
+        try "99999999\n".write(to: pidURL, atomically: true, encoding: .utf8)
+        let verifiedDeadPid = await nodeManager.verifyAdoptedDaemon()
+        XCTAssertFalse(verifiedDeadPid, "Adopting daemon with dead PID must fail closed")
+    }
+
+    func testAdoptedDaemonVerificationAgainstLiveNodeIfRunning() async throws {
+        let liveDatadir = URL(fileURLWithPath: "/Users/computer/Library/Application Support/NodePocketBTCB2")
+        guard FileManager.default.fileExists(atPath: liveDatadir.appendingPathComponent("bitcoind.pid").path) else {
+            return
+        }
+        let config = NodeConfig(dataDirectory: liveDatadir)
+        let nodeManager = NodeManager(config: config)
+        let isVerified = await nodeManager.verifyAdoptedDaemon()
+        XCTAssertTrue(isVerified, "Running live daemon on host must verify and be adoptable")
+    }
+
     func testCoinbaseRewardsRequiresAuthCapabilityInProduction() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("auth_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
