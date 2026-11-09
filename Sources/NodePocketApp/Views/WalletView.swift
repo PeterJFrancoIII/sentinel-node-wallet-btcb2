@@ -73,9 +73,13 @@ public struct WalletView: View {
     @State private var showPriceOverrideSheet: Bool = false
     @State private var customPriceInput: String = ""
 
+    // Node RPC Live Status in Create Sheet
+    @State private var isCheckingRPC: Bool = false
+    @State private var isRPCOnline: Bool = false
+    @State private var rpcStatusMessage: String? = nil
+
     private var isNodeReadyForWallet: Bool {
         if case .running = state.nodeState { return true }
-        if state.blockchainInfo != nil { return true }
         return false
     }
 
@@ -1938,11 +1942,39 @@ public struct WalletView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
-            if !isNodeReadyForWallet {
-                Label("Start the BTCB2 node before creating a wallet.", systemImage: "exclamationmark.triangle")
+            // Live Node RPC Readiness Banner
+            HStack(spacing: 8) {
+                if isCheckingRPC {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Testing Bitcoin Knots RPC connectivity (127.0.0.1)…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if isRPCOnline {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(.green)
+                    Text("Node RPC Online (127.0.0.1)")
+                        .font(.caption)
+                        .foregroundColor(.green)
+                } else {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundColor(.red)
+                    Text(rpcStatusMessage ?? "Node RPC Offline. Start the BTCB2 node before creating a wallet.")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                    Spacer()
+                    Button("Retry") {
+                        Task { await checkRPCReadiness() }
+                    }
                     .font(.caption)
-                    .foregroundColor(.orange)
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                }
             }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
+            .cornerRadius(6)
 
             HStack {
                 Button("Cancel") {
@@ -1980,7 +2012,7 @@ public struct WalletView: View {
                     Task { @MainActor in
                         defer { isCreatingWallet = false }
                         do {
-                            try await state.createEncryptedWallet(
+                            let result = try await state.createEncryptedWallet(
                                 name: name, passphrase: passphrase, storeInKeychain: save
                             )
                             showCreateModal = false
@@ -1988,10 +2020,17 @@ public struct WalletView: View {
                             passphraseConfirmInput = ""
                             showWalletPassphrase = false
                             hasConfirmedOfflinePassphrase = false
-                            state.alertMessage = "Encrypted descriptor wallet created and verified. Back up the wallet database before receiving substantial funds. Its passphrase alone cannot restore the wallet."
+                            if let warning = result.keychainWarning {
+                                state.alertMessage = "Encrypted descriptor wallet '\(result.walletName)' was created and verified!\n\nNotice: \(warning)\n\nEnsure you have saved your passphrase and backed up your wallet database."
+                            } else {
+                                state.alertMessage = "Encrypted descriptor wallet '\(result.walletName)' created and verified. Back up the wallet database before receiving substantial funds. Its passphrase alone cannot restore the wallet."
+                            }
+                            state.showAlert = true
+                        } catch let creationErr as WalletCreationError {
+                            state.alertMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.showAlert = true
                         } catch {
-                            state.alertMessage = "Wallet creation was not confirmed: \(error.localizedDescription)\n\nIf Keychain storage is unavailable on this build, you may uncheck 'Save in macOS Keychain' to proceed without Keychain storage after securely recording your passphrase."
+                            state.alertMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.showAlert = true
                         }
                     }
@@ -1999,7 +2038,8 @@ public struct WalletView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
                 .disabled(
-                    isCreatingWallet || !isNodeReadyForWallet ||
+                    isCreatingWallet || isCheckingRPC || !isRPCOnline ||
+                    walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
                     passphraseInput.isEmpty || passphraseInput != passphraseConfirmInput ||
                     (!storeInKeychain && !hasConfirmedOfflinePassphrase)
                 )
@@ -2010,7 +2050,18 @@ public struct WalletView: View {
             }
         }
         .padding(24)
-        .frame(width: 520, height: 490)
+        .frame(width: 520, height: 530)
+        .task {
+            await checkRPCReadiness()
+        }
+    }
+
+    private func checkRPCReadiness() async {
+        isCheckingRPC = true
+        let (ready, status) = await state.checkRPCReadiness()
+        isRPCOnline = ready
+        rpcStatusMessage = status
+        isCheckingRPC = false
     }
 
     private var openOrRestoreWalletSheet: some View {

@@ -524,18 +524,52 @@ public final class AppState: ObservableObject {
     }
 
     /// Complete first-run wallet onboarding without restarting or resetting IBD.
+    @discardableResult
     public func createEncryptedWallet(
         name: String, passphrase: String, storeInKeychain: Bool
-    ) async throws {
-        try await walletManager.createEncryptedDescriptorWallet(
+    ) async throws -> WalletCreationResult {
+        let (rpcReady, rpcStatus) = await checkRPCReadiness()
+        guard rpcReady else {
+            throw WalletCreationError.nodeUnreachable(rpcStatus)
+        }
+
+        let result = try await walletManager.createEncryptedDescriptorWallet(
             name: name, passphrase: passphrase, storeInKeychain: storeInKeychain, capability: self.authSession
         )
-        walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
+        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
         receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         self.refreshWalletInventory()
         startupStatus = "Ready"
-        appendLog("[WALLET] Encrypted descriptor wallet '\(name)' verified and ready.")
+        appendLog("[WALLET] \(result.statusMessage)")
+        if let warn = result.keychainWarning {
+            appendLog("[KEYCHAIN] Notice: \(warn)")
+        }
+        return result
+    }
+
+    public func checkRPCReadiness() async -> (isReady: Bool, status: String) {
+        do {
+            _ = try await nodeManager.rpcClient.getNetworkInfo()
+            return (true, "Ready")
+        } catch let err as RPCClientError {
+            switch err {
+            case .serverError(let code, let msg):
+                if code == -28 {
+                    return (false, "Node is warming up: \(msg)")
+                } else if code == 401 {
+                    return (false, "RPC authentication failed (HTTP 401)")
+                } else {
+                    return (false, "RPC error (\(code)): \(msg)")
+                }
+            case .networkError(let msg):
+                return (false, "Node RPC unreachable: \(msg)")
+            default:
+                return (false, err.localizedDescription)
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
     }
 
     /// A prior attempt may have succeeded before its response was lost.

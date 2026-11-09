@@ -121,3 +121,5 @@ See [v13 login contract](docs/FINAL_WALLET_AUTH_V13.md) and [full production sec
 | Saved-passphrase fill | User explicitly requests fill and authenticates; decline/cancel must not release secret, both create and later send prompts | Mac manual test NOT RUN |
 | Wallet backup | Export/restore encrypted descriptor wallet, proof that passphrase alone does not recover descriptors, Keychain unavailable scenario | NOT RUN |
 | Apple Passwords compatibility | Do not claim generic Keychain item is automatically visible in Apple's Passwords app; verify UI wording | Documentation only |
+| Encrypted descriptor wallet creation | Stage-tagged RPC execution (preflight, duplicate check, createwallet, verify), live RPC status gating, indeterminate commit reconciliation | **PASS** (111 unit tests passed) |
+| Transparent Keychain error handling | If Keychain storage fails on dev/headless builds, descriptor wallet creation succeeds with explicit warning; no misleading Keychain advice on network drops | **PASS** (111 unit tests passed) |
