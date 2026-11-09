@@ -79,20 +79,33 @@ public final class NodeManager: @unchecked Sendable {
         let cookieFile = config.dataDirectory.appendingPathComponent(".cookie")
         guard FileManager.default.fileExists(atPath: cookieFile.path) else { return false }
 
-        // PID liveness and executable identity
-        if let pid = readPidFile() {
-            guard kill(pid, 0) == 0 else { return false }
-            #if os(macOS)
-            var pathBuffer = [CChar](repeating: 0, count: 4096)
-            let ret = pathBuffer.withUnsafeMutableBytes { ptr in
-                proc_pidpath(pid, ptr.baseAddress!, UInt32(ptr.count))
-            }
-            if ret > 0 {
-                let execPath = String(cString: pathBuffer)
-                guard execPath.hasSuffix("bitcoind") else { return false }
-            }
-            #endif
+        // Datadir and cookie ownership verification
+        #if os(macOS)
+        var dirStat = stat()
+        if stat(config.dataDirectory.path, &dirStat) != 0 || dirStat.st_uid != getuid() {
+            return false
         }
+        var cookieStat = stat()
+        if stat(cookieFile.path, &cookieStat) != 0 || cookieStat.st_uid != getuid() {
+            return false
+        }
+        #endif
+
+        // Process identity and executable provenance: PID MUST be present, alive, and end in bitcoind
+        guard let pid = readPidFile(), pid > 0, kill(pid, 0) == 0 else {
+            return false
+        }
+        #if os(macOS)
+        var pathBuffer = [CChar](repeating: 0, count: 4096)
+        let ret = pathBuffer.withUnsafeMutableBytes { ptr in
+            proc_pidpath(pid, ptr.baseAddress!, UInt32(ptr.count))
+        }
+        guard ret > 0 else { return false }
+        let execPath = String(cString: pathBuffer)
+        guard execPath.hasSuffix("/bitcoind") || execPath == "bitcoind" else {
+            return false
+        }
+        #endif
 
         // Chain identity: must be mainnet
         guard let binfo = try? await rpcClient.getBlockchainInfo(), binfo.chain == "main" else {
@@ -105,14 +118,37 @@ public final class NodeManager: @unchecked Sendable {
             return false
         }
 
-        // BTCB2 Fork Checkpoint
+        // Protocol / Service check: must report BLAKE2B? or Knots subversion
+        guard (netInfo.localservicesnames?.contains("BLAKE2B?") ?? false) || netInfo.subversion.contains("Knots") else {
+            return false
+        }
+
+        // BTCB2 Consensus Checkpoint & Pre-Fork Anchor Verification
         if binfo.blocks >= BTCB2ConsensusConstants.forkActivationHeight {
             guard let hash = try? await rpcClient.getBlockHash(height: BTCB2ConsensusConstants.forkActivationHeight),
                   hash == BTCB2ConsensusConstants.forkActivationBlockHash else {
                 return false
             }
         } else {
+            // Pre-fork chain: must verify header tree continuity and positive pre-fork consensus anchors
             guard binfo.headers >= binfo.blocks else { return false }
+            // Verify Genesis anchor (height 0)
+            guard let genesisHash = try? await rpcClient.getBlockHash(height: 0),
+                  genesisHash == "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f" else {
+                return false
+            }
+            // If blocks have reached height 800,000, verify height 800,000 anchor
+            if binfo.blocks >= 800000 {
+                guard let h800k = try? await rpcClient.getBlockHash(height: 800000),
+                      h800k == "00000000000000000002a7c4c1e48d76c5a37902165a270156b7a8d72728a054" else {
+                    return false
+                }
+            } else if binfo.blocks >= 500000 {
+                guard let h500k = try? await rpcClient.getBlockHash(height: 500000),
+                      h500k == "00000000000000000024fb37364cbf81fd49cc2d51c09c75c35433c3a1945d04" else {
+                    return false
+                }
+            }
         }
 
         return true
@@ -439,10 +475,19 @@ public final class NodeManager: @unchecked Sendable {
                     return false
                 }
             }
+            let previousPid = process?.processIdentifier ?? adoptedPid
             await stop()
             for _ in 0..<20 {
                 if state == .stopped { break }
                 try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+            guard state == .stopped else {
+                onLogMessage?("[POWER] Cannot restart for Ultra mode: previous daemon shutdown was not confirmed.")
+                throw RPCClientError.serializationError("Cannot restart for Ultra mode: previous daemon shutdown was not confirmed.")
+            }
+            if let oldPid = previousPid, kill(oldPid, 0) == 0 {
+                onLogMessage?("[POWER] Cannot restart for Ultra mode: previous daemon PID \(oldPid) is still running.")
+                throw RPCClientError.serializationError("Cannot restart for Ultra mode: previous daemon PID \(oldPid) is still running.")
             }
             try start(ultraOverride: active)
             try await waitForRPCReadiness(timeoutSeconds: 30)

@@ -588,23 +588,29 @@ public final class AppState: ObservableObject {
     }
 
     public func refreshCoinbaseRewards() {
+        guard isWalletTabUnlocked, let session = self.authSession else { return }
         let tip = blockchainInfo?.blocks ?? 0
         let inIBD = blockchainInfo?.initialblockdownload ?? false
         Task {
-            if let rewards = try? await walletManager.fetchCoinbaseRewards(currentTipHeight: tip, isIBD: inIBD) {
+            do {
+                let rewards = try await walletManager.fetchCoinbaseRewards(currentTipHeight: tip, isIBD: inIBD, capability: session)
                 await MainActor.run {
                     self.coinbaseRewards = rewards
                 }
+            } catch {
+                appendLog("[WALLET] Coinbase rewards refresh notice: \(error.localizedDescription)")
             }
         }
     }
 
     @discardableResult
-    public func exportBackup(to fileURL: URL) async throws -> BackupExportResult {
+    public func exportBackup(to fileURL: URL, walletName: String? = nil) async throws -> BackupExportResult {
         guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
-        guard let target = await walletManager.currentWalletName, !target.isEmpty else {
+        let current = await walletManager.currentWalletName
+        let target = walletName ?? current ?? ""
+        guard !target.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
         // Safety: Refuse symlinks and existing files to protect operator data from destruction or redirection.
@@ -626,11 +632,13 @@ public final class AppState: ObservableObject {
         guard isWalletTabUnlocked, let currentSession = self.authSession, currentSession.id == initialSessionId else {
             throw WalletAuthError.authAbortedByLock
         }
-        guard let currentTarget = await walletManager.currentWalletName, currentTarget == target else {
-            throw WalletAuthError.unauthorizedHighRiskAction("Wallet selection changed during approval from '\(target)' to '\(await walletManager.currentWalletName ?? "none")'.")
-        }
 
-        let result = try await walletManager.exportBackup(to: fileURL, capability: currentSession, approval: approval)
+        let result = try await walletManager.exportBackup(
+            to: fileURL,
+            targetWalletName: target,
+            capability: currentSession,
+            approval: approval
+        )
         if result.isDurabilityConfirmed {
             appendLog("[WALLET] Successfully exported backup of '\(target)' to \(fileURL.path) (verified persistence, SHA-256: \(result.sha256Digest.prefix(12))...)")
         } else {
@@ -698,9 +706,9 @@ public final class AppState: ObservableObject {
         Task { @MainActor in
             do {
                 try await walletManager.selectWallet(name: name)
-                self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-                self.receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+                self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
                 self.refreshCoinbaseRewards()
                 self.refreshFeeQuotes()
                 self.refreshWalletInventory()
@@ -768,7 +776,12 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func deleteWallet(name: String, typedConfirmation: String, verifiedBackupPath: String) {
+    public func deleteWallet(
+        name: String,
+        typedConfirmation: String,
+        verifiedBackupPath: String,
+        verifiedReceipt: VerifiedBackupReceipt? = nil
+    ) {
         Task { @MainActor in
             do {
                 let approval = try await requestHighRiskApproval(
@@ -780,6 +793,7 @@ public final class AppState: ObservableObject {
                     name: name,
                     typedConfirmation: typedConfirmation,
                     verifiedBackupPath: verifiedBackupPath,
+                    verifiedReceipt: verifiedReceipt,
                     capability: self.authSession,
                     approval: approval
                 )

@@ -29,6 +29,7 @@ public struct NetworkInfo: Codable, Sendable {
     public let connections: Int
     public let connections_in: Int?
     public let connections_out: Int?
+    public let localservicesnames: [String]?
 }
 
 public struct MempoolInfo: Codable, Sendable {

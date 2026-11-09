@@ -45,6 +45,7 @@ public struct WalletView: View {
     @State private var walletToDelete: WalletSummary? = nil
     @State private var typedDeleteName: String = ""
     @State private var deleteBackupPath: String = ""
+    @State private var deleteBackupReceipt: VerifiedBackupReceipt? = nil
     @State private var isCreatingBackupBeforeDelete: Bool = false
     @State private var deleteErrorMessage: String? = nil
     @State private var showArchivedSection: Bool = false
@@ -1179,6 +1180,7 @@ public struct WalletView: View {
                     walletToDelete = summary
                     typedDeleteName = ""
                     deleteBackupPath = ""
+                    deleteBackupReceipt = nil
                     deleteErrorMessage = nil
                     showDeleteConfirmationSheet = true
                 }) {
@@ -1245,9 +1247,10 @@ public struct WalletView: View {
                             do {
                                 let downloads = FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first!
                                 let backupFile = downloads.appendingPathComponent("Sentinel_Backup_\(name)_\(Int(Date().timeIntervalSince1970)).dat")
-                                let result = try await state.exportBackup(to: backupFile)
+                                let result = try await state.exportBackup(to: backupFile, walletName: name)
                                 if FileManager.default.fileExists(atPath: result.destinationURL.path) {
                                     deleteBackupPath = result.destinationURL.path
+                                    deleteBackupReceipt = result.receipt(for: name)
                                 }
                             } catch {
                                 deleteErrorMessage = "Backup failed: \(error.localizedDescription)"
@@ -1299,13 +1302,14 @@ public struct WalletView: View {
                     state.deleteWallet(
                         name: name,
                         typedConfirmation: typedDeleteName,
-                        verifiedBackupPath: deleteBackupPath
+                        verifiedBackupPath: deleteBackupPath,
+                        verifiedReceipt: deleteBackupReceipt
                     )
                     showDeleteConfirmationSheet = false
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
-                .disabled(typedDeleteName != (walletToDelete?.name ?? "") || deleteBackupPath.isEmpty)
+                .disabled(typedDeleteName != (walletToDelete?.name ?? "") || deleteBackupPath.isEmpty || deleteBackupReceipt == nil)
             }
         }
         .padding(20)

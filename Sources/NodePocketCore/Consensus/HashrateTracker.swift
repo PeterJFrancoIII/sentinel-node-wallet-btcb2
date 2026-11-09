@@ -133,12 +133,12 @@ public final class HashrateTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        // Deduplicate unchanged tip polling
-        if let last = samples.last, last.hash == hash || last.height == height {
+        // Deduplicate unchanged tip polling (exact same block identity)
+        if let last = samples.last, last.hash == hash && last.height == height {
             return
         }
 
-        // Handle reorgs: prune invalid branches
+        // Handle reorgs: prune invalid branches when a block at height <= current tip arrives with a different hash
         if let last = samples.last, height <= last.height {
             samples.removeAll(where: { $0.height >= height })
         }

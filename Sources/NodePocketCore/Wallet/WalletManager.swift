@@ -102,6 +102,10 @@ public struct BackupExportResult: Sendable, Equatable {
             isDurabilityConfirmed: isDurabilityConfirmed
         )
     }
+
+    public func receipt(for walletName: String) -> VerifiedBackupReceipt {
+        verifiedReceipt(for: walletName)
+    }
 }
 
 public struct VerifiedBackupReceipt: Sendable, Codable, Equatable {
@@ -247,10 +251,12 @@ public actor WalletManager {
     }
 
     /// Purges any abandoned staging session directories from previous unexpected terminations.
-    /// Strictly protects active export sessions and rejects symlink traversal.
-    public func purgeStaleStagingDirectories() {
+    /// Strictly protects active export sessions (both in-process and cross-process via advisory flock)
+    /// and rejects symlink traversal.
+    public func purgeStaleStagingDirectories(staleThresholdSeconds: TimeInterval = 0) {
         guard FileManager.default.fileExists(atPath: stagingDirectory.path) else { return }
-        if let items = try? FileManager.default.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: nil) {
+        let now = Date().timeIntervalSince1970
+        if let items = try? FileManager.default.contentsOfDirectory(at: stagingDirectory, includingPropertiesForKeys: [.contentModificationDateKey]) {
             for item in items {
                 let sessionName = item.lastPathComponent
                 if activeStagingSessionIDs.contains(sessionName) {
@@ -258,6 +264,40 @@ public actor WalletManager {
                 }
                 if (try? FileManager.default.destinationOfSymbolicLink(atPath: item.path)) != nil {
                     continue
+                }
+                // Cross-process lock verification: if .session.lock is held, another process is actively exporting
+                let lockFileURL = item.appendingPathComponent(".session.lock")
+                if FileManager.default.fileExists(atPath: lockFileURL.path) {
+                    let testFd = open(lockFileURL.path, O_RDWR | O_CLOEXEC)
+                    if testFd >= 0 {
+                        let lockRes = flock(testFd, LOCK_EX | LOCK_NB)
+                        if lockRes != 0 {
+                            // Another process actively holds this lock! Do not remove!
+                            close(testFd)
+                            continue
+                        }
+                        _ = flock(testFd, LOCK_UN)
+                        close(testFd)
+                    }
+                }
+                // Cross-process PID verification: if .session.pid exists and PID is alive, skip
+                let pidFileURL = item.appendingPathComponent(".session.pid")
+                if let pidContent = try? String(contentsOf: pidFileURL, encoding: .utf8),
+                   let pid = Int32(pidContent.trimmingCharacters(in: .whitespacesAndNewlines)),
+                   pid > 0 {
+                    if kill(pid, 0) == 0 {
+                        continue
+                    }
+                }
+                // If caller requested an age threshold, honor it
+                if staleThresholdSeconds > 0 {
+                    if let attrs = try? FileManager.default.attributesOfItem(atPath: item.path),
+                       let modDate = attrs[.modificationDate] as? Date {
+                        let age = now - modDate.timeIntervalSince1970
+                        if age < staleThresholdSeconds {
+                            continue
+                        }
+                    }
                 }
                 try? FileManager.default.removeItem(at: item)
             }
@@ -629,11 +669,13 @@ public actor WalletManager {
     @discardableResult
     public func exportBackup(
         to fileURL: URL,
+        targetWalletName: String? = nil,
         capability: WalletAuthCapability? = nil,
         approval: HighRiskApproval? = nil
     ) async throws -> BackupExportResult {
         try await ensureAuthenticated(capability: capability)
-        guard let target = currentWalletName, !target.isEmpty else {
+        let target = targetWalletName ?? currentWalletName ?? ""
+        guard !target.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
         if !allowUnauthenticatedForTesting {
@@ -666,7 +708,29 @@ public actor WalletManager {
 
         let sessionStagingDir = stagingDirectory.appendingPathComponent(sessionID)
         try FileManager.default.createDirectory(at: sessionStagingDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        defer { try? FileManager.default.removeItem(at: sessionStagingDir) }
+
+        // Hold advisory cross-process flock on .session.lock
+        let lockFileURL = sessionStagingDir.appendingPathComponent(".session.lock")
+        let lockFd = open(lockFileURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        if lockFd >= 0 {
+            _ = flock(lockFd, LOCK_EX)
+            let pidStr = "\(getpid())\n"
+            let pidFileURL = sessionStagingDir.appendingPathComponent(".session.pid")
+            try? pidStr.write(to: pidFileURL, atomically: true, encoding: .utf8)
+        }
+        defer {
+            if lockFd >= 0 {
+                _ = flock(lockFd, LOCK_UN)
+                close(lockFd)
+            }
+            try? FileManager.default.removeItem(at: sessionStagingDir)
+        }
+
+        // Ensure target wallet is loaded in daemon
+        let loaded = try? await rpcClient.listWallets()
+        if loaded?.contains(target) == false {
+            _ = try? await rpcClient.loadWallet(name: target)
+        }
 
         let stagedBackupURL = sessionStagingDir.appendingPathComponent("backup.dat")
         try await rpcClient.backupWallet(destinationPath: stagedBackupURL.path, walletName: target)

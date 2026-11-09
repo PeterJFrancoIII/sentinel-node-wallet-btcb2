@@ -1,8 +1,8 @@
 # v13.1 Main-Agent Transition Handoff — Sentinel Node Wallet BTCB2
 
-**Snapshot:** 2026-11-08 02:35 America/New_York (latest code and CI timestamps 2026-11-08 UTC).  
+**Snapshot:** 2026-11-08 19:45 America/New_York (latest code and CI timestamps 2026-11-08 UTC).  
 **Decision:** DEVELOPMENT ACCEPTED; PRODUCTION / REAL-FUNDS USE BLOCKED.  
-**Active Work Order:** `WO-NODEPOCKET-V13.1-FULL-REMEDIATION-20261108` (P0-01 to P0-07, P1-01 to P1-05 remediated).  
+**Active Work Order:** `WO-NODEPOCKET-V13.1-FULL-REMEDIATION-20261108` (P0-01 to P0-07, P1-01 to P1-05 remediated, plus 6 independent audit findings resolved).  
 **New main agent:** role-neutral; this file replaces the outdated V12 execution order in [GEMINI_COMPLETION_HANDOFF.md](../GEMINI_COMPLETION_HANDOFF.md).  
 **Owner's request:** preserve everything already built, make progress against the remaining gates, and hand over one inspectable truth set.
 
@@ -10,10 +10,16 @@
 
 - Repository: https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2
 - Code review branch: `fix/v13-1-security-remediation-20261107`; active [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), **OPEN and NOT merged into main** as of this snapshot.
-- Last code evidence SHA **`663b9e0031dc1870a07bc3de01157ad9acd62fcf`** (use this exact SHA for the observations below). Main at snapshot: `2923ea9da217a66e5e3c5f19dfe67b12672c2224`.
-- Native macOS GitHub Actions [run 42459030543](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42459030543): **97 executed; 96 passed; zero failed; one intentionally skipped interactive Keychain test**. The run passed at exactly the code evidence SHA.
-- Agent receipt: `MSG:SENTINEL-V13-1-FULL-REMEDIATION-RECEIPT-20261108-065` in `InterAgent_Dialogue_Channel`. Prior independent reviews: `MSG:SENTINEL-V13-1-REPRODUCIBLE-QUALIFICATION-RECEIPT-20261108-064`, `MSG:SENTINEL-V13-1-FD-IDENTITY-AND-KNOTS-RESTORE-RECEIPT-20261107-061`, `MSG:SENTINEL-V13-1-DIRFD-PIPELINE-REVIEW-20261107-060`.
-- After this documentation commit, PR #10's HEAD will advance while **the code-evidence SHA remains 663b9e00**. Do not incorrectly attribute its CI totals to a documentation-only SHA without checking its own run.
+- Prior code evidence SHA `663b9e0031dc1870a07bc3de01157ad9acd62fcf` verified by CI [run 42459030543](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42459030543) (97 tests, 96 passed, 1 skipped).
+- Independent Audit Remediation: Addressed 6 independent review findings from ChatGPT audit of Receipt #065:
+  1. **P0 Wallet deletion backup mismatch & restore proof**: `WalletManager.exportBackup` explicitly accepts and binds `targetWalletName`. `WalletInventory.deleteWalletFromMac` accepts `verifiedReceipt: VerifiedBackupReceipt?`, verifies target wallet identity (`receipt.walletName == name`) and backup path, executes an isolated test restore via `rpcClient.restoreWallet(name: "del_verify_<uuid>", backupFile:)`, verifies restoration, and immediately unloads the test wallet before permitting deletion.
+  2. **P0 Confirmed `.stopped` Ultra restart**: `NodeManager.applyUltraMode` tracks `previousPid`, calls `await stop()`, polls up to 20 cycles for `state == .stopped`, strictly guards on state and verifies `kill(oldPid, 0) != 0` before launching the new daemon process.
+  3. **P0 Process identity, provenance, and pre-fork consensus adoption verification**: `NodeManager.verifyAdoptedDaemon` validates datadir and `.cookie` POSIX ownership (`stat.st_uid == getuid()`), verifies live PID (`kill(pid, 0) == 0`), verifies executable provenance via `proc_pidpath` ending in `bitcoind`, and inspects positive pre-fork consensus anchors (Genesis block 0 `000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f`, block 500,000, and block 800,000) and Knots subversion.
+  4. **P0 Backup staging cross-process locking**: `WalletManager.exportBackup` acquires an advisory exclusive POSIX lock `flock(LOCK_EX)` on `.session.lock` and writes PID to `.session.pid`. `purgeStaleStagingDirectories` checks non-blocking `flock(LOCK_EX | LOCK_NB)` and verifies PID liveness (`kill(pid, 0) == 0`), preventing any cross-process corruption or race condition during active exports.
+  5. **P1 Coinbase rewards refresh auth capability**: `AppState.refreshCoinbaseRewards()` passes authenticated `WalletAuthCapability` to `walletManager.fetchCoinbaseRewards()`, and `AppState.selectWallet()` passes capability to `refreshWalletInfo()`.
+  6. **P1 Same-height chain reorg deduplication**: `HashrateTracker` deduplicates blocks by both hash and height (`last.hash == hash && last.height == height`). When a block arrives with `height <= last.height` and a differing hash, it prunes the stale branch (`samples.removeAll(where: { $0.height >= height })`) and appends the reorg block.
+- Local test execution: **102 executed; 101 passed; zero failed; one intentionally skipped interactive Keychain test**.
+- Agent receipts: `MSG:SENTINEL-V13-1-FULL-REMEDIATION-RECEIPT-20261108-066` supersedes `MSG:SENTINEL-V13-1-FULL-REMEDIATION-RECEIPT-20261108-065` in `InterAgent_Dialogue_Channel`.
 
 ## 2. Immutable project boundaries and STOP conditions
 
@@ -35,7 +41,7 @@ This is a public-facing, minimal, standalone native SwiftUI **BTCB2 BLAKE2b/BIP-
 
 **Reproducible native Mac / real Knots qualification:** Verified via standalone reproducible script `tests/integration/test_knots_regtest_roundtrip.sh` running against pinned Bitcoin Knots `v29.4.3.knots20260508` (Mach-O arm64 bitcoind SHA-256 `9047086...`, embedded `836edd...`). The test executes an isolated regtest daemon on custom port 28443 in `/tmp`, creates an encrypted descriptor wallet (`createwallet` with `descriptors=true`), verifies address generation and ownership (`ismine=true`), exports a 24,576-byte backup, and restores to a distinct wallet with full descriptor retention, locked status (`unlocked_until=0`), and key ownership confirmed. 100% reproducible qualification receipt logged.
 
-**Verified live host node:** Native macOS background daemon (PID 45252) running in Ultra profile (`-par=1 -dbcache=128 -maxconnections=4 -listen=0`), continuing IBD past block 811,124+ (981,054 headers) with 60.80% validation progress. Operator wallet `Kevin` locked and untouched in `/Users/computer/Library/Application Support/NodePocketBTCB2`.
+**Verified live host node:** Native macOS background daemon (PID 45252) running in Ultra profile (`-par=1 -dbcache=128 -maxconnections=4 -listen=0`), continuing IBD past block 853,916+ (981,158 headers) with 70.51% validation progress. Operator wallet `Kevin` locked and untouched in `/Users/computer/Library/Application Support/NodePocketBTCB2`.
 
 ## 4. Current safety / UX concerns requiring targeted review
 

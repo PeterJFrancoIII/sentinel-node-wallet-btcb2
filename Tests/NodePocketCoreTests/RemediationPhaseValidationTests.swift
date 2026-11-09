@@ -187,4 +187,143 @@ final class RemediationPhaseValidationTests: XCTestCase {
         XCTAssertEqual(snapshot.freeDiskGB, -1.0)
         XCTAssertFalse(snapshot.isDiskSpaceLow, "Unknown disk space must not trigger low space alarm")
     }
+
+    // MARK: - Independent Review Verification Tests (Finding 1 to Finding 6)
+
+    func testHashrateTrackerSameHeightReorganization() {
+        let tracker = HashrateTracker(windowSize: 10)
+        let targetHex = "00000000ffff0000000000000000000000000000000000000000000000000000"
+
+        // Add block 100 on Chain A
+        tracker.addBlock(height: 100, hash: "hash100_chainA", timestamp: 1000, targetHex: targetHex)
+        XCTAssertEqual(tracker.generateReport(now: 1050).sampleCount, 1)
+
+        // Duplicate polling on Chain A -> deduplicated
+        tracker.addBlock(height: 100, hash: "hash100_chainA", timestamp: 1005, targetHex: targetHex)
+        XCTAssertEqual(tracker.generateReport(now: 1050).sampleCount, 1)
+
+        // Same-height reorganization: competing block 100 on Chain B arrives with different hash
+        tracker.addBlock(height: 100, hash: "hash100_chainB", timestamp: 1010, targetHex: targetHex)
+        let report = tracker.generateReport(now: 1050)
+        XCTAssertEqual(report.sampleCount, 1, "Same-height reorg must replace the prior tip rather than ignoring it")
+
+        // Progress continues on Chain B
+        tracker.addBlock(height: 101, hash: "hash101_chainB", timestamp: 1610, targetHex: targetHex)
+        let nextReport = tracker.generateReport(now: 1650)
+        XCTAssertEqual(nextReport.sampleCount, 2)
+        XCTAssertEqual(nextReport.validIntervalCount, 1)
+    }
+
+    func testStagingDirectoryCrossProcessLockProtectsActiveExports() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("cross_proc_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "u", password: "p")
+        let manager = WalletManager(rpcClient: rpc, stagingDirectory: tempDir)
+
+        let sessionDir = tempDir.appendingPathComponent("external_active_session")
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+        let lockFileURL = sessionDir.appendingPathComponent(".session.lock")
+        let lockFd = open(lockFileURL.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        XCTAssertTrue(lockFd >= 0)
+        XCTAssertEqual(flock(lockFd, LOCK_EX), 0, "Must acquire exclusive advisory flock")
+
+        // Try purging stale directories: the active locked session MUST NOT be removed!
+        await manager.purgeStaleStagingDirectories()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sessionDir.path), "Actively locked cross-process staging session must never be purged")
+
+        // Unlock and close lockFd
+        XCTAssertEqual(flock(lockFd, LOCK_UN), 0)
+        close(lockFd)
+
+        // Now purging should safely clean up the orphaned session
+        await manager.purgeStaleStagingDirectories()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: sessionDir.path), "Unlocked orphaned session directory must be purged")
+    }
+
+    func testWalletDeletionRejectsMismatchedReceiptTarget() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("del_receipt_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "u", password: "p")
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, allowUnauthenticatedForTesting: true)
+
+        let backupFile = tempDir.appendingPathComponent("test_backup.dat")
+        let sqliteMagic = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
+        var validData = sqliteMagic
+        validData.append(Data(repeating: 0x00, count: 2048))
+        try validData.write(to: backupFile)
+
+        let mismatchedReceipt = VerifiedBackupReceipt(
+            walletName: "different_wallet_name",
+            backupPath: backupFile.path,
+            sha256Digest: "abcd1234abcd1234",
+            bytesWritten: Int64(validData.count),
+            isDurabilityConfirmed: true
+        )
+
+        do {
+            try await inventory.deleteWalletFromMac(
+                name: "wallet_to_delete",
+                typedConfirmation: "wallet_to_delete",
+                verifiedBackupPath: backupFile.path,
+                verifiedReceipt: mismatchedReceipt
+            )
+            XCTFail("Must reject wallet deletion when backup receipt is bound to a different wallet")
+        } catch let err as WalletInventoryError {
+            if case .backupIdentityMismatch(let expected, let got) = err {
+                XCTAssertEqual(expected, "wallet_to_delete")
+                XCTAssertEqual(got, "different_wallet_name")
+            } else {
+                XCTFail("Expected backupIdentityMismatch, got: \(err)")
+            }
+        }
+    }
+
+    func testAdoptedDaemonVerificationRequiresLiveBitcoindPid() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("node_adopt_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Create .cookie
+        let cookieURL = tempDir.appendingPathComponent(".cookie")
+        try "__cookie__:secret".write(to: cookieURL, atomically: true, encoding: .utf8)
+
+        let config = NodeConfig(dataDirectory: tempDir)
+        let nodeManager = NodeManager(config: config)
+
+        // Without bitcoind.pid, verifyAdoptedDaemon must fail closed
+        let verifiedNoPid = await nodeManager.verifyAdoptedDaemon()
+        XCTAssertFalse(verifiedNoPid, "Adopting daemon without verified PID must fail closed")
+
+        // With dead PID, verifyAdoptedDaemon must fail closed
+        let pidURL = tempDir.appendingPathComponent("bitcoind.pid")
+        try "99999999\n".write(to: pidURL, atomically: true, encoding: .utf8)
+        let verifiedDeadPid = await nodeManager.verifyAdoptedDaemon()
+        XCTAssertFalse(verifiedDeadPid, "Adopting daemon with dead PID must fail closed")
+    }
+
+    func testCoinbaseRewardsRequiresAuthCapabilityInProduction() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("auth_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "u", password: "p")
+        let coord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let manager = WalletManager(
+            rpcClient: rpc,
+            authCoordinator: coord,
+            allowUnauthenticatedForTesting: false
+        )
+
+        // Without capability in production, fetchCoinbaseRewards must fail
+        do {
+            _ = try await manager.fetchCoinbaseRewards(currentTipHeight: 1000, capability: nil)
+            XCTFail("fetchCoinbaseRewards must fail without authentication capability in production")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .unauthenticated)
+        }
+    }
 }

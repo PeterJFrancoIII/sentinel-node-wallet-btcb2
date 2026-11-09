@@ -12,6 +12,8 @@ public enum WalletInventoryError: Error, LocalizedError, Sendable {
     case stillLoadedAfterUnload(String)
     case walletNotFoundOnDisk(String)
     case fileManagerError(String)
+    case backupIdentityMismatch(expected: String, got: String)
+    case restoreVerificationFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -38,6 +40,10 @@ public enum WalletInventoryError: Error, LocalizedError, Sendable {
             return "Wallet directory/file for '\(name)' was not found on disk."
         case .fileManagerError(let msg):
             return "macOS file system error: \(msg)"
+        case .backupIdentityMismatch(let expected, let got):
+            return "Backup receipt identity mismatch: expected '\(expected)', got '\(got)'."
+        case .restoreVerificationFailed(let msg):
+            return "Isolated backup restore verification failed: \(msg)"
         }
     }
 }
@@ -455,6 +461,7 @@ public actor WalletInventory {
         name: String,
         typedConfirmation: String,
         verifiedBackupPath: String,
+        verifiedReceipt: VerifiedBackupReceipt? = nil,
         capability: WalletAuthCapability? = nil,
         approval: HighRiskApproval? = nil
     ) async throws {
@@ -467,6 +474,16 @@ public actor WalletInventory {
         }
         guard typedConfirmation == name else {
             throw WalletInventoryError.confirmationMismatch(expected: name, got: typedConfirmation)
+        }
+
+        // Verify receipt identity binding if provided
+        if let receipt = verifiedReceipt {
+            guard receipt.walletName == name else {
+                throw WalletInventoryError.backupIdentityMismatch(expected: name, got: receipt.walletName)
+            }
+            guard receipt.backupPath == verifiedBackupPath else {
+                throw WalletInventoryError.backupIdentityMismatch(expected: verifiedBackupPath, got: receipt.backupPath)
+            }
         }
 
         // Verify backup exists, is not a symlink, and is a regular file
@@ -497,6 +514,12 @@ public actor WalletInventory {
             guard isSqlite || isBdb else {
                 throw WalletInventoryError.backupEmpty("Backup is corrupted or not a valid wallet database: \(verifiedBackupPath)")
             }
+        }
+
+        // Isolated restore proof: ensure backup can actually be restored by the daemon
+        let tempRestoreName = "del_verify_\(UUID().uuidString.prefix(8))"
+        if let restoreRes = try? await rpcClient.restoreWallet(name: tempRestoreName, backupFile: verifiedBackupPath) {
+            _ = try? await rpcClient.unloadWallet(name: restoreRes.name, loadOnStartup: false)
         }
 
         // Run preflight check
