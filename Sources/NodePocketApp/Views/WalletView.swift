@@ -67,9 +67,15 @@ public struct WalletView: View {
     @State private var enrollTotpCode: String = ""
     @State private var isAuthActionInProgress: Bool = false
     @State private var authLocalError: String? = nil
+    @State private var showEnrollmentCard: Bool = false
+
+    // Price Service & Override Sheet
+    @State private var showPriceOverrideSheet: Bool = false
+    @State private var customPriceInput: String = ""
 
     private var isNodeReadyForWallet: Bool {
         if case .running = state.nodeState { return true }
+        if state.blockchainInfo != nil { return true }
         return false
     }
 
@@ -90,10 +96,11 @@ public struct WalletView: View {
         }
         .onAppear {
             state.refreshAuthState()
-            if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? "" }
+            if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? "" }
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
+            Task { await state.refreshPrice() }
         }
         .onChange(of: state.nodeState) { _ in
             state.refreshWalletInventory()
@@ -106,6 +113,9 @@ public struct WalletView: View {
                 loginPassword = ""
                 loginTotpCode = ""
                 loginRecoveryCode = ""
+            } else {
+                state.refreshWalletInventory()
+                Task { await state.refreshPrice() }
             }
         }
         .sheet(isPresented: $showPreviewSheet) {
@@ -122,6 +132,9 @@ public struct WalletView: View {
         }
         .sheet(isPresented: $showDeleteConfirmationSheet) {
             deleteWalletSheet
+        }
+        .sheet(isPresented: $showPriceOverrideSheet) {
+            priceOverrideSheet
         }
     }
 
@@ -211,6 +224,9 @@ public struct WalletView: View {
                     .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.08)))
                 }
 
+                // Live BTCB2 Exchange Pricing (Neoxa & NonKYC)
+                priceBannerView
+
                 // All Discovered Wallets Inventory Section
                 walletInventorySection
 
@@ -225,9 +241,17 @@ public struct WalletView: View {
                             Text(String(format: "%.8f BTCB2", state.walletSnapshot?.trustedBalance ?? 0.0))
                                 .font(.system(size: 34, weight: .bold, design: .monospaced))
 
-                            Text("\(SatoshiMath.formatSats(state.walletSnapshot?.trustedBalanceSats ?? 0)) sats")
-                                .font(.system(size: 13, weight: .medium, design: .monospaced))
-                                .foregroundColor(.secondary)
+                            HStack(spacing: 8) {
+                                Text("\(SatoshiMath.formatSats(state.walletSnapshot?.trustedBalanceSats ?? 0)) sats")
+                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+
+                                if state.priceState.effectivePrice > 0 {
+                                    Text("• ≈ \(state.priceState.formatFiat(satoshis: state.walletSnapshot?.trustedBalanceSats ?? 0))")
+                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.primary)
+                                }
+                            }
                         }
 
                         Spacer()
@@ -672,7 +696,7 @@ public struct WalletView: View {
                 .frame(maxWidth: 480)
             }
 
-            if !state.isAuthEnrolled {
+            if !state.isAuthEnrolled || showEnrollmentCard {
                 enrollmentCard
             } else {
                 loginCard
@@ -684,11 +708,31 @@ public struct WalletView: View {
 
     private var enrollmentCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("First-Time Operator Setup")
-                .font(.headline)
-            Text("Create a unique local username and strong password (min 10 chars, uppercase, lowercase, number, special character).")
-                .font(.caption)
-                .foregroundColor(.secondary)
+            HStack {
+                Text(state.isAuthEnrolled ? "Add Additional Operator Account" : "First-Time Operator Setup")
+                    .font(.headline)
+                Spacer()
+                if state.isAuthEnrolled {
+                    Button("Cancel / Return to Sign-In") {
+                        showEnrollmentCard = false
+                        authLocalError = nil
+                        enrollUsername = ""
+                        enrollPassword = ""
+                        enrollTotpCode = ""
+                        state.cancelEnrollment()
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundColor(.blue)
+                    .font(.caption)
+                }
+            }
+
+            Text(state.isAuthEnrolled
+                ? "Enroll an additional local operator account with an independent username, strong password, and 2FA credentials."
+                : "Create a unique local username and strong password (min 10 chars, uppercase, lowercase, number, special character)."
+            )
+            .font(.caption)
+            .foregroundColor(.secondary)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text("Username").font(.caption).bold()
@@ -822,10 +866,12 @@ public struct WalletView: View {
                     defer { isAuthActionInProgress = false }
                     do {
                         try await state.enrollUser(password: enrollPassword, totpCode: enrollTotpCode)
+                        enrollUsername = ""
                         enrollPassword = ""
                         enrollTotpCode = ""
                         showEnrollmentPassword = false
                         hasStoredRecoveryCodesOffline = false
+                        showEnrollmentCard = false
                     } catch {
                         authLocalError = error.localizedDescription
                     }
@@ -834,7 +880,7 @@ public struct WalletView: View {
                 if isAuthActionInProgress {
                     ProgressView().controlSize(.small)
                 } else {
-                    Text("Complete Enrollment & Unlock")
+                    Text(state.isAuthEnrolled ? "Complete Operator Enrollment" : "Complete Enrollment & Unlock")
                 }
             }
             .buttonStyle(.borderedProminent)
@@ -847,17 +893,43 @@ public struct WalletView: View {
 
     private var loginCard: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Operator Sign-In")
-                .font(.headline)
+            HStack {
+                Text("Operator Sign-In")
+                    .font(.headline)
+                Spacer()
+                Button("+ Add Operator Account") {
+                    showEnrollmentCard = true
+                    authLocalError = nil
+                    enrollUsername = ""
+                    enrollPassword = ""
+                    enrollTotpCode = ""
+                    state.cancelEnrollment()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
 
             if !showRecoveryLogin {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Username").font(.caption).bold()
-                    TextField("Username", text: $loginUsername)
-                        .textContentType(.username)
-                        .autocorrectionDisabled(true)
-                        .textFieldStyle(.roundedBorder)
-                        .accessibilityIdentifier("user-login-name")
+                if state.enrolledUsernames.count > 1 {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Select Operator Account").font(.caption).bold()
+                        Picker("Account", selection: $loginUsername) {
+                            ForEach(state.enrolledUsernames, id: \.self) { u in
+                                Text(u).tag(u)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity)
+                    }
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Username").font(.caption).bold()
+                        TextField("Username", text: $loginUsername)
+                            .textContentType(.username)
+                            .autocorrectionDisabled(true)
+                            .textFieldStyle(.roundedBorder)
+                            .accessibilityIdentifier("user-login-name")
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -883,7 +955,7 @@ public struct WalletView: View {
                         .accessibilityIdentifier("user-login-totp")
                 }
 
-                Button("Fill from Apple Passwords…") {
+                Button(action: {
                     // macOS controls user consent and any Touch ID or Mac-password prompt.
                     // A signed webcredentials associated domain is required before access.
                     let picker = AppleSavedPasswordCoordinator()
@@ -899,6 +971,11 @@ public struct WalletView: View {
                     }
                     appleSavedPasswordCoordinator = picker
                     picker.requestSavedLogin()
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "key.horizontal.fill")
+                        Text("Fill from Apple Passwords…")
+                    }
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("user-login-apple-passwords")
@@ -1136,6 +1213,11 @@ public struct WalletView: View {
                     Text("Total: \(summary.totalBTCB2) BTCB2 (\(SatoshiMath.formatSats(summary.totalSats)) sats)")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    if state.priceState.effectivePrice > 0 {
+                        Text("• ≈ \(state.priceState.formatFiat(satoshis: summary.totalSats))")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 Text("Spendable: \(summary.spendableBTCB2) • Pending: \(summary.pendingBTCB2) • Immature: \(summary.immatureBTCB2)")
@@ -1337,9 +1419,16 @@ public struct WalletView: View {
                 .foregroundColor(.secondary)
             Text(String(format: "%.8f BTCB2", amount))
                 .font(.system(size: 13, weight: .semibold, design: .monospaced))
-            Text("\(SatoshiMath.formatSats(sats)) sats")
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundColor(.secondary)
+            HStack(spacing: 6) {
+                Text("\(SatoshiMath.formatSats(sats)) sats")
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.secondary)
+                if state.priceState.effectivePrice > 0 {
+                    Text("• ≈ \(state.priceState.formatFiat(satoshis: sats))")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(.secondary)
+                }
+            }
         }
     }
 
@@ -1428,6 +1517,11 @@ public struct WalletView: View {
                 Text("\(SatoshiMath.formatSats(SatoshiMath.toSats(btc: tx.amount))) sats")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.secondary)
+                if state.priceState.effectivePrice > 0 {
+                    Text("≈ \(state.priceState.formatFiat(btc: abs(tx.amount)))")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .padding(8)
@@ -2103,5 +2197,191 @@ public struct WalletView: View {
                 selectedWalletToOpen = loaded.first ?? onDisk.first ?? ""
             }
         }
+    }
+
+    // MARK: - BTCB2 Exchange Pricing UI
+
+    private var priceBannerView: some View {
+        HStack(spacing: 12) {
+            // Price display with status circle
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(state.priceState.isOverridden ? Color.orange : (state.priceState.isStale ? Color.yellow : Color.green))
+                    .frame(width: 8, height: 8)
+
+                Text("BTCB2 Price:")
+                    .font(.caption)
+                    .bold()
+                    .foregroundColor(.secondary)
+
+                if state.priceState.effectivePrice > 0 {
+                    Text(String(format: "$%.2f %@", state.priceState.effectivePrice, state.priceState.effectiveCurrency))
+                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                } else {
+                    Text("Connecting…")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Text("(\(state.priceState.effectiveSource))")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            // Exchange comparison
+            HStack(spacing: 8) {
+                if let n = state.priceState.neoxaQuote {
+                    Text("Neoxa: $\(String(format: "%.2f", n.price))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                if let nk = state.priceState.nonKycQuote {
+                    Text("NonKYC: $\(String(format: "%.2f", nk.price))")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            // Refresh button
+            Button(action: {
+                Task { await state.refreshPrice() }
+            }) {
+                if state.isFetchingPrice {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.caption)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .help("Refresh live prices from Neoxa and NonKYC")
+
+            // Price Override button
+            Button(action: {
+                customPriceInput = state.priceState.customPrice != nil ? String(format: "%.2f", state.priceState.customPrice!) : ""
+                showPriceOverrideSheet = true
+            }) {
+                HStack(spacing: 4) {
+                    Image(systemName: "slider.horizontal.3")
+                    Text(state.priceState.isOverridden ? "Override: Active" : "Override Price")
+                }
+                .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+    }
+
+    private var priceOverrideSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("BTCB2 Exchange Price & Manual Override")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    showPriceOverrideSheet = false
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Text("The wallet connects to Neoxa and NonKYC exchange APIs to determine the current highest market price in USD/USDC/USDT. If APIs are missing, unreachable, or stale, you can set a custom price override.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            // Market quotes status
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Live Market Feeds").font(.caption).bold()
+
+                HStack {
+                    Text("Neoxa (BTCB2_USDC):")
+                        .font(.caption)
+                    Spacer()
+                    if let q = state.priceState.neoxaQuote {
+                        Text(String(format: "$%.2f USDC", q.price))
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    } else {
+                        Text("No response / unavailable")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                HStack {
+                    Text("NonKYC (BTCB2_USDT):")
+                        .font(.caption)
+                    Spacer()
+                    if let q = state.priceState.nonKycQuote {
+                        Text(String(format: "$%.2f USDT", q.price))
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                    } else {
+                        Text("No response / unavailable")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                Divider()
+
+                HStack {
+                    Text("Highest Market Price:")
+                        .font(.caption).bold()
+                    Spacer()
+                    if state.priceState.highestMarketPrice > 0 {
+                        Text(String(format: "$%.2f %@ (Source: %@)", state.priceState.highestMarketPrice, state.priceState.highestMarketCurrency, state.priceState.highestMarketSource))
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(.green)
+                    } else {
+                        Text("None available")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+
+            // Manual override section
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Custom Price Override").font(.caption).bold()
+                Text("Enter a custom price in USD per 1 BTCB2 to calculate fiat equivalents throughout the wallet:")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+
+                HStack(spacing: 8) {
+                    TextField("e.g. 286.50", text: $customPriceInput)
+                        .textFieldStyle(.roundedBorder)
+
+                    Button("Apply Override") {
+                        if let val = Double(customPriceInput), val > 0 {
+                            state.setPriceOverride(price: val)
+                            showPriceOverrideSheet = false
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(Double(customPriceInput) == nil || Double(customPriceInput)! <= 0)
+
+                    if state.priceState.isOverridden {
+                        Button("Reset to Live Market") {
+                            state.clearPriceOverride()
+                            customPriceInput = ""
+                            showPriceOverrideSheet = false
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+
+            Spacer()
+        }
+        .padding(20)
+        .frame(width: 480, height: 380)
     }
 }

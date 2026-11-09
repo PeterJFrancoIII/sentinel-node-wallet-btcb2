@@ -37,6 +37,14 @@ public final class AppState: ObservableObject {
     private var lastPowerTransitionTime: Date = Date()
     private var isEvaluatingPower: Bool = false
 
+    // Navigation Tab
+    @Published public var selectedTab: AppViewTab = .node
+
+    // Live BTCB2 Exchange Pricing (Neoxa & NonKYC)
+    public let priceService: BTCB2PriceService = BTCB2PriceService.shared
+    @Published public var priceState: BTCB2PriceState = BTCB2PriceState()
+    @Published public var isFetchingPrice: Bool = false
+
     // Multi-Wallet Inventory
     public let walletInventory: WalletInventory
     @Published public var walletSummaries: [WalletSummary] = []
@@ -48,6 +56,7 @@ public final class AppState: ObservableObject {
     @Published public var authSession: WalletAuthCapability? = nil
     @Published public var isAuthEnrolled: Bool = false
     @Published public var enrolledUsername: String? = nil
+    @Published public var enrolledUsernames: [String] = []
     @Published public var isWalletTabUnlocked: Bool = false
     @Published public var isMigrationPending: Bool = false
     @Published public var authErrorMessage: String? = nil
@@ -84,6 +93,10 @@ public final class AppState: ObservableObject {
         setupBindings()
         startHealthMonitoring()
         refreshAuthState()
+
+        Task {
+            await self.refreshPrice()
+        }
 
         Task { [walletManager] in
             await walletManager.purgeStaleStagingDirectories()
@@ -288,6 +301,7 @@ public final class AppState: ObservableObject {
         Task { @MainActor in
             self.isAuthEnrolled = await authCoordinator.isEnrolled
             self.enrolledUsername = await authCoordinator.enrolledUsername
+            self.enrolledUsernames = await authCoordinator.enrolledUsernames
             self.isMigrationPending = await authCoordinator.isMigrationPending
             if let cur = await authCoordinator.currentSession {
                 self.authSession = cur
@@ -308,6 +322,10 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public func cancelEnrollment() {
+        self.generatedEnrollmentData = nil
+    }
+
     public func enrollUser(password: String, totpCode: String) async throws {
         guard let data = generatedEnrollmentData else {
             throw WalletAuthError.invalidCredentials
@@ -323,14 +341,17 @@ public final class AppState: ObservableObject {
         self.authSession = session
         self.isAuthEnrolled = true
         self.enrolledUsername = session.username
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isWalletTabUnlocked = true
         self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
         // The TOTP provisioning URI and recovery codes are secret setup material.
         // Once enrollment succeeds, discard the app's transient onboarding copy.
         self.generatedEnrollmentData = nil
-        self.appendLog("[AUTH] Operator enrolled and Wallet Manager unlocked.")
+        self.appendLog("[AUTH] Operator '\(session.username)' enrolled and Wallet Manager unlocked.")
         self.refreshWallet()
+        self.refreshWalletInventory()
+        Task { await self.refreshPrice() }
     }
 
     public func loginUser(username: String, password: String, totpCode: String) async throws {
@@ -340,10 +361,14 @@ public final class AppState: ObservableObject {
         }
         self.authSession = session
         self.isWalletTabUnlocked = true
+        self.enrolledUsername = session.username
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
-        self.appendLog("[AUTH] Operator logged in. Wallet Manager unlocked.")
+        self.appendLog("[AUTH] Operator '\(session.username)' logged in. Wallet Manager unlocked.")
         self.refreshWallet()
+        self.refreshWalletInventory()
+        Task { await self.refreshPrice() }
     }
 
     public func loginWithRecoveryCode(username: String, code: String) async throws {
@@ -353,10 +378,43 @@ public final class AppState: ObservableObject {
         }
         self.authSession = session
         self.isWalletTabUnlocked = true
+        self.enrolledUsername = session.username
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
-        self.appendLog("[AUTH] Operator logged in via recovery code. Wallet Manager unlocked.")
+        self.appendLog("[AUTH] Operator '\(session.username)' logged in via recovery code. Wallet Manager unlocked.")
         self.refreshWallet()
+        self.refreshWalletInventory()
+        Task { await self.refreshPrice() }
+    }
+
+    // MARK: - BTCB2 Exchange Pricing (Neoxa & NonKYC)
+
+    public func refreshPrice() async {
+        isFetchingPrice = true
+        let updated = await priceService.refreshPrice()
+        await MainActor.run {
+            self.priceState = updated
+            self.isFetchingPrice = false
+        }
+    }
+
+    public func setPriceOverride(price: Double) {
+        Task {
+            let updated = await priceService.setCustomOverride(price: price)
+            await MainActor.run {
+                self.priceState = updated
+            }
+        }
+    }
+
+    public func clearPriceOverride() {
+        Task {
+            let updated = await priceService.clearCustomOverride()
+            await MainActor.run {
+                self.priceState = updated
+            }
+        }
     }
 
     public func lockWallet() {
@@ -430,6 +488,12 @@ public final class AppState: ObservableObject {
                     receiveAddress = ""
                     transactions = []
                     appendLog("[WALLET] Node is running. Create or load an encrypted wallet.")
+                } catch is WalletAuthError {
+                    walletSnapshot = nil
+                    receiveAddress = ""
+                    transactions = []
+                    appendLog("[AUTH] Wallet Manager is locked. Directing operator to Wallet sign-in.")
+                    selectedTab = .wallet
                 }
 
                 if let binfo = try? await nodeManager.rpcClient.getBlockchainInfo() {
@@ -444,6 +508,11 @@ public final class AppState: ObservableObject {
                 appendLog(needsWalletSetup
                     ? "[BOOTSTRAP] Node online; wallet setup required."
                     : "[BOOTSTRAP] Node and existing wallet ready.")
+            } catch let authError as WalletAuthError {
+                isStartingUp = false
+                startupStatus = "Node online — Wallet locked"
+                selectedTab = .wallet
+                appendLog("[AUTH] \(authError.localizedDescription). Directing to Wallet sign-in.")
             } catch {
                 isStartingUp = false
                 startupStatus = "Failed"
@@ -464,6 +533,7 @@ public final class AppState: ObservableObject {
         walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
         receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        self.refreshWalletInventory()
         startupStatus = "Ready"
         appendLog("[WALLET] Encrypted descriptor wallet '\(name)' verified and ready.")
     }

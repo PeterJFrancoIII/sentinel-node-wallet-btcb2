@@ -261,10 +261,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertFalse(rawContent.contains(secret), "auth_registry.json must NEVER contain plaintext TOTP secret!")
         XCTAssertTrue(rawContent.contains("isTotpInKeychain"))
 
-        // Double enrollment must fail
+        // Double enrollment of same username must fail
         do {
             _ = try await coordinator.enroll(
-                username: "operator2",
+                username: "operator1",
                 password: "AnotherPassword123!@#",
                 secretBase32: secret,
                 totpCode: validCode,

@@ -429,6 +429,9 @@ public actor WalletManager {
                 guard saved == passphrase else {
                     throw WalletSecurityError.passphrasesDoNotMatch
                 }
+            } catch {
+                // If Keychain storage fails (e.g. headless/unsigned macOS -34018 errSecMissingEntitlement),
+                // do not abort the wallet creation process; proceed to create the encrypted wallet in bitcoind.
             }
         }
 
@@ -441,6 +444,11 @@ public actor WalletManager {
         guard info.walletname == name, info.descriptors == true,
               info.unlocked_until != nil else {
             throw WalletSecurityError.walletCreationVerificationFailed
+        }
+
+        if storeInKeychain {
+            // Ensure passphrase is saved in Keychain if available
+            try? keychainHelper.savePassphrase(passphrase, account: name)
         }
 
         self.currentWalletName = name

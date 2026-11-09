@@ -168,7 +168,17 @@ public struct AuthRegistryRecord: Codable, Sendable {
         self.version = version
     }
 
+    private enum MultiCodingKeys: String, CodingKey {
+        case users
+    }
+
     public init(from decoder: Decoder) throws {
+        if let multiContainer = try? decoder.container(keyedBy: MultiCodingKeys.self),
+           let users = try? multiContainer.decode([String: AuthRegistryRecord].self, forKey: .users),
+           let first = users.values.first {
+            self = first
+            return
+        }
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.username = try container.decode(String.self, forKey: .username)
         self.saltHex = try container.decode(String.self, forKey: .saltHex)
@@ -204,10 +214,20 @@ public struct AuthRegistryRecord: Codable, Sendable {
     }
 }
 
+public struct MultiAuthRegistry: Codable, Sendable {
+    public var version: Int
+    public var users: [String: AuthRegistryRecord] // Keyed by lowercase username
+
+    public init(version: Int = 2, users: [String: AuthRegistryRecord] = [:]) {
+        self.version = version
+        self.users = users
+    }
+}
+
 public actor WalletAuthCoordinator {
     private let dataDirectory: URL
     private let registryURL: URL
-    private var record: AuthRegistryRecord?
+    private var records: [String: AuthRegistryRecord] = [:]
     private var activeSession: WalletAuthCapability?
     private var isAuthInFlight: Bool = false
     private var recordGeneration: UInt64 = 0
@@ -266,43 +286,54 @@ public actor WalletAuthCoordinator {
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
         self.registryURL = dataDirectory.appendingPathComponent("auth_registry.json")
-        self.record = Self.loadRecord(from: registryURL)
+        self.records = Self.loadRecords(from: registryURL)
 
         guard let secret = try? Self.randomBytes(count: 32) else {
             fatalError("Cryptographic failure: unable to obtain 32 secure random bytes for HMAC key.")
         }
         self.hmacSecret = secret
 
-        // Non-destructive migration of legacy TOTP secret if present
-        if let rec = self.record, let legacySecret = rec.legacyTotpSecretBase32 {
-            do {
-                try Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
-                let readBack = try Self.loadTOTPSecretFromKeychain(username: rec.username)
-                if readBack == legacySecret {
-                    var updated = rec
-                    updated.legacyTotpSecretBase32 = nil
-                    updated.isTotpInKeychain = true
-                    self.record = updated
-                    try Self.persistRecord(updated, to: registryURL, in: dataDirectory)
+        // Non-destructive migration of legacy TOTP secret if present across any accounts
+        for (key, rec) in self.records {
+            if let legacySecret = rec.legacyTotpSecretBase32 {
+                do {
+                    try Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
+                    let readBack = try Self.loadTOTPSecretFromKeychain(username: rec.username)
+                    if readBack == legacySecret {
+                        var updated = rec
+                        updated.legacyTotpSecretBase32 = nil
+                        updated.isTotpInKeychain = true
+                        self.records[key] = updated
+                        try Self.persistRecords(self.records, to: registryURL, in: dataDirectory)
+                    }
+                } catch {
+                    // If Keychain write or read-back verification fails, preserve legacyTotpSecretBase32
+                    // on disk so the operator is never locked out from their credentials.
                 }
-            } catch {
-                // If Keychain write or read-back verification fails, preserve legacyTotpSecretBase32
-                // on disk so the operator is never locked out from their credentials.
             }
         }
     }
 
     public var isEnrolled: Bool {
-        record != nil
+        !records.isEmpty
+    }
+
+    /// Backwards compatibility property returning the primary/first enrolled record.
+    public var record: AuthRegistryRecord? {
+        records.values.first
     }
 
     /// Indicates whether a legacy plaintext credential is still awaiting verified Keychain migration.
     public var isMigrationPending: Bool {
-        record?.legacyTotpSecretBase32 != nil
+        records.values.contains(where: { !$0.isTotpInKeychain && $0.legacyTotpSecretBase32 != nil })
     }
 
     public var enrolledUsername: String? {
-        record?.username
+        records.values.first?.username
+    }
+
+    public var enrolledUsernames: [String] {
+        Array(records.values.map(\.username)).sorted()
     }
 
     public var currentSession: WalletAuthCapability? {
@@ -370,12 +401,13 @@ public actor WalletAuthCoordinator {
         guard !isAuthInFlight else {
             throw WalletAuthError.rateLimited(secondsRemaining: 2)
         }
-        guard record == nil else {
-            throw WalletAuthError.alreadyEnrolled
-        }
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
             throw WalletAuthError.invalidCredentials
+        }
+        let userKey = cleanUser.lowercased()
+        guard records[userKey] == nil else {
+            throw WalletAuthError.alreadyEnrolled
         }
         try Self.validatePasswordStrength(password)
 
@@ -391,12 +423,12 @@ public actor WalletAuthCoordinator {
         let hash = try Self.deriveKey(password: password, salt: salt)
 
         // P0-2: Salted verifiers for >= 128-bit recovery codes
-        var records: [RecoveryCodeRecord] = []
+        var recordsList: [RecoveryCodeRecord] = []
         for code in recoveryCodes {
             let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "").uppercased()
             let codeSalt = try Self.randomBytes(count: 16)
             let verifier = try Self.deriveRecoveryVerifier(code: normalized, salt: codeSalt)
-            records.append(RecoveryCodeRecord(
+            recordsList.append(RecoveryCodeRecord(
                 saltHex: codeSalt.map { String(format: "%02x", $0) }.joined(),
                 verifierHex: verifier.map { String(format: "%02x", $0) }.joined()
             ))
@@ -408,7 +440,7 @@ public actor WalletAuthCoordinator {
             passwordHashHex: hash.map { String(format: "%02x", $0) }.joined(),
             isTotpInKeychain: true,
             legacyTotpSecretBase32: nil,
-            recoveryCodes: records,
+            recoveryCodes: recordsList,
             legacyRecoveryCodeHashes: nil,
             failedAttempts: 0,
             lockedUntil: nil,
@@ -417,8 +449,8 @@ public actor WalletAuthCoordinator {
         )
 
         self.recordGeneration += 1
-        self.record = newRecord
-        try saveRecord()
+        self.records[userKey] = newRecord
+        try saveRecords()
 
         let session = WalletAuthCapability(
             username: cleanUser,
@@ -449,8 +481,16 @@ public actor WalletAuthCoordinator {
             }
         }
 
-        guard var rec = record else {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanUser.isEmpty else {
+            throw WalletAuthError.invalidCredentials
+        }
+        guard !records.isEmpty else {
             throw WalletAuthError.notEnrolled
+        }
+        let userKey = cleanUser.lowercased()
+        guard var rec = records[userKey] ?? records.values.first(where: { $0.username.lowercased() == userKey }) else {
+            throw WalletAuthError.invalidCredentials
         }
 
         if let lockDate = rec.lockedUntil {
@@ -463,7 +503,6 @@ public actor WalletAuthCoordinator {
             }
         }
 
-        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanUser.lowercased() == rec.username.lowercased() else {
             throw registerFailedAttempt(&rec)
         }
@@ -557,7 +596,7 @@ public actor WalletAuthCoordinator {
         let (valid, timeStep) = Self.verifyTOTP(secret: secret, code: totpCode, time: time)
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
-        guard var freshRec = self.record, freshRec.username.lowercased() == cleanUser.lowercased() else {
+        guard var freshRec = self.records[userKey] ?? self.records.values.first(where: { $0.username.lowercased() == userKey }) else {
             throw WalletAuthError.notEnrolled
         }
 
@@ -588,8 +627,8 @@ public actor WalletAuthCoordinator {
         freshRec.lastUsedTimeStep = timeStep
         freshRec.failedAttempts = 0
         freshRec.lockedUntil = nil
-        self.record = freshRec
-        try saveRecord()
+        self.records[userKey] = freshRec
+        try saveRecords()
 
         let session = WalletAuthCapability(
             username: freshRec.username,
@@ -617,8 +656,16 @@ public actor WalletAuthCoordinator {
             }
         }
 
-        guard var rec = record else {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanUser.isEmpty else {
+            throw WalletAuthError.invalidCredentials
+        }
+        guard !records.isEmpty else {
             throw WalletAuthError.notEnrolled
+        }
+        let userKey = cleanUser.lowercased()
+        guard var rec = records[userKey] ?? records.values.first(where: { $0.username.lowercased() == userKey }) else {
+            throw WalletAuthError.invalidCredentials
         }
 
         if let lockDate = rec.lockedUntil {
@@ -631,7 +678,6 @@ public actor WalletAuthCoordinator {
             }
         }
 
-        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanUser.lowercased() == rec.username.lowercased() else {
             throw registerFailedAttempt(&rec)
         }
@@ -724,7 +770,7 @@ public actor WalletAuthCoordinator {
         }
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
-        guard var freshRec = self.record, freshRec.username.lowercased() == cleanUser.lowercased() else {
+        guard var freshRec = self.records[userKey] ?? self.records.values.first(where: { $0.username.lowercased() == userKey }) else {
             throw WalletAuthError.notEnrolled
         }
 
@@ -743,8 +789,8 @@ public actor WalletAuthCoordinator {
         self.recordGeneration += 1
         freshRec.failedAttempts = 0
         freshRec.lockedUntil = nil
-        self.record = freshRec
-        try saveRecord()
+        self.records[userKey] = freshRec
+        try saveRecords()
 
         let session = WalletAuthCapability(
             username: freshRec.username,
@@ -917,15 +963,16 @@ public actor WalletAuthCoordinator {
     private func registerFailedAttempt(_ rec: inout AuthRegistryRecord) -> WalletAuthError {
         self.recordGeneration += 1
         rec.failedAttempts += 1
+        let userKey = rec.username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if rec.failedAttempts >= 5 {
             let penaltySeconds = min(300, Int(pow(2.0, Double(rec.failedAttempts - 4))) * 10)
             rec.lockedUntil = Date().addingTimeInterval(TimeInterval(penaltySeconds))
-            self.record = rec
-            try? saveRecord()
+            self.records[userKey] = rec
+            try? saveRecords()
             return WalletAuthError.rateLimited(secondsRemaining: penaltySeconds)
         }
-        self.record = rec
-        try? saveRecord()
+        self.records[userKey] = rec
+        try? saveRecords()
         return WalletAuthError.invalidCredentials
     }
 
@@ -1243,22 +1290,32 @@ public actor WalletAuthCoordinator {
 
     // MARK: - Registry Storage
 
-    private static func loadRecord(from url: URL) -> AuthRegistryRecord? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? JSONDecoder().decode(AuthRegistryRecord.self, from: data)
+    private static func loadRecords(from url: URL) -> [String: AuthRegistryRecord] {
+        guard let data = try? Data(contentsOf: url) else { return [:] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        if let multi = try? decoder.decode(MultiAuthRegistry.self, from: data) {
+            return multi.users
+        }
+        if let single = try? decoder.decode(AuthRegistryRecord.self, from: data) {
+            let key = single.username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return [key: single]
+        }
+        return [:]
     }
 
-    private static func persistRecord(
-        _ record: AuthRegistryRecord,
+    private static func persistRecords(
+        _ records: [String: AuthRegistryRecord],
         to registryURL: URL,
         in dataDirectory: URL
     ) throws {
+        let registry = MultiAuthRegistry(version: 2, users: records)
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data: Data
         do {
-            data = try encoder.encode(record)
+            data = try encoder.encode(registry)
         } catch {
             throw WalletAuthError.storageError("JSON encoding failed: \(error.localizedDescription)")
         }
@@ -1272,8 +1329,11 @@ public actor WalletAuthCoordinator {
         }
     }
 
+    private func saveRecords() throws {
+        try Self.persistRecords(self.records, to: registryURL, in: dataDirectory)
+    }
+
     private func saveRecord() throws {
-        guard let record = self.record else { return }
-        try Self.persistRecord(record, to: registryURL, in: dataDirectory)
+        try saveRecords()
     }
 }
