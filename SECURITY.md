@@ -12,7 +12,7 @@
 
 ## Open security findings (fail-release)
 
-1. **P0** WalletManager continues createwallet after requested Keychain save fails or credential conflicts; UI later clears the passphrase. Require safe storage or pre-creation explicit offline custody acknowledgment; never risk sole-secret loss.
+1. **P0 native acceptance still open** Requested Keychain save failure, duplicate mismatch and canceled user presence now block createwallet **in source and CI** at 5e7a597 (five deterministic regressions passed). Verify behavior on an actually signed Mac, explicit offline-custody acknowledgment, and durable passphrase recovery before declaring the risk closed.
 2. **P0** Installed-app encrypted wallet creation, inventory after create, network-loss retry, isolated backup/restore and Keychain interactive consent not independently demonstrated.
 3. **P0** Adopted-daemon PID/executable and authenticated RPC listener are checked independently; credential file existence/owner is insufficient for contents, symlink/type/mode or endpoint binding. Positive auth-mode tests missing.
 4. **P0** Independent signing/fork-binary provenance, backup-durability recovery, notarization and supply-chain review incomplete.

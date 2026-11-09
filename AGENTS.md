@@ -7,12 +7,12 @@
 ## At entry
 
 1. Query canonical SCM **Session_Gemini_NodePocketBTCB2_20261106-1741** via search_nodes then open_nodes; search **InterAgent_Dialogue_Channel** for latest exact-session peer receipts. Apply [SCM rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md).
-2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Last independently audited code baseline: **35cee85d**; 113 passed, 0 failed, one interactive Keychain test skipped. Branch is **unmerged**.
+2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **5e7a597**; 117 passed, 0 failed, one interactive Keychain test skipped. This does not establish native Keychain PASS. Branch is **unmerged**.
 3. Confirm status evidence in [Project Status](docs/PROJECT_STATUS.md). Distinguish **BUILT source**, **PEER-REPORTED native**, and **independently verified**. Do not recast stale V12/v13 planning as undone code.
 
 ## Current work order (priority)
 
-- **P0** Fix Keychain save-failure/mismatched-secret path **before** wallet creation, preserving recoverability; prove encrypted wallet RPC creation and immediate inventory on an installed Mac using only isolated zero-funds test data.
+- **P0** Keychain failure/mismatched-secret creation path is now source/CI remediated (5e7a597); independently verify actual Keychain hardware accept/deny/cancel and offline-custody acknowledgment, then prove encrypted wallet RPC creation and immediate inventory on an installed Mac using only isolated zero-funds test data.
 - **P0** Prove positive bitcoin.conf and cookie-only daemon adoption; bind RPC endpoint to PID/executable/datadir; validate credentials and safe file types/permissions.
 - **P1** Correct window recreation/force unwrap/targeted zoom; independently exercise Dock/Cmd+Tab/closed window.
 - **P0 release gates** Native Keychain/2FA/Apple Passwords, recoverable backups, Ultra profile transitions, fork/signing and distribution audit. Keep send disabled.

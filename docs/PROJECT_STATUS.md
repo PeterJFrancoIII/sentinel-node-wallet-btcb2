@@ -1,8 +1,8 @@
 # Sentinel Node Wallet BTCB2 — Project Status
 
 **Snapshot:** 2026-11-09 (America/New_York). **Status:** development candidate; **production, public distribution and real funds: NO-GO**.
-**Code baseline:** [35cee85d](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/35cee85d870c2df2e16f30409ebcc4b9bc536179) on [open PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107; not merged to main.
-**CI:** [42578630048](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42578630048): 114 executed, **113 passed, 0 failed, 1 skipped** (interactive Keychain). A green build is not native-app or wallet-security certification.
+**Code baseline:** [5e7a597](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/5e7a59768351c5d98652f85b9d4649a07cb38634) on [open PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107; not merged to main.
+**CI:** [42705121938](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42705121938): 118 executed, **117 passed, 0 failed, 1 skipped** (interactive Keychain). A green build is not native-app or wallet-security certification.
 
 **Evidence labels:** **BUILT** = present in source; **PEER-REPORTED** = another agent's runtime claim, not independently reproduced; **OPEN** = failing, unproven or missing acceptance; **GATE** = mandatory before release. Do not turn source presence or peer receipts into a native PASS.
 
@@ -20,7 +20,7 @@
 
 ## In progress — independently identified defects / proof gaps
 
-1. **P0 Keychain custody — source remediation added, native verification OPEN:** The new wallet-creation path now aborts before `createwallet` when requested Keychain storage fails or an existing credential cannot be verified. Matching duplicate entries require interactive verification; existing entries are never implicitly replaced by the creation path. Explicit offline-custody choice remains a separate UI action. **Do not mark native PASS until real signed-Mac Keychain and wallet-create evidence is collected.**
+1. **P0 Keychain custody — source remediation CI PASS, native verification OPEN:** Source at `5e7a597` blocks `createwallet` when requested Keychain storage fails or an existing credential cannot be verified. All five new deterministic Keychain custody tests passed in CI `42705121938`. Matching duplicate entries require interactive verification; existing entries are never implicitly replaced by the creation path. Explicit offline-custody choice remains a separate UI action. **Do not mark native PASS until real signed-Mac Keychain and wallet-create evidence is collected.**
 2. **P0 Wallet creation:** Installed-macOS Create Encrypted Wallet success, actual RPC connectivity, post-create inventory refresh, interruption/retry and no-loss guarantees lack independent end-to-end proof. Mock RPC green is insufficient.
 3. **P0 Daemon adoption:** Prove successful positive bitcoin.conf and cookie-only paths on isolated Knots; bind the authenticated RPC listener to the verified live PID/executable/datadir; reject symlinks/unsafe file types, permissions and non-credential conf files. #071 new tests prove negative cases only; conditional live test may return without testing.
 4. **P1 Window restoration:** #070 has a forced-unwrap New Window action, incomplete zero-window reopening and first-eligible-window zoom rather than targeted primary-window behavior; native regressions missing.
@@ -39,6 +39,6 @@
 
 Canonical SCM session: **Session_Gemini_NodePocketBTCB2_20261106-1741**; bus **InterAgent_Dialogue_Channel**. Last peer receipt: **MSG:SENTINEL-DAEMON-ADOPT-REPAIR-RECEIPT-20261109-071** (earlier #069 wallet RPC; #070 windows). Follow [Shared Memory rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md); search_nodes → open_nodes; retain author/message provenance. Receipt #071's live adoption, signed bundle and undisturbed operator wallet are **peer-reported**, not independently demonstrated in this audit.
 
-**Next sequence:** verify new fail-closed Keychain tests and signed-Mac behavior → isolated native create/restore → positive and adversarial daemon adoption → native windows/auth/Ultra → signing/binary/release audit. Report exact commit, CI, negative/positive tests, native evidence, skips and open gates; never silently upgrade a claim to PASS.
+**Next sequence:** verify fail-closed Keychain creation and signed-Mac behavior → isolated native create/restore → positive and adversarial daemon adoption → native windows/auth/Ultra → signing/binary/release audit. Report exact commit, CI, negative/positive tests, native evidence, skips and open gates; never silently upgrade a claim to PASS.
 
 Detailed contracts: [GOVERNANCE](../GOVERNANCE.md) · [SECURITY](../SECURITY.md) · [Agent rules](../AGENTS.md) · [Release matrix](../TEST_AND_RELEASE_MATRIX.md) · [Architecture](ARCHITECTURE.md).

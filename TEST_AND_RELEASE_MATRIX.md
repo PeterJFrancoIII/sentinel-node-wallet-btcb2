@@ -1,6 +1,6 @@
 # Test and Release Matrix — Sentinel Node Wallet BTCB2
 
-**Snapshot:** 2026-11-09; code **35cee85d**; [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) open/unmerged. [CI #42578630048](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42578630048): **114 executed / 113 passed / 0 failed / 1 skipped** (interactive Keychain). **No release authorization.**
+**Snapshot:** 2026-11-09; code **5e7a597**; [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) open/unmerged. [CI #42705121938](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42705121938): **118 executed / 117 passed / 0 failed / 1 skipped** (interactive Keychain). **No release authorization.**
 
 **Evidence classes:** SOURCE = implemented, CI = automated tests, PEER = agent's unreproduced native claim, NATIVE = independently recorded on-device test, OPEN = missing/failed/insufficient. A skipped or conditional test is **not** NATIVE PASS.
 
@@ -11,7 +11,7 @@
 | Neoxa/NonKYC price quotes and override | SOURCE + tests | Built; live pricing/fallback OPEN |
 | Wallet inventory, archive, Trash guard, backup | SOURCE + CI | Built; crash/durability/recovery NATIVE OPEN |
 | Encrypted descriptor create via installed Wallet UI | RPC/mocks; user reported runtime failure | **P0 OPEN** |
-| Keychain requested-save failure and duplicate credential | Creation-only pre-save now fails before RPC on unavailable/mismatched/canceled Keychain; injected unit tests; actual Mac behavior not yet tested | **SOURCE PATCH; NATIVE OPEN — P0** |
+| Keychain requested-save failure and duplicate credential | Creation-only pre-save now fails before RPC on unavailable/mismatched/canceled Keychain; injected unit tests; actual Mac behavior not yet tested | **SOURCE + CI PASS (5 custody tests); NATIVE OPEN — P0** |
 | Adopt existing Knots via bitcoin.conf or .cookie | SOURCE #071 + CI negative tests; live success PEER | **P0 OPEN** positive/PID/RPC binding |
 | Dock/Cmd+Tab/closed-window/zoom | SOURCE #070; live use PEER | P1 OPEN zero-window/force-unwrap |
 | Apple Passwords + signed app, consent and Keychain test | Candidate UI; CI interactive test SKIPPED | **P0 OPEN** |
