@@ -273,6 +273,7 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
 public actor WalletManager {
     public let rpcClient: BitcoinRPCClient
     public let keychainHelper: KeychainHelper
+    private let passphraseCustody: any WalletPassphraseCustody
     public let addressBook: AddressBook
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
@@ -297,6 +298,7 @@ public actor WalletManager {
     public init(
         rpcClient: BitcoinRPCClient,
         keychainHelper: KeychainHelper = .shared,
+        passphraseCustody: (any WalletPassphraseCustody)? = nil,
         addressBook: AddressBook = AddressBook(),
         authCoordinator: WalletAuthCoordinator? = nil,
         allowUnauthenticatedForTesting: Bool = false,
@@ -305,6 +307,7 @@ public actor WalletManager {
     ) {
         self.rpcClient = rpcClient
         self.keychainHelper = keychainHelper
+        self.passphraseCustody = passphraseCustody ?? keychainHelper
         self.addressBook = addressBook
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
@@ -424,6 +427,28 @@ public actor WalletManager {
             ) != nil
     }
 
+    /// Secure the passphrase BEFORE creating or adopting a wallet whenever the user
+    /// requested Keychain storage. A failed save cannot be repaired by a warning
+    /// shown after the UI has cleared the only copy of the passphrase.
+    private func ensurePassphraseCustody(_ passphrase: String, account: String) async throws {
+        do {
+            try passphraseCustody.saveNewPassphrase(passphrase, account: account)
+        } catch KeychainError.duplicateItem {
+            // No silent credential rotation. Read requires user presence, and only
+            // an exact match is acceptable for an idempotent interrupted attempt.
+            guard let saved = try? await passphraseCustody.retrievePassphraseInteractively(account: account),
+                  saved == passphrase else {
+                throw WalletCreationError.keychainPreSaveFailed(
+                    "A Keychain credential already exists for this name but could not be verified as matching. Existing Keychain data was not modified."
+                )
+            }
+        } catch {
+            throw WalletCreationError.keychainPreSaveFailed(
+                "Requested protected storage was unavailable (\(error.localizedDescription)). No createwallet RPC was issued. Keep your passphrase and retry, or turn off Keychain storage and explicitly confirm that you have recorded it securely offline."
+            )
+        }
+    }
+
     /// Explicit user-consented wallet creation. Never overwrites a wallet with
     /// the same name, and recovers idempotently from interrupted creation attempts.
     @discardableResult
@@ -498,15 +523,8 @@ public actor WalletManager {
                     try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 1, walletName: name)
                     try await rpcClient.walletLock(walletName: name)
                     // Successfully unlocked with matching passphrase! Adopt idempotently.
-                    var kcSaved = false
-                    var kcWarning: String? = nil
                     if storeInKeychain {
-                        do {
-                            try keychainHelper.savePassphrase(passphrase, account: name)
-                            kcSaved = true
-                        } catch {
-                            kcWarning = "Passphrase could not be saved to macOS Keychain: \(error.localizedDescription)."
-                        }
+                        try await ensurePassphraseCustody(passphrase, account: name)
                     }
                     self.currentWalletName = name
                     _ = try await refreshWalletInfo(capability: capability)
@@ -514,10 +532,12 @@ public actor WalletManager {
                         walletName: name,
                         isEncrypted: true,
                         descriptors: true,
-                        isStoredInKeychain: kcSaved,
-                        keychainWarning: kcWarning,
+                        isStoredInKeychain: storeInKeychain,
+                        keychainWarning: nil,
                         statusMessage: "Existing encrypted descriptor wallet '\(name)' reconciled and adopted."
                     )
+                } catch let custodyError as WalletCreationError {
+                    throw custodyError
                 } catch {
                     throw WalletSecurityError.walletAlreadyExists(name)
                 }
@@ -526,24 +546,10 @@ public actor WalletManager {
             }
         }
 
-        // Stage 5: Keychain Pre-Save Attempt (if requested)
-        var keychainSaved = false
-        var keychainWarning: String? = nil
+        // Stage 5: If Keychain saving was requested, success is REQUIRED before
+        // createwallet. The user's separate offline-custody choice is in WalletView.
         if storeInKeychain {
-            do {
-                try keychainHelper.savePassphrase(passphrase, account: name)
-                keychainSaved = true
-            } catch KeychainError.duplicateItem {
-                if let saved = try? await keychainHelper.retrievePassphraseInteractively(account: name), saved == passphrase {
-                    keychainSaved = true
-                } else {
-                    keychainWarning = "A different credential already exists in Keychain for '\(name)'."
-                }
-            } catch {
-                // Notice: Do NOT abort wallet creation on unsigned/development build Keychain errors,
-                // BUT record explicit warning so user knows their passphrase is NOT saved in Keychain!
-                keychainWarning = "Passphrase was NOT saved to macOS Keychain (\(error.localizedDescription)). Ensure you have recorded your passphrase securely offline."
-            }
+            try await ensurePassphraseCustody(passphrase, account: name)
         }
 
         // Stage 6: Execute createwallet RPC
@@ -585,16 +591,6 @@ public actor WalletManager {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
 
-        // Attempt secondary Keychain save if pre-save was missed and no error was logged
-        if storeInKeychain && !keychainSaved && keychainWarning == nil {
-            do {
-                try keychainHelper.savePassphrase(passphrase, account: name)
-                keychainSaved = true
-            } catch {
-                keychainWarning = "Passphrase was NOT saved to macOS Keychain: \(error.localizedDescription)."
-            }
-        }
-
         self.currentWalletName = name
         let snapshot = try await refreshWalletInfo(capability: capability)
         guard snapshot.isEncrypted, snapshot.descriptors else {
@@ -605,8 +601,8 @@ public actor WalletManager {
             walletName: name,
             isEncrypted: true,
             descriptors: true,
-            isStoredInKeychain: keychainSaved,
-            keychainWarning: keychainWarning,
+            isStoredInKeychain: storeInKeychain,
+            keychainWarning: nil,
             statusMessage: "Encrypted descriptor wallet '\(name)' verified and ready."
         )
     }

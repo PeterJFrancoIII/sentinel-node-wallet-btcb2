@@ -20,7 +20,7 @@
 
 ## In progress — independently identified defects / proof gaps
 
-1. **P0 Keychain fail-open:** WalletManager can execute createwallet after *requested* Keychain save fails or finds a mismatched credential; WalletView then clears input and displays a warning. Require assured passphrase custody or explicit user-confirmed safe fallback **before** createwallet.
+1. **P0 Keychain custody — source remediation added, native verification OPEN:** The new wallet-creation path now aborts before `createwallet` when requested Keychain storage fails or an existing credential cannot be verified. Matching duplicate entries require interactive verification; existing entries are never implicitly replaced by the creation path. Explicit offline-custody choice remains a separate UI action. **Do not mark native PASS until real signed-Mac Keychain and wallet-create evidence is collected.**
 2. **P0 Wallet creation:** Installed-macOS Create Encrypted Wallet success, actual RPC connectivity, post-create inventory refresh, interruption/retry and no-loss guarantees lack independent end-to-end proof. Mock RPC green is insufficient.
 3. **P0 Daemon adoption:** Prove successful positive bitcoin.conf and cookie-only paths on isolated Knots; bind the authenticated RPC listener to the verified live PID/executable/datadir; reject symlinks/unsafe file types, permissions and non-credential conf files. #071 new tests prove negative cases only; conditional live test may return without testing.
 4. **P1 Window restoration:** #070 has a forced-unwrap New Window action, incomplete zero-window reopening and first-eligible-window zoom rather than targeted primary-window behavior; native regressions missing.
@@ -39,6 +39,6 @@
 
 Canonical SCM session: **Session_Gemini_NodePocketBTCB2_20261106-1741**; bus **InterAgent_Dialogue_Channel**. Last peer receipt: **MSG:SENTINEL-DAEMON-ADOPT-REPAIR-RECEIPT-20261109-071** (earlier #069 wallet RPC; #070 windows). Follow [Shared Memory rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md); search_nodes → open_nodes; retain author/message provenance. Receipt #071's live adoption, signed bundle and undisturbed operator wallet are **peer-reported**, not independently demonstrated in this audit.
 
-**Next sequence:** fail-closed Keychain preservation → isolated native create/restore → positive and adversarial daemon adoption → native windows/auth/Ultra → signing/binary/release audit. Report exact commit, CI, negative/positive tests, native evidence, skips and open gates; never silently upgrade a claim to PASS.
+**Next sequence:** verify new fail-closed Keychain tests and signed-Mac behavior → isolated native create/restore → positive and adversarial daemon adoption → native windows/auth/Ultra → signing/binary/release audit. Report exact commit, CI, negative/positive tests, native evidence, skips and open gates; never silently upgrade a claim to PASS.
 
 Detailed contracts: [GOVERNANCE](../GOVERNANCE.md) · [SECURITY](../SECURITY.md) · [Agent rules](../AGENTS.md) · [Release matrix](../TEST_AND_RELEASE_MATRIX.md) · [Architecture](ARCHITECTURE.md).

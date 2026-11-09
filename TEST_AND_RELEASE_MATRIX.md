@@ -11,7 +11,7 @@
 | Neoxa/NonKYC price quotes and override | SOURCE + tests | Built; live pricing/fallback OPEN |
 | Wallet inventory, archive, Trash guard, backup | SOURCE + CI | Built; crash/durability/recovery NATIVE OPEN |
 | Encrypted descriptor create via installed Wallet UI | RPC/mocks; user reported runtime failure | **P0 OPEN** |
-| Keychain requested-save failure and duplicate credential | Source shows createwallet still proceeds | **P0 FAIL** |
+| Keychain requested-save failure and duplicate credential | Creation-only pre-save now fails before RPC on unavailable/mismatched/canceled Keychain; injected unit tests; actual Mac behavior not yet tested | **SOURCE PATCH; NATIVE OPEN — P0** |
 | Adopt existing Knots via bitcoin.conf or .cookie | SOURCE #071 + CI negative tests; live success PEER | **P0 OPEN** positive/PID/RPC binding |
 | Dock/Cmd+Tab/closed-window/zoom | SOURCE #070; live use PEER | P1 OPEN zero-window/force-unwrap |
 | Apple Passwords + signed app, consent and Keychain test | Candidate UI; CI interactive test SKIPPED | **P0 OPEN** |

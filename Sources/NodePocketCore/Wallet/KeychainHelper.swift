@@ -28,6 +28,13 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     }
 }
 
+/// Narrow custody contract for deterministic fail-closed onboarding tests.
+/// The real implementation is KeychainHelper; no in-memory fallback is shipped.
+public protocol WalletPassphraseCustody: Sendable {
+    func saveNewPassphrase(_ pass: String, account: String) throws
+    func retrievePassphraseInteractively(account: String) async throws -> String
+}
+
 /// Secure macOS Keychain integration for user-consented wallet passphrase storage.
 /// Strictly Keychain-exclusive: never writes passwords, keys, or seeds to files on disk.
 /// Enforces per-send and per-security-policy user-presence authentication challenges.
@@ -74,8 +81,20 @@ public final class KeychainHelper: Sendable {
         }
     }
 
-    /// Stores a wallet passphrase in macOS Keychain with user-level protection.
+    /// General explicit rotation flow. Retains the existing non-destructive update behavior.
+    /// Never use this method when creating a NEW wallet: an existing credential must not
+    /// be silently replaced by an unrelated new wallet's passphrase.
     public func savePassphrase(_ pass: String, account: String) throws {
+        try storePassphrase(pass, account: account, allowExistingUpdate: true)
+    }
+
+    /// Creation-only save. A duplicate is reported to the caller, which must verify
+    /// an exact match with device-owner approval or abort BEFORE createwallet RPC.
+    public func saveNewPassphrase(_ pass: String, account: String) throws {
+        try storePassphrase(pass, account: account, allowExistingUpdate: false)
+    }
+
+    private func storePassphrase(_ pass: String, account: String, allowExistingUpdate: Bool) throws {
         guard !pass.isEmpty, !account.isEmpty, let data = pass.data(using: .utf8) else {
             throw KeychainError.invalidData
         }
@@ -102,8 +121,8 @@ public final class KeychainHelper: Sendable {
         ]
 
         var status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecDuplicateItem {
-            // Update existing item without deleting first!
+        if status == errSecDuplicateItem && allowExistingUpdate {
+            // Explicit rotation only: update the existing item without deleting first!
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,
@@ -255,3 +274,5 @@ public final class KeychainHelper: Sendable {
         }
     }
 }
+
+extension KeychainHelper: WalletPassphraseCustody {}

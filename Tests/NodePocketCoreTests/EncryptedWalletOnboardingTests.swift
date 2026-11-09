@@ -159,8 +159,44 @@ private final class WalletCreateRPCStub: URLProtocol {
     override func stopLoading() {}
 }
 
+/// The test fixture never contacts the user's macOS Keychain or a live node.
+private struct StubPassphraseCustody: WalletPassphraseCustody {
+    enum Behavior: Sendable {
+        case accept
+        case unavailable
+        case duplicateMatching
+        case duplicateMismatched
+        case duplicateUnreadable
+    }
+    let behavior: Behavior
+
+    func saveNewPassphrase(_ pass: String, account: String) throws {
+        switch behavior {
+        case .accept:
+            return
+        case .unavailable:
+            throw KeychainError.unexpectedStatus(-34018)
+        case .duplicateMatching, .duplicateMismatched, .duplicateUnreadable:
+            throw KeychainError.duplicateItem
+        }
+    }
+
+    func retrievePassphraseInteractively(account: String) async throws -> String {
+        switch behavior {
+        case .duplicateMatching:
+            return "this-is-only-an-offline-test"
+        case .duplicateMismatched:
+            return "another-credential"
+        case .duplicateUnreadable:
+            throw KeychainError.userPresenceCanceled
+        default:
+            throw KeychainError.itemNotFound
+        }
+    }
+}
+
 final class EncryptedWalletOnboardingTests: XCTestCase {
-    private func makeManager() -> WalletManager {
+    private func makeManager(custody: (any WalletPassphraseCustody)? = nil) -> WalletManager {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [WalletCreateRPCStub.self]
         let client = BitcoinRPCClient(
@@ -170,6 +206,7 @@ final class EncryptedWalletOnboardingTests: XCTestCase {
         return WalletManager(
             rpcClient: client,
             keychainHelper: KeychainHelper(serviceName: "app.nodepocket.btcb2.wallet.onboarding-test"),
+            passphraseCustody: custody,
             allowUnauthenticatedForTesting: true
         )
     }
@@ -312,19 +349,74 @@ final class EncryptedWalletOnboardingTests: XCTestCase {
         }
     }
 
-    func testCreateWalletReturnsSuccessResultWithKeychainWarningWhenKeychainFails() async throws {
+    func testKeychainStorageFailureStopsWalletCreationBeforeRPC() async throws {
         WalletCreateRPCStub.reset()
-        let manager = makeManager()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .unavailable))
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+                storeInKeychain: true
+            )
+            XCTFail("Requested storage failure must block createwallet.")
+        } catch WalletCreationError.keychainPreSaveFailed(let detail) {
+            XCTAssertTrue(detail.contains("No createwallet RPC was issued"))
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+        XCTAssertFalse(WalletCreateRPCStub.existingWallets.contains("sandboxed_wallet"))
+    }
+
+    func testDuplicateMismatchedKeychainCredentialStopsWalletCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .duplicateMismatched))
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+                storeInKeychain: true
+            )
+            XCTFail("A mismatched existing Keychain item must fail closed.")
+        } catch WalletCreationError.keychainPreSaveFailed(let detail) {
+            XCTAssertTrue(detail.contains("Existing Keychain data was not modified"))
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testCanceledKeychainCredentialComparisonStopsWalletCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .duplicateUnreadable))
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+                storeInKeychain: true
+            )
+            XCTFail("Canceled device-owner challenge must abort wallet creation.")
+        } catch WalletCreationError.keychainPreSaveFailed {
+            // Expected
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testMatchingPreexistingKeychainCredentialPermitsIdempotentCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .duplicateMatching))
         let result = try await manager.createEncryptedDescriptorWallet(
             name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
             storeInKeychain: true
         )
-        XCTAssertEqual(result.walletName, "sandboxed_wallet")
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 1)
+        XCTAssertTrue(result.isStoredInKeychain)
+        XCTAssertNil(result.keychainWarning)
+    }
+
+    func testSuccessfulNewKeychainCustodyPermitsEncryptedWalletCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .accept))
+        let result = try await manager.createEncryptedDescriptorWallet(
+            name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+            storeInKeychain: true
+        )
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 1)
+        XCTAssertTrue(result.isStoredInKeychain)
         XCTAssertTrue(result.isEncrypted)
         XCTAssertTrue(result.descriptors)
-        XCTAssertEqual(WalletCreateRPCStub.createCalls, 1)
-        if !result.isStoredInKeychain {
-            XCTAssertNotNil(result.keychainWarning)
-        }
     }
 }
