@@ -1,5 +1,7 @@
 # Targeted fixes: sync profiles and wallet passphrases
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Status:** code committed to a review branch; **NOT** yet installed or validated on the user's Mac. This document does not declare the wallet suitable for real funds. Do not merge, notarize, or publish as a production release until the native acceptance tests pass.
 
 ## 1. Quiet / Balanced / Fast — root cause and fix

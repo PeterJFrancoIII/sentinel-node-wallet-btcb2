@@ -1,5 +1,7 @@
 # Sentinel Node Wallet - BTCB2: Ultra Power Policy, All-Wallet Inventory & Single Settings UI (V12)
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Canonical Document Authority:** `PeterJFrancoIII/sentinel-node-wallet-btcb2`  
 **Shared Memory Entity:** `SentinelNodeWallet_BTCB2_PowerWalletInventory_MinimalUI_v12_20261106`  
 **Governing Authority:** [Shared Cognitive Memory Agent Rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md)

@@ -1,5 +1,7 @@
 # Operator Bug Fixes — 2026-11-07 (development review)
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 ## Owner-reported defects
 
 1. **Max connected peers** input does not appear to change effective node limit.

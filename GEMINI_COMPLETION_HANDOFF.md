@@ -1,5 +1,7 @@
 # Gemini 3.8 Flash High — V12 Ultra Power Policy & Wallet Inventory Completion Handoff
 
+> **Current status:** [Built / In progress / Left](docs/PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 
 > **HISTORICAL V12 HANDOFF — SUPERSEDED FOR CURRENT EXECUTION.** This older memo contains obsolete implementation status, test counts, PR references and a superseded Ultra=12 prototype. The canonical Ultra specification is **4 max connections and `listen=0`**. For the incoming main agent's authoritative v13.1 snapshot, current branch/CI, real-versus-mock restore distinctions and remaining P0 gates, use [docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md](docs/V13_1_MAIN_AGENT_HANDOFF_20261107.md) and [TEST_AND_RELEASE_MATRIX.md](TEST_AND_RELEASE_MATRIX.md). Preserve this document only as a historical record; it does not authorize production.
 

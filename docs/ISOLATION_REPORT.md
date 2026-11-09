@@ -1,5 +1,7 @@
 # NODE Pocket Empirical Isolation Verification Report
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Verification Date:** 2026-11-06  
 **Target Application:** NODE Pocket BTCB2 (`com.nodepocket.btcb2`)  
 **Auditor:** Gemini 3.8 Flash High / Antigravity Autonomous Agent  

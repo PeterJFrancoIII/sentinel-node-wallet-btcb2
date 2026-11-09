@@ -1,5 +1,7 @@
 # v13.1 — First-Time Operator Setup: Apple Passwords
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Status:** Implementation and acceptance framework, not deployed Apple Passwords functionality.
 **Goal:** During first enrollment in the existing Wallet tab, offer operator-chosen Apple Passwords strong-password creation/saving and separate optional 2FA-key enrollment to Apple Passwords, without adding any cloud account or new tab.
 
