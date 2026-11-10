@@ -234,8 +234,39 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "getrawmempool", params: [true])
     }
 
-    public func sendToAddress(address: String, amount: Double, comment: String = "", walletName: String? = nil) async throws -> String {
-        try await call(method: "sendtoaddress", params: [address, amount, comment], walletName: walletName)
+    public func sendToAddress(
+        address: String,
+        amount: Double,
+        comment: String = "",
+        feeRateSatPerVB: Int? = nil,
+        replaceable: Bool = true,
+        walletName: String? = nil
+    ) async throws -> String {
+        var params: [Any] = [address, amount, comment, "", false, replaceable]
+        if let feeRate = feeRateSatPerVB, feeRate > 0 {
+            params = [address, amount, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
+        }
+        return try await call(method: "sendtoaddress", params: params, walletName: walletName)
+    }
+
+    public func walletCreateFundedPsbt(
+        outputs: [String: Double],
+        feeRateSatPerVB: Int? = nil,
+        walletName: String? = nil
+    ) async throws -> FundedPsbtResponse {
+        var options: [String: Any] = [
+            "add_inputs": true,
+            "replaceable": true
+        ]
+        if let rate = feeRateSatPerVB, rate > 0 {
+            options["fee_rate"] = rate
+        }
+        let formattedOutputs = outputs.map { [$0.key: $0.value] }
+        return try await call(
+            method: "walletcreatefundedpsbt",
+            params: [[], formattedOutputs, 0, options],
+            walletName: walletName
+        )
     }
 
     public func walletPassphrase(passphrase: String, timeout: Int = 60, walletName: String? = nil) async throws {

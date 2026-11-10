@@ -4,6 +4,10 @@ import NodePocketCore
 public struct NetworkView: View {
     @EnvironmentObject var state: AppState
 
+    private var isSyncing: Bool {
+        (state.blockchainInfo?.initialblockdownload ?? false) || (state.hashrateReport?.isSyncing ?? false)
+    }
+
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -23,8 +27,17 @@ public struct NetworkView: View {
                             Text("Estimated BLAKE2b Network Hashrate (30-Block Trend)")
                                 .font(.subheadline)
                                 .foregroundColor(.secondary)
-                            Text(state.hashrateReport?.displayHashrate ?? "Calculating...")
-                                .font(.system(size: 34, weight: .bold, design: .monospaced))
+                            if isSyncing {
+                                Text("Syncing Node...")
+                                    .font(.system(size: 34, weight: .bold, design: .monospaced))
+                                    .foregroundColor(.orange)
+                                Text("Network hashrate tracking begins once the node is fully synchronized • Awaiting block tip")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            } else {
+                                Text(state.hashrateReport?.displayHashrate ?? "Calculating...")
+                                    .font(.system(size: 34, weight: .bold, design: .monospaced))
+                            }
                         }
                         Spacer()
                         freshnessBadge
@@ -33,11 +46,11 @@ public struct NetworkView: View {
                     Divider()
 
                     HStack(spacing: 24) {
-                        statPill(label: "Smoothed Rate (120-Block)", value: state.hashrateReport?.displaySmoothedHashrate ?? "--")
+                        statPill(label: "Smoothed Rate (120-Block)", value: isSyncing ? "--" : (state.hashrateReport?.displaySmoothedHashrate ?? "--"))
                         statPill(label: "Difficulty", value: String(format: "%.4f", state.hashrateReport?.difficulty ?? 0.0))
-                        statPill(label: "Avg Block Interval", value: String(format: "%.1fs", state.hashrateReport?.averageBlockIntervalSeconds ?? 600.0))
-                        statPill(label: "Sampled Blocks", value: "\(state.hashrateReport?.sampleCount ?? 0)")
-                        statPill(label: "Telemetry Age", value: String(format: "%.0fs", state.hashrateReport?.telemetryAgeSeconds ?? 0.0))
+                        statPill(label: "Avg Block Interval", value: isSyncing ? "--" : String(format: "%.1fs", state.hashrateReport?.averageBlockIntervalSeconds ?? 600.0))
+                        statPill(label: "Sampled Blocks", value: isSyncing ? "0 / 30 (Syncing)" : "\(state.hashrateReport?.sampleCount ?? 0)")
+                        statPill(label: "Telemetry Age", value: isSyncing ? "--" : String(format: "%.0fs", state.hashrateReport?.telemetryAgeSeconds ?? 0.0))
                     }
                 }
                 .padding()
@@ -94,7 +107,9 @@ public struct NetworkView: View {
                             VStack(spacing: 6) {
                                 ProgressView()
                                     .controlSize(.small)
-                                Text("Gathering block samples from local daemon...")
+                                Text(isSyncing
+                                     ? "Node is currently synchronizing block headers. Hashrate calculation activates once sync is complete."
+                                     : "Gathering 30 contiguous block samples from local daemon...")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -170,6 +185,21 @@ public struct NetworkView: View {
     }
 
     private var freshnessBadge: some View {
+        if isSyncing {
+            return HStack(spacing: 6) {
+                Circle()
+                    .fill(Color.orange)
+                    .frame(width: 8, height: 8)
+                Text("SYNCING")
+                    .font(.caption)
+                    .bold()
+                    .foregroundColor(.orange)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.orange.opacity(0.15)))
+        }
+
         let isStale = state.hashrateReport?.isStale ?? true
         return HStack(spacing: 6) {
             Circle()

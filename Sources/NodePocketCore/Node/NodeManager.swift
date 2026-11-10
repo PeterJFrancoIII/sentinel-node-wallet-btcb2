@@ -537,30 +537,102 @@ public final class NodeManager: @unchecked Sendable {
                 do {
                     let binfo = try await self.rpcClient.getBlockchainInfo()
                     let netInfo = try? await self.rpcClient.getNetworkInfo()
-                    let bhash = binfo.bestblockhash
-                    if !bhash.isEmpty {
-                        let header = try await self.rpcClient.getBlockHeader(hash: bhash)
-                        if let target = TargetConverter.targetHexFromBits(UInt32(header.bits, radix: 16) ?? 0) {
-                            self.hashrateTracker.addBlock(
-                                height: header.height,
-                                hash: header.hash,
-                                timestamp: TimeInterval(header.time),
-                                targetHex: target
-                            )
-                        }
-                    }
+                    let inIBD = binfo.initialblockdownload
 
-                    let report = self.hashrateTracker.generateReport()
+                    let report: HashrateReport
+
+                    if inIBD {
+                        // The network hashrate tracker should not begin until the node is fully synced.
+                        // Rapid block sync skews results; clear any partial sync samples.
+                        self.hashrateTracker.clear()
+                        report = HashrateReport(
+                            networkHashrateHps: 0.0,
+                            networkHashratePH: 0.0,
+                            smoothedHashratePH: 0.0,
+                            nominalHashratePH: 0.0,
+                            difficulty: 0.0,
+                            averageBlockIntervalSeconds: 600.0,
+                            sampleCount: 0,
+                            validIntervalCount: 0,
+                            totalWindowSeconds: 0.0,
+                            telemetryAgeSeconds: 0.0,
+                            isStale: true,
+                            hasTimestampAnomalies: false,
+                            isSyncing: true,
+                            history: []
+                        )
+                    } else {
+                        // Node is fully synced: seed the 30-block window if not yet seeded
+                        let bhash = binfo.bestblockhash
+                        if !bhash.isEmpty {
+                            if self.hashrateTracker.sampleCount < 30 {
+                                await self.seedHashrateWindow(tipHash: bhash, count: 31)
+                            } else if let header = try? await self.rpcClient.getBlockHeader(hash: bhash) {
+                                if let target = TargetConverter.targetHexFromBits(UInt32(header.bits, radix: 16) ?? 0) {
+                                    self.hashrateTracker.addBlock(
+                                        height: header.height,
+                                        hash: header.hash,
+                                        timestamp: TimeInterval(header.time),
+                                        targetHex: target
+                                    )
+                                }
+                            }
+                        }
+
+                        // Query consensus hashrate from local Knots daemon
+                        let knotsHash30 = try? await self.rpcClient.getNetworkHashps(blocks: 30)
+                        let knotsHash120 = try? await self.rpcClient.getNetworkHashps(blocks: 120)
+
+                        report = self.hashrateTracker.generateReport(
+                            override30Hps: knotsHash30,
+                            override120Hps: knotsHash120,
+                            isSyncing: false
+                        )
+                    }
 
                     // Adaptive Verification Progress ETA
                     self.etaEngine.addSample(progress: binfo.verificationprogress, height: binfo.blocks)
                     let peerCount = netInfo?.connections ?? 8
-                    let eta = self.etaEngine.calculateETA(isIBD: binfo.initialblockdownload, peerCount: peerCount)
+                    let eta = self.etaEngine.calculateETA(isIBD: inIBD, peerCount: peerCount)
 
                     self.onBlockchainUpdate?(binfo, report, netInfo, eta)
                 } catch {
                     // Suppress connection errors during initial startup
                 }
+            }
+        }
+    }
+
+    /// Seeds the hashrate tracker with a contiguous chain of block headers from tip backwards.
+    public func seedHashrateWindow(tipHash: String, count: Int = 31) async {
+        var currentHash = tipHash
+        var fetchedHeaders: [BlockHeader] = []
+
+        for _ in 0..<count {
+            guard !currentHash.isEmpty else { break }
+            do {
+                let header = try await rpcClient.getBlockHeader(hash: currentHash)
+                fetchedHeaders.append(header)
+                if let prev = header.previousblockhash, !prev.isEmpty {
+                    currentHash = prev
+                } else {
+                    break
+                }
+            } catch {
+                break
+            }
+        }
+
+        guard !fetchedHeaders.isEmpty else { return }
+        // Reverse so headers are added in ascending chronological order
+        for header in fetchedHeaders.reversed() {
+            if let target = TargetConverter.targetHexFromBits(UInt32(header.bits, radix: 16) ?? 0) {
+                hashrateTracker.addBlock(
+                    height: header.height,
+                    hash: header.hash,
+                    timestamp: TimeInterval(header.time),
+                    targetHex: target
+                )
             }
         }
     }

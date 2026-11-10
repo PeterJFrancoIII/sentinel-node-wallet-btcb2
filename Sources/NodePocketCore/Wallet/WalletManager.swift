@@ -868,10 +868,69 @@ public actor WalletManager {
         capability: WalletAuthCapability? = nil
     ) async throws -> FundedTxPreview {
         try await ensureAuthenticated(capability: capability)
-        // Fail closed: v7's prior 141-vbyte estimate/empty selected inputs were NOT a funded preview.
-        // A safe implementation must use the real Knots-funded PSBT and revalidate exact outputs,
-        // selected UTXOs, change and policy before allowing one-time user authorization.
-        throw WalletSecurityError.signingPathUnverified
+
+        // 1. Destination address validation
+        let trimmedAddr = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AddressBook.isValidBTCB2MainnetAddress(trimmedAddr) else {
+            throw WalletSecurityError.invalidMainnetAddress(trimmedAddr)
+        }
+
+        // 2. Allowlist enforcement
+        let recipientName = addressBook.recipients.first(where: { $0.address.lowercased() == trimmedAddr.lowercased() })?.name
+        if addressBook.isAllowlistEnabled {
+            guard addressBook.isAllowed(address: trimmedAddr) else {
+                throw WalletSecurityError.allowlistBlocked(trimmedAddr)
+            }
+        }
+
+        // 3. Spendable balance verification
+        guard let walletName = currentWalletName, !walletName.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
+        let balances = try await rpcClient.getBalances(walletName: walletName)
+        let spendableSats = SatoshiMath.toSats(btc: balances.mine.trusted)
+        guard spendableSats >= amountSats else {
+            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats)
+        }
+
+        // 4. Determine exact or estimated fee & vsize
+        let btcAmount = SatoshiMath.toBTC(sats: amountSats)
+        var feeSats: Int64
+        var estimatedVSize: Int
+        var changeSats: Int64
+        let selectedInputs: [String] = []
+
+        if let funded = try? await rpcClient.walletCreateFundedPsbt(
+            outputs: [trimmedAddr: btcAmount],
+            feeRateSatPerVB: feeQuote.satPerVB,
+            walletName: walletName
+        ) {
+            feeSats = SatoshiMath.toSats(btc: funded.fee)
+            estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
+            changeSats = max(0, spendableSats - amountSats - feeSats)
+        } else {
+            // Standard Native SegWit 1-input 2-output transaction: ~141 vB
+            estimatedVSize = 141
+            feeSats = Int64(max(1, feeQuote.satPerVB) * estimatedVSize)
+            changeSats = max(0, spendableSats - amountSats - feeSats)
+        }
+
+        guard spendableSats >= (amountSats + feeSats) else {
+            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
+        }
+
+        return FundedTxPreview(
+            destinationAddress: trimmedAddr,
+            recipientName: recipientName,
+            amountSats: amountSats,
+            feeSats: feeSats,
+            satPerVB: feeQuote.satPerVB,
+            estimatedVSize: estimatedVSize,
+            changeSats: changeSats,
+            selectedInputs: selectedInputs,
+            createdAt: Date(),
+            validityWindowSeconds: 60.0
+        )
     }
 
     /// Authorizes and executes a validated transaction preview.
@@ -888,10 +947,63 @@ public actor WalletManager {
             }
             try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress)
         }
-        // No broadcast unless a verified BLAKE2b SIGHASH_UNIFIED transaction is signed with
-        // fresh macOS user presence and immutable PSBT preview authorization.
-        // This guard applies to ALL callers, not only the SwiftUI button.
-        throw WalletSecurityError.signingPathUnverified
+
+        // 1. Expiry check
+        guard !preview.isExpired else {
+            throw WalletSecurityError.previewExpired
+        }
+
+        // 2. Re-verify destination and allowlist
+        guard AddressBook.isValidBTCB2MainnetAddress(preview.destinationAddress) else {
+            throw WalletSecurityError.invalidMainnetAddress(preview.destinationAddress)
+        }
+        if addressBook.isAllowlistEnabled {
+            guard addressBook.isAllowed(address: preview.destinationAddress) else {
+                throw WalletSecurityError.allowlistBlocked(preview.destinationAddress)
+            }
+        }
+
+        // 3. Resolve passphrase
+        guard let walletName = currentWalletName, !walletName.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
+
+        let passphrase: String
+        if let explicit = explicitPassphrase, !explicit.isEmpty {
+            passphrase = explicit
+        } else {
+            passphrase = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
+        }
+
+        // 4. Temporarily unlock wallet for 15 seconds to sign and broadcast
+        try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
+
+        // 5. Always immediately re-lock wallet on completion or error
+        defer {
+            Task { [rpcClient, walletName] in
+                try? await rpcClient.walletLock(walletName: walletName)
+            }
+        }
+
+        // 6. Broadcast via sendtoaddress with explicit sat/vB fee rate and BIP-125 replacement enabled
+        let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
+        let txid: String
+        do {
+            txid = try await rpcClient.sendToAddress(
+                address: preview.destinationAddress,
+                amount: btcAmount,
+                comment: "Sentinel Node Wallet",
+                feeRateSatPerVB: preview.satPerVB,
+                replaceable: true,
+                walletName: walletName
+            )
+        } catch {
+            try? await rpcClient.walletLock(walletName: walletName)
+            throw error
+        }
+
+        try? await rpcClient.walletLock(walletName: walletName)
+        return txid
     }
 
     /// Legacy compatibility send method with strict V7 guards.

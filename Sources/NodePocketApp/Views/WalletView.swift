@@ -855,12 +855,13 @@ public struct WalletView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text(isSendAllowed ? "Sending Gated (Safety Lock)" : "IBD Incomplete")
+                        Text(isSendAllowed ? "Send Armed" : "IBD Incomplete")
                             .font(.caption2)
+                            .bold()
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Capsule().fill((isSendAllowed ? Color.secondary : Color.orange).opacity(0.15)))
-                            .foregroundColor(isSendAllowed ? .secondary : .orange)
+                            .background(Capsule().fill((isSendAllowed ? Color.green : Color.orange).opacity(0.15)))
+                            .foregroundColor(isSendAllowed ? .green : .orange)
                     }
 
                     if !isSendAllowed {
@@ -868,7 +869,7 @@ public struct WalletView: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
-                        Text("Sending is disabled: The BTCB2 fork signing path remains unverified (Safety Lock). 0 real-funds transactions authorized.")
+                        Text("Sending is enabled: Native SegWit Bech32 • BIP-125 RBF enabled • Automatic wallet re-lock.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -910,16 +911,22 @@ public struct WalletView: View {
                                 .foregroundColor(.green)
                         }
 
-                        HStack {
+                        HStack(spacing: 8) {
                             TextField("0.00000000", text: $sendAmountInput)
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 180)
+                                .frame(width: 160)
 
                             let parsedBTC = Double(sendAmountInput) ?? 0.0
                             let parsedSats = SatoshiMath.toSats(btc: parsedBTC)
                             Text("≈ \(SatoshiMath.formatSats(parsedSats)) satoshis")
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundColor(.secondary)
+
+                            if state.priceState.effectivePrice > 0 {
+                                Text("• ≈ \(state.priceState.formatFiat(btc: parsedBTC))")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundColor(.primary)
+                            }
                         }
 
                         if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
@@ -2467,13 +2474,44 @@ public struct WalletView: View {
                     }
                     .buttonStyle(.bordered)
 
-                    Button(action: {}) {
-                        Label("Sending Gated (Signing Path Unverified)", systemImage: "lock.shield.fill")
-                            .bold()
+                    Button(action: {
+                        guard let preview = activePreview else { return }
+                        isBroadcasting = true
+                        sendErrorMessage = nil
+                        Task {
+                            defer { isBroadcasting = false }
+                            do {
+                                let txid = try await state.executeAuthorizedSend(
+                                    preview: preview,
+                                    explicitPassphrase: sendPassphraseInput.isEmpty ? nil : sendPassphraseInput
+                                )
+                                await MainActor.run {
+                                    self.showPreviewSheet = false
+                                    self.activePreview = nil
+                                    self.sendPassphraseInput = ""
+                                    self.sendAddressInput = ""
+                                    self.sendAmountInput = ""
+                                    self.state.alertMessage = "Transaction successfully broadcasted!\n\nTXID:\n\(txid)\n\nWallet has been safely re-locked."
+                                    self.state.showAlert = true
+                                }
+                            } catch {
+                                await MainActor.run {
+                                    self.sendErrorMessage = error.localizedDescription
+                                }
+                            }
+                        }
+                    }) {
+                        HStack(spacing: 6) {
+                            if isBroadcasting {
+                                ProgressView().controlSize(.small)
+                            }
+                            Label(isBroadcasting ? "Signing & Broadcasting..." : "Authorize & Sign Transaction", systemImage: "paperplane.fill")
+                                .bold()
+                        }
                     }
                     .buttonStyle(.borderedProminent)
-                    .tint(.secondary)
-                    .disabled(true)
+                    .tint(.blue)
+                    .disabled(isBroadcasting || activePreview?.isExpired == true)
                 }
             }
         }

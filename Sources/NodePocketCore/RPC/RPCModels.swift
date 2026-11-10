@@ -150,6 +150,18 @@ public struct BumpFeeResponse: Codable, Sendable {
     }
 }
 
+public struct FundedPsbtResponse: Codable, Sendable {
+    public let psbt: String
+    public let fee: Double
+    public let changepos: Int
+
+    public init(psbt: String, fee: Double, changepos: Int) {
+        self.psbt = psbt
+        self.fee = fee
+        self.changepos = changepos
+    }
+}
+
 public struct MempoolTxSummary: Codable, Sendable {
     public let vsize: Int?
     public let weight: Int?

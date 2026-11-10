@@ -377,4 +377,76 @@ final class RemediationPhaseValidationTests: XCTestCase {
             XCTAssertEqual(err, .unauthenticated)
         }
     }
+
+    func testPrepareSendPreviewAddressValidationAndAllowlist() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("send_preview_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "u", password: "p")
+        let addrBookURL = tempDir.appendingPathComponent("address_book.json")
+        let addressBook = AddressBook(storageURL: addrBookURL)
+        addressBook.setAllowlistEnabled(true)
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: addressBook,
+            allowUnauthenticatedForTesting: true
+        )
+
+        let feeQuote = FeeQuote(
+            type: .normal,
+            satPerVB: 10,
+            targetBlocks: 3,
+            estimatedMinutes: 30
+        )
+
+        // 1. Invalid address (non-bech32)
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa",
+                amountSats: 10_000,
+                feeQuote: feeQuote
+            )
+            XCTFail("Must reject legacy address")
+        } catch let err as WalletSecurityError {
+            guard case .invalidMainnetAddress = err else {
+                XCTFail("Expected invalidMainnetAddress but got \(err)")
+                return
+            }
+        }
+
+        // 2. Unallowlisted valid Bech32 address
+        let validUnlisted = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: validUnlisted,
+                amountSats: 10_000,
+                feeQuote: feeQuote
+            )
+            XCTFail("Must reject unallowlisted address when allowlist is active")
+        } catch let err as WalletSecurityError {
+            guard case .allowlistBlocked = err else {
+                XCTFail("Expected allowlistBlocked but got \(err)")
+                return
+            }
+        }
+
+        // 3. Allowlisted address with no wallet loaded
+        _ = try addressBook.addRecipient(name: "Test Recipient", address: validUnlisted)
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: validUnlisted,
+                amountSats: 10_000,
+                feeQuote: feeQuote
+            )
+            XCTFail("Must fail when no wallet loaded")
+        } catch let err as WalletSecurityError {
+            guard case .noWalletLoaded = err else {
+                XCTFail("Expected noWalletLoaded but got \(err)")
+                return
+            }
+        }
+    }
 }

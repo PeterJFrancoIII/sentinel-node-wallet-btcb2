@@ -56,4 +56,47 @@ final class HashrateTrackerTests: XCTestCase {
         XCTAssertTrue(report.isStale)
         XCTAssertEqual(report.telemetryAgeSeconds, 400.0, accuracy: 0.1)
     }
+
+    func testHashrateSyncGatingAndReport() {
+        let tracker = HashrateTracker(windowSize: 30)
+        let targetHex = "00000000ffff0000000000000000000000000000000000000000000000000000"
+
+        // Even if blocks are added, when isSyncing is true, report must indicate syncing with 0 hashrate
+        for i in 0..<10 {
+            tracker.addBlock(height: 100 + i, hash: "b_\(i)", timestamp: 1700000000 + Double(i * 10), targetHex: targetHex)
+        }
+
+        let report = tracker.generateReport(now: 1700000200, isSyncing: true)
+        XCTAssertTrue(report.isSyncing)
+        XCTAssertEqual(report.sampleCount, 0)
+        XCTAssertEqual(report.networkHashrateHps, 0.0)
+        XCTAssertEqual(report.networkHashratePH, 0.0)
+    }
+
+    func testConsensusOverride30And120() {
+        let tracker = HashrateTracker(windowSize: 30)
+        let targetHex = "00000000ffff0000000000000000000000000000000000000000000000000000"
+
+        let baseTime: TimeInterval = 1700000000
+        for i in 0..<31 {
+            tracker.addBlock(height: 1000 + i, hash: "hash_\(i)", timestamp: baseTime + Double(i * 600), targetHex: targetHex)
+        }
+
+        // Knots consensus rate: e.g. 35.38 PH/s (3.538e16 H/s)
+        let knots30Rate: Double = 3.538e16
+        let knots120Rate: Double = 3.412e16
+
+        let report = tracker.generateReport(
+            now: baseTime + (30 * 600) + 5,
+            override30Hps: knots30Rate,
+            override120Hps: knots120Rate,
+            isSyncing: false
+        )
+
+        XCTAssertFalse(report.isSyncing)
+        XCTAssertEqual(report.sampleCount, 30)
+        XCTAssertEqual(report.networkHashrateHps, knots30Rate, accuracy: 1.0)
+        XCTAssertEqual(report.networkHashratePH, knots30Rate / 1e15, accuracy: 0.01)
+        XCTAssertEqual(report.smoothedHashratePH, knots120Rate / 1e15, accuracy: 0.01)
+    }
 }
