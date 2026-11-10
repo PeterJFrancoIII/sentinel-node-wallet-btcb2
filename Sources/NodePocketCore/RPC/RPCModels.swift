@@ -87,6 +87,23 @@ public struct TransactionRecord: Codable, Identifiable, Sendable {
     public let txid: String
     public let time: Int
     public let timereceived: Int?
+    public let bip125Replaceable: String?
+
+    enum CodingKeys: String, CodingKey {
+        case address
+        case category
+        case amount
+        case label
+        case vout
+        case confirmations
+        case blockhash
+        case blockheight
+        case blocktime
+        case txid
+        case time
+        case timereceived
+        case bip125Replaceable = "bip125-replaceable"
+    }
 
     public init(
         address: String?,
@@ -100,7 +117,8 @@ public struct TransactionRecord: Codable, Identifiable, Sendable {
         blocktime: Int? = nil,
         txid: String,
         time: Int,
-        timereceived: Int? = nil
+        timereceived: Int? = nil,
+        bip125Replaceable: String? = nil
     ) {
         self.address = address
         self.category = category
@@ -114,6 +132,42 @@ public struct TransactionRecord: Codable, Identifiable, Sendable {
         self.txid = txid
         self.time = time
         self.timereceived = timereceived
+        self.bip125Replaceable = bip125Replaceable
+    }
+}
+
+public struct BumpFeeResponse: Codable, Sendable {
+    public let txid: String
+    public let origfee: Double
+    public let fee: Double
+    public let errors: [String]?
+
+    public init(txid: String, origfee: Double, fee: Double, errors: [String]? = nil) {
+        self.txid = txid
+        self.origfee = origfee
+        self.fee = fee
+        self.errors = errors
+    }
+}
+
+public struct MempoolTxSummary: Codable, Sendable {
+    public let vsize: Int?
+    public let weight: Int?
+    public let fee: Double?
+    public struct Fees: Codable, Sendable {
+        public let base: Double?
+    }
+    public let fees: Fees?
+
+    public var effectiveFeeBTC: Double {
+        fees?.base ?? fee ?? 0.0
+    }
+
+    public init(vsize: Int? = nil, weight: Int? = nil, fee: Double? = nil, fees: Fees? = nil) {
+        self.vsize = vsize
+        self.weight = weight
+        self.fee = fee
+        self.fees = fees
     }
 }
 

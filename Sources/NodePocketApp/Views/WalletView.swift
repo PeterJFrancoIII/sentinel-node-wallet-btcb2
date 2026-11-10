@@ -50,6 +50,20 @@ public struct WalletView: View {
     @State private var deleteErrorMessage: String? = nil
     @State private var showArchivedSection: Bool = false
 
+    // Wallet Renaming State
+    @State private var showRenameSheet: Bool = false
+    @State private var walletToRename: WalletSummary? = nil
+    @State private var newWalletNameInput: String = ""
+    @State private var renameErrorMessage: String? = nil
+    @State private var isRenamingWallet: Bool = false
+
+    // RBF Fee Bump State
+    @State private var showBumpFeeSheet: Bool = false
+    @State private var txToBump: TransactionRecord? = nil
+    @State private var bumpFeeRateInput: String = "5"
+    @State private var bumpFeeErrorMessage: String? = nil
+    @State private var isBumpingFee: Bool = false
+
     // Transaction Filter
     @State private var selectedTxFilter: String = "all"
 
@@ -150,6 +164,12 @@ public struct WalletView: View {
         }
         .sheet(isPresented: $showNewAddressSheet) {
             newAddressSheet
+        }
+        .sheet(isPresented: $showRenameSheet) {
+            renameWalletSheet
+        }
+        .sheet(isPresented: $showBumpFeeSheet) {
+            bumpFeeSheet
         }
         .alert("Permanently Delete Receive Address?", isPresented: $showDeleteAddressAlert) {
             Button("Cancel", role: .cancel) {
@@ -260,6 +280,38 @@ public struct WalletView: View {
 
                 // Balance Card
                 VStack(alignment: .leading, spacing: 14) {
+                    // Pending incoming transfer alert
+                    if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.badge.exclamationmark.fill")
+                                .font(.title2)
+                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text("Incoming Transfer Pending (0 Confirmations)")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundColor(.orange)
+                                    Text("ACTIVELY BEING RECEIVED")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                                        .foregroundColor(.orange)
+                                }
+                                Text("+\(String(format: "%.8f", state.walletSnapshot?.pendingBalance ?? 0.0)) BTCB2 (\(SatoshiMath.formatSats(state.walletSnapshot?.pendingBalanceSats ?? 0)) sats) is unconfirmed in the mempool. This pending transfer is NOT yet spendable until confirmed in a block.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+
                     HStack(alignment: .firstTextBaseline) {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Verified Spendable Balance")
@@ -847,9 +899,16 @@ public struct WalletView: View {
 
                     // Amount Input
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Amount (BTCB2):")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                        HStack {
+                            Text("Amount (BTCB2):")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text("Spendable Available: \(String(format: "%.8f", state.walletSnapshot?.trustedBalance ?? 0.0)) BTCB2")
+                                .font(.caption2)
+                                .bold()
+                                .foregroundColor(.green)
+                        }
 
                         HStack {
                             TextField("0.00000000", text: $sendAmountInput)
@@ -862,11 +921,22 @@ public struct WalletView: View {
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundColor(.secondary)
                         }
+
+                        if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.caption2)
+                                Text("Pending incoming transfer of +\(String(format: "%.8f", state.walletSnapshot?.pendingBalance ?? 0.0)) BTCB2 is actively being received and cannot be spent yet.")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                        }
                     }
 
                     // Fee Selection (Cheapest / Normal / Fast / Custom)
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Network Fee Target (Local BTCB2 Knots Quotes):")
+                        Text("Network Fee Target (Live Mempool-Derived Quotes):")
                             .font(.caption)
                             .foregroundColor(.secondary)
 
@@ -875,6 +945,18 @@ public struct WalletView: View {
                             feeOptionButton(title: "Normal", subtitle: "6 blks (~1h)", preset: .normal)
                             feeOptionButton(title: "Fast", subtitle: "2 blks (~20m)", preset: .fast)
                             feeOptionButton(title: "Custom", subtitle: "sat/vB", preset: .custom)
+                        }
+
+                        if let normalQuote = state.feeQuotes[.normal] {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chart.bar.xaxis")
+                                    .foregroundColor(.blue)
+                                    .font(.caption)
+                                Text("Live Mempool: Median fee rate is \(normalQuote.satPerVB) sat/vB (median cost ~\(normalQuote.medianTxFeeSats) sats for ~\(normalQuote.estimatedMinutes)m confirmation).")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 2)
                         }
 
                         if selectedFeePreset == .custom {
@@ -921,12 +1003,14 @@ public struct WalletView: View {
 
                         Picker("Filter", selection: $selectedTxFilter) {
                             Text("All").tag("all")
+                            Text("Pending (0-Conf)").tag("pending")
+                            Text("Confirmed").tag("confirmed")
                             Text("Received").tag("receive")
                             Text("Sent").tag("send")
                             Text("Mining").tag("generate")
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 250)
+                        .frame(width: 480)
 
                         Button(action: {
                             state.refreshWallet()
@@ -1634,6 +1718,16 @@ public struct WalletView: View {
                     .controlSize(.small)
                 }
 
+                Button("Rename") {
+                    walletToRename = summary
+                    newWalletNameInput = summary.name
+                    renameErrorMessage = nil
+                    showRenameSheet = true
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .help("Rename wallet directory and database")
+
                 if !summary.isArchived {
                     Button("Archive") {
                         state.archiveWallet(name: summary.name)
@@ -1789,6 +1883,222 @@ public struct WalletView: View {
         .frame(width: 480)
     }
 
+    private var renameWalletSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "pencil.circle.fill")
+                    .font(.title)
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Rename Wallet")
+                        .font(.headline)
+                    Text("Rename '\(walletToRename?.name ?? "")' on disk and in Bitcoin Knots")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Cancel") {
+                    showRenameSheet = false
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("New Wallet Name:")
+                    .font(.subheadline)
+                    .bold()
+
+                TextField("New Name (e.g. SavingsWallet)", text: $newWalletNameInput)
+                    .textFieldStyle(.roundedBorder)
+
+                Text("Wallet names must be 1–64 alphanumeric characters, hyphens, or underscores. The on-disk wallet folder and database will be safely moved, receive address mappings updated, and the wallet reloaded.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let err = renameErrorMessage {
+                Text(err)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showRenameSheet = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Rename Wallet") {
+                    guard let oldName = walletToRename?.name else { return }
+                    let newName = newWalletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !newName.isEmpty && newName != oldName else { return }
+
+                    isRenamingWallet = true
+                    renameErrorMessage = nil
+
+                    Task {
+                        defer { isRenamingWallet = false }
+                        let ok = await state.renameWallet(oldName: oldName, newName: newName)
+                        if ok {
+                            showRenameSheet = false
+                        } else {
+                            renameErrorMessage = state.alertMessage ?? "Failed to rename wallet."
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isRenamingWallet || newWalletNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newWalletNameInput.trimmingCharacters(in: .whitespacesAndNewlines) == walletToRename?.name)
+            }
+        }
+        .padding(20)
+        .frame(width: 460)
+    }
+
+    private var bumpFeeSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "bolt.circle.fill")
+                    .font(.title)
+                    .foregroundColor(.orange)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Bump Transaction Fee (RBF)")
+                        .font(.headline)
+                    Text("Accelerate unconfirmed transaction via BIP-125 Replace-By-Fee")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button("Cancel") {
+                    showBumpFeeSheet = false
+                }
+                .buttonStyle(.bordered)
+            }
+
+            Divider()
+
+            if let tx = txToBump {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text("Transaction ID:")
+                            .font(.caption)
+                            .bold()
+                        Text(tx.txid)
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+
+                    HStack {
+                        Text("Amount:")
+                            .font(.caption)
+                            .bold()
+                        Text(String(format: "%.8f BTCB2", tx.amount))
+                            .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        Text("(\(SatoshiMath.formatSats(SatoshiMath.toSats(btc: tx.amount))) sats)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack {
+                        Text("Status:")
+                            .font(.caption)
+                            .bold()
+                        Text("Pending (0 Confirmations)")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("New Fee Rate Target (sat/vB):")
+                    .font(.subheadline)
+                    .bold()
+
+                HStack(spacing: 8) {
+                    TextField("Rate", text: $bumpFeeRateInput)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+
+                    Text("sat/vB")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    Spacer()
+
+                    Button("Cheapest (\(state.feeQuotes[.cheapest]?.satPerVB ?? 1))") {
+                        bumpFeeRateInput = "\(max(2, state.feeQuotes[.cheapest]?.satPerVB ?? 1))"
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Normal (\(state.feeQuotes[.normal]?.satPerVB ?? 2))") {
+                        bumpFeeRateInput = "\(max(3, state.feeQuotes[.normal]?.satPerVB ?? 2))"
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+
+                    Button("Fast (\(state.feeQuotes[.fast]?.satPerVB ?? 5))") {
+                        bumpFeeRateInput = "\(max(5, state.feeQuotes[.fast]?.satPerVB ?? 5))"
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+
+                Text("BIP-125 requires the replacement transaction to pay a higher absolute fee and a higher fee rate than the original transaction.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            if let err = bumpFeeErrorMessage {
+                Text(err)
+                    .font(.caption)
+                    .foregroundColor(.red)
+            }
+
+            Divider()
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showBumpFeeSheet = false
+                }
+                .buttonStyle(.bordered)
+
+                Button("Submit Fee Bump") {
+                    guard let txid = txToBump?.txid, let newRate = Int(bumpFeeRateInput), newRate > 0 else {
+                        bumpFeeErrorMessage = "Please enter a valid positive integer sat/vB fee rate."
+                        return
+                    }
+
+                    isBumpingFee = true
+                    bumpFeeErrorMessage = nil
+
+                    Task {
+                        defer { isBumpingFee = false }
+                        let ok = await state.bumpTransactionFee(txid: txid, newFeeRate: newRate)
+                        if ok {
+                            showBumpFeeSheet = false
+                        } else {
+                            bumpFeeErrorMessage = state.alertMessage ?? "Fee bump rejected by Bitcoin Knots node."
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isBumpingFee || (Int(bumpFeeRateInput) ?? 0) <= 0)
+            }
+        }
+        .padding(20)
+        .frame(width: 480)
+    }
+
     private var chainIdentityBadge: some View {
         HStack(spacing: 6) {
             Image(systemName: "checkmark.shield.fill")
@@ -1827,6 +2137,7 @@ public struct WalletView: View {
         let isSelected = selectedFeePreset == preset
         let quote = state.feeQuotes[preset]
         let rate = quote?.satPerVB ?? (preset == .cheapest ? 1 : (preset == .normal ? 2 : 5))
+        let medianCostSats = quote?.medianTxFeeSats ?? Int64(rate * 140)
 
         return Button(action: { selectedFeePreset = preset }) {
             VStack(spacing: 3) {
@@ -1835,6 +2146,9 @@ public struct WalletView: View {
                     .bold()
                 Text("\(rate) sat/vB")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                Text("~\(medianCostSats) sats")
+                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                    .foregroundColor(isSelected ? .blue : .secondary)
                 Text(subtitle)
                     .font(.system(size: 9))
                     .foregroundColor(.secondary)
@@ -1854,10 +2168,16 @@ public struct WalletView: View {
     }
 
     private var filteredTransactions: [TransactionRecord] {
-        if selectedTxFilter == "all" {
+        switch selectedTxFilter {
+        case "pending":
+            return state.transactions.filter { $0.confirmations == 0 }
+        case "confirmed":
+            return state.transactions.filter { $0.confirmations > 0 }
+        case "receive", "send", "generate":
+            return state.transactions.filter { $0.category == selectedTxFilter }
+        default:
             return state.transactions
         }
-        return state.transactions.filter { $0.category == selectedTxFilter }
     }
 
     private func transactionRow(_ tx: TransactionRecord) -> some View {
@@ -1890,12 +2210,56 @@ public struct WalletView: View {
                         }
                         .buttonStyle(.plain)
                     }
+
+                    if tx.confirmations == 0 {
+                        HStack(spacing: 3) {
+                            Image(systemName: "clock.fill")
+                                .foregroundColor(.orange)
+                                .font(.system(size: 9))
+                            Text("PENDING (0 CONF)")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundColor(.orange)
+                        }
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.orange.opacity(0.18)))
+
+                        Button(action: {
+                            txToBump = tx
+                            bumpFeeRateInput = "\(max(5, Int(state.feeQuotes[.fast]?.satPerVB ?? 5)))"
+                            bumpFeeErrorMessage = nil
+                            showBumpFeeSheet = true
+                        }) {
+                            HStack(spacing: 3) {
+                                Image(systemName: "bolt.fill")
+                                    .font(.system(size: 9))
+                                Text("Bump Fee (RBF)")
+                                    .font(.system(size: 9, weight: .bold))
+                            }
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.blue.opacity(0.15)))
+                            .foregroundColor(.blue)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Apply BIP-125 Replace-By-Fee (RBF) to accelerate this pending transaction")
+                    }
                 }
 
-                if let height = tx.blockheight {
-                    Text("Block #\(height) • \(tx.confirmations) confirmations")
+                if tx.confirmations > 0 {
+                    if let height = tx.blockheight {
+                        Text("Block #\(height) • \(tx.confirmations) confirmations")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("\(tx.confirmations) confirmations")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                } else {
+                    Text("Unconfirmed in mempool • Awaiting block inclusion")
                         .font(.caption2)
-                        .foregroundColor(.secondary)
+                        .foregroundColor(.orange)
                 }
             }
 

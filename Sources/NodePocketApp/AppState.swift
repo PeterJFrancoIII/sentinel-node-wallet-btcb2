@@ -86,7 +86,7 @@ public final class AppState: ObservableObject {
         self.nodeManager = NodeManager(config: config)
         let authCoord = WalletAuthCoordinator(dataDirectory: config.dataDirectory)
         self.authCoordinator = authCoord
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
@@ -930,6 +930,48 @@ public final class AppState: ObservableObject {
                 alertMessage = "Wallet deletion refused or failed: \(error.localizedDescription)"
                 showAlert = true
             }
+        }
+    }
+
+    @discardableResult
+    public func renameWallet(oldName: String, newName: String) async -> Bool {
+        guard let session = authSession else {
+            alertMessage = "Wallet Manager is locked. Please unlock first."
+            showAlert = true
+            return false
+        }
+        do {
+            try await walletManager.renameWallet(oldName: oldName, newName: newName, capability: session)
+            await walletInventory.renameWalletMetadata(from: oldName, to: newName)
+            appendLog("[WALLET] Renamed wallet '\(oldName)' to '\(newName)'.")
+            refreshWalletInventory()
+            if walletSnapshot?.name == oldName {
+                refreshWallet()
+            }
+            return true
+        } catch {
+            alertMessage = "Wallet rename failed: \(error.localizedDescription)"
+            showAlert = true
+            return false
+        }
+    }
+
+    @discardableResult
+    public func bumpTransactionFee(txid: String, newFeeRate: Int? = nil) async -> Bool {
+        guard let session = authSession else {
+            alertMessage = "Wallet Manager is locked. Please unlock first."
+            showAlert = true
+            return false
+        }
+        do {
+            let res = try await walletManager.bumpFee(txid: txid, newFeeRateSatPerVB: newFeeRate != nil ? Double(newFeeRate!) : nil, capability: session)
+            appendLog("[TX] Successfully applied RBF fee bump for tx \(txid.prefix(12))... New txid: \(res.txid.prefix(12))... Fee: \(res.fee) BTCB2")
+            refreshWallet()
+            return true
+        } catch {
+            alertMessage = "Fee bump failed: \(error.localizedDescription)"
+            showAlert = true
+            return false
         }
     }
 

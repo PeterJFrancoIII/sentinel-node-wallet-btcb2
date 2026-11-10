@@ -168,6 +168,7 @@ public enum WalletCreationError: Error, LocalizedError, Sendable, Equatable {
     case creationRPCFailed(code: Int, message: String)
     case verificationFailed(String)
     case keychainPreSaveFailed(String)
+    case fileSystemError(String)
     case unauthenticated
 
     public var errorDescription: String? {
@@ -190,6 +191,8 @@ public enum WalletCreationError: Error, LocalizedError, Sendable, Equatable {
             return "Wallet creation verification failed: \(detail)"
         case .keychainPreSaveFailed(let detail):
             return "macOS Keychain storage failed: \(detail)"
+        case .fileSystemError(let detail):
+            return "Wallet file system error: \(detail)"
         case .unauthenticated:
             return "Wallet Manager is locked. Please log in with your credentials and 2FA."
         }
@@ -272,6 +275,7 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
 
 public actor WalletManager {
     public let rpcClient: BitcoinRPCClient
+    public let dataDirectory: URL
     public let keychainHelper: KeychainHelper
     private let passphraseCustody: any WalletPassphraseCustody
     public let addressBook: AddressBook
@@ -298,6 +302,7 @@ public actor WalletManager {
 
     public init(
         rpcClient: BitcoinRPCClient,
+        dataDirectory: URL? = nil,
         keychainHelper: KeychainHelper = .shared,
         passphraseCustody: (any WalletPassphraseCustody)? = nil,
         addressBook: AddressBook = AddressBook(),
@@ -308,6 +313,8 @@ public actor WalletManager {
         stagingDirectory: URL? = nil
     ) {
         self.rpcClient = rpcClient
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        self.dataDirectory = dataDirectory ?? appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
         self.keychainHelper = keychainHelper
         self.passphraseCustody = passphraseCustody ?? keychainHelper
         self.addressBook = addressBook
@@ -636,6 +643,75 @@ public actor WalletManager {
         try await loadWallet(name: name, capability: capability)
     }
 
+    /// Renames an existing wallet, moving its on-disk files, updating address store bindings, and reloading it in Bitcoin Knots.
+    public func renameWallet(oldName: String, newName: String, capability: WalletAuthCapability? = nil) async throws {
+        try await ensureAuthenticated(capability: capability)
+        guard Self.isValidWalletName(newName) else {
+            throw WalletCreationError.invalidWalletName("New wallet name contains invalid characters.")
+        }
+        let cleanOld = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanNew = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanOld != cleanNew else { return }
+
+        // Check that newName does not already exist on disk
+        let diskResponse = try await rpcClient.listWalletDir()
+        if diskResponse.wallets.contains(where: { $0.name == cleanNew }) {
+            throw WalletCreationError.walletAlreadyExists("A wallet named '\(cleanNew)' already exists on disk.")
+        }
+
+        // Unload old wallet if currently loaded
+        let loadedWallets = try await rpcClient.listWallets()
+        let wasLoaded = loadedWallets.contains(cleanOld)
+        let wasActive = (currentWalletName == cleanOld)
+        if wasLoaded {
+            _ = try await rpcClient.unloadWallet(name: cleanOld)
+        }
+
+        // Locate and move wallet files
+        let rootDir = dataDirectory
+        let candidatePaths = [
+            rootDir.appendingPathComponent("wallets").appendingPathComponent(cleanOld),
+            rootDir.appendingPathComponent(cleanOld)
+        ]
+
+        var moved = false
+        for oldPath in candidatePaths {
+            if FileManager.default.fileExists(atPath: oldPath.path) {
+                let parentDir = oldPath.deletingLastPathComponent()
+                let newPath = parentDir.appendingPathComponent(cleanNew)
+                try FileManager.default.moveItem(at: oldPath, to: newPath)
+                moved = true
+                break
+            }
+        }
+
+        guard moved else {
+            throw WalletCreationError.fileSystemError("Could not locate on-disk files for '\(cleanOld)'.")
+        }
+
+        // Migrate persistent receive address store
+        receiveAddressStore.migrateWallet(from: cleanOld, to: cleanNew)
+
+        // Reload under new name
+        if wasLoaded {
+            _ = try await rpcClient.loadWallet(name: cleanNew)
+            if wasActive {
+                self.currentWalletName = cleanNew
+                _ = try? await refreshWalletInfo(capability: capability)
+            }
+        }
+    }
+
+    /// Bumps the fee of a pending unconfirmed transaction using RBF (BIP 125).
+    public func bumpFee(txid: String, newFeeRateSatPerVB: Double? = nil, capability: WalletAuthCapability? = nil) async throws -> BumpFeeResponse {
+        try await ensureAuthenticated(capability: capability)
+        var options: [String: Any]? = nil
+        if let rate = newFeeRateSatPerVB, rate > 0 {
+            options = ["fee_rate": rate]
+        }
+        return try await rpcClient.bumpFee(txid: txid, options: options, walletName: currentWalletName)
+    }
+
     /// Fetches latest balances and encryption status for the active wallet.
     public func refreshWalletInfo(capability: WalletAuthCapability? = nil) async throws -> WalletSnapshot {
         try await ensureAuthenticated(capability: capability)
@@ -667,14 +743,16 @@ public actor WalletManager {
     }
 
     /// Fetches live fee quotes from the local Bitcoin Knots node for Cheapest, Normal, and Fast targets.
+    /// Incorporates live mempool percentiles (min, 25th, median, 75th) to calculate accurate median transaction costs.
     public func fetchLiveFeeQuotes() async throws -> [FeePresetType: FeeQuote] {
         // Query targets: Cheapest (24), Normal (6), Fast (2)
         async let fee24 = try? rpcClient.estimateSmartFee(confTarget: 24)
         async let fee6 = try? rpcClient.estimateSmartFee(confTarget: 6)
         async let fee2 = try? rpcClient.estimateSmartFee(confTarget: 2)
         async let mempoolInfo = try? rpcClient.getMempoolInfo()
+        async let rawMempool = try? rpcClient.getRawMempoolVerbose()
 
-        let (resp24, resp6, resp2, memInfo) = await (fee24, fee6, fee2, mempoolInfo)
+        let (resp24, resp6, resp2, memInfo, pool) = await (fee24, fee6, fee2, mempoolInfo, rawMempool)
 
         let observedFloors = [memInfo?.mempoolminfee, memInfo?.minrelaytxfee].compactMap { $0 }.filter { $0.isFinite && $0 > 0 }
         guard let relayFloorRate = observedFloors.max() else {
@@ -682,16 +760,24 @@ public actor WalletManager {
         }
         let relayFloorSat = FeeEngine.rateToSatPerVB(btcPerKB: relayFloorRate)
 
-        let rate24 = resp24?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp24!.feerate!) : relayFloorSat
-        let rate6 = resp6?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp6!.feerate!) : max(rate24, relayFloorSat)
-        let rate2 = resp2?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp2!.feerate!) : max(rate6, relayFloorSat)
+        // Evaluate live mempool rate percentiles if transactions exist in mempool
+        let mempoolDist = pool != nil ? FeeEngine.computeMempoolRateDistribution(from: pool!) : nil
+
+        let baseCheapest = resp24?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp24!.feerate!) : relayFloorSat
+        let baseNormal = resp6?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp6!.feerate!) : max(baseCheapest, relayFloorSat)
+        let baseFast = resp2?.feerate != nil ? FeeEngine.rateToSatPerVB(btcPerKB: resp2!.feerate!) : max(baseNormal, relayFloorSat)
+
+        // Blend with mempool distribution so median cost reflects true prevailing mempool fees
+        let rate24 = max(relayFloorSat, mempoolDist?.p25 ?? baseCheapest)
+        let rate6 = max(rate24, mempoolDist?.median ?? baseNormal)
+        let rate2 = max(rate6, mempoolDist?.p75 ?? baseFast)
 
         let (ch, norm, fst) = FeeEngine.reconcileRates(cheapest: rate24, normal: rate6, fast: rate2, relayFloor: relayFloorSat)
 
         return [
-            .cheapest: FeeQuote(type: .cheapest, satPerVB: ch, targetBlocks: 24, estimatedMinutes: 240, isRelayFloor: resp24?.feerate == nil),
-            .normal: FeeQuote(type: .normal, satPerVB: norm, targetBlocks: 6, estimatedMinutes: 60, isRelayFloor: resp6?.feerate == nil),
-            .fast: FeeQuote(type: .fast, satPerVB: fst, targetBlocks: 2, estimatedMinutes: 20, isRelayFloor: resp2?.feerate == nil)
+            .cheapest: FeeQuote(type: .cheapest, satPerVB: ch, targetBlocks: 24, estimatedMinutes: 240, isRelayFloor: resp24?.feerate == nil && mempoolDist == nil, medianTxFeeSats: Int64(ch * 140)),
+            .normal: FeeQuote(type: .normal, satPerVB: norm, targetBlocks: 6, estimatedMinutes: 60, isRelayFloor: resp6?.feerate == nil && mempoolDist == nil, medianTxFeeSats: Int64(norm * 140)),
+            .fast: FeeQuote(type: .fast, satPerVB: fst, targetBlocks: 2, estimatedMinutes: 20, isRelayFloor: resp2?.feerate == nil && mempoolDist == nil, medianTxFeeSats: Int64(fst * 140))
         ]
     }
 

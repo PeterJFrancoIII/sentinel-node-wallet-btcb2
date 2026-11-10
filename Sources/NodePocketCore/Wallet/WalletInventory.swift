@@ -408,6 +408,18 @@ public actor WalletInventory {
         saveMetadata()
     }
 
+    public func renameWalletMetadata(from oldName: String, to newName: String) {
+        if metadata.archivedWallets.contains(oldName) {
+            metadata.archivedWallets.remove(oldName)
+            metadata.archivedWallets.insert(newName)
+        }
+        if let cached = metadata.cachedBalances[oldName] {
+            metadata.cachedBalances[newName] = cached
+            metadata.cachedBalances.removeValue(forKey: oldName)
+        }
+        saveMetadata()
+    }
+
     public func preflightDeleteCheck(name: String) async throws -> URL {
         try Self.validateWalletName(name)
 

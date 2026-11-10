@@ -74,4 +74,37 @@ final class FeeEngineTests: XCTestCase {
         )
         XCTAssertTrue(expiredPreview.isExpired)
     }
+
+    func testComputeMempoolRateDistribution() {
+        var mockMempool: [String: MempoolTxSummary] = [:]
+        // Tx1: 140 vB, 140 sats = 1 sat/vB
+        mockMempool["tx1"] = MempoolTxSummary(vsize: 140, fee: 0.00000140)
+        // Tx2: 140 vB, 280 sats = 2 sat/vB
+        mockMempool["tx2"] = MempoolTxSummary(vsize: 140, fee: 0.00000280)
+        // Tx3: 140 vB, 700 sats = 5 sat/vB
+        mockMempool["tx3"] = MempoolTxSummary(vsize: 140, fee: 0.00000700)
+        // Tx4: 140 vB, 1400 sats = 10 sat/vB
+        mockMempool["tx4"] = MempoolTxSummary(vsize: 140, fee: 0.00001400)
+
+        let dist = FeeEngine.computeMempoolRateDistribution(from: mockMempool)
+        XCTAssertNotNil(dist)
+        if let d = dist {
+            XCTAssertEqual(d.min, 1)
+            XCTAssertEqual(d.p25, 2)
+            XCTAssertEqual(d.median, 5)
+            XCTAssertEqual(d.p75, 10)
+        }
+
+        // Empty mempool returns nil
+        XCTAssertNil(FeeEngine.computeMempoolRateDistribution(from: [:]))
+    }
+
+    func testFeeQuoteMedianTxFeeSats() {
+        let quote = FeeQuote(type: .normal, satPerVB: 2, targetBlocks: 6, estimatedMinutes: 60)
+        // Default standard SegWit is 140 vB * 2 sat/vB = 280 sats
+        XCTAssertEqual(quote.medianTxFeeSats, 280)
+
+        let customMedianQuote = FeeQuote(type: .fast, satPerVB: 5, targetBlocks: 2, estimatedMinutes: 20, medianTxFeeSats: 850)
+        XCTAssertEqual(customMedianQuote.medianTxFeeSats, 850)
+    }
 }

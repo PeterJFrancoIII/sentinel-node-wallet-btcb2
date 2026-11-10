@@ -335,6 +335,37 @@ public final class ReceiveAddressStore: @unchecked Sendable {
         saveToDisk()
     }
 
+    /// Migrates all receive address records and canonical address binding from an old wallet name to a new wallet name.
+    public func migrateWallet(from oldName: String, to newName: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let cleanOld = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanNew = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanOld.isEmpty, !cleanNew.isEmpty, cleanOld != cleanNew else { return }
+
+        if let canonical = canonicalAddresses[cleanOld] {
+            canonicalAddresses[cleanNew] = canonical
+            canonicalAddresses.removeValue(forKey: cleanOld)
+        }
+
+        for i in 0..<records.count {
+            if records[i].walletName == cleanOld {
+                let rec = records[i]
+                records[i] = ReceiveAddressRecord(
+                    id: rec.id,
+                    walletName: cleanNew,
+                    address: rec.address,
+                    label: rec.label,
+                    createdAt: rec.createdAt,
+                    isArchived: rec.isArchived,
+                    archivedAt: rec.archivedAt,
+                    isCanonical: rec.isCanonical
+                )
+            }
+        }
+        saveToDisk()
+    }
+
     // MARK: - Persistence
 
     private struct StoragePayload: Codable {

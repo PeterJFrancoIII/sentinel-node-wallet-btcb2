@@ -184,4 +184,35 @@ final class ReceiveAddressStoreTests: XCTestCase {
         XCTAssertNil(store.getCanonicalAddress(for: wallet1))
         XCTAssertEqual(store.getAddresses(for: wallet2).count, 1)
     }
+
+    func testMigrateWallet() {
+        let store = ReceiveAddressStore(storageURL: tempURL)
+        let oldWallet = "vault_old"
+        let newWallet = "vault_new"
+
+        let addr1 = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        let addr2 = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
+
+        store.setCanonicalAddress(addr1, for: oldWallet)
+        _ = store.addAddress(addr2, for: oldWallet, label: "Test Label")
+
+        XCTAssertEqual(store.getCanonicalAddress(for: oldWallet), addr1)
+        XCTAssertEqual(store.getAddresses(for: oldWallet).count, 2)
+
+        store.migrateWallet(from: oldWallet, to: newWallet)
+
+        XCTAssertNil(store.getCanonicalAddress(for: oldWallet))
+        XCTAssertEqual(store.getAddresses(for: oldWallet).count, 0)
+
+        XCTAssertEqual(store.getCanonicalAddress(for: newWallet), addr1)
+        let newAddrs = store.getAddresses(for: newWallet)
+        XCTAssertEqual(newAddrs.count, 2)
+        XCTAssertTrue(newAddrs.contains(where: { $0.address == addr1 }))
+        XCTAssertTrue(newAddrs.contains(where: { $0.address == addr2 }))
+
+        // Verify persistence across reload
+        let reloaded = ReceiveAddressStore(storageURL: tempURL)
+        XCTAssertEqual(reloaded.getCanonicalAddress(for: newWallet), addr1)
+        XCTAssertEqual(reloaded.getAddresses(for: newWallet).count, 2)
+    }
 }

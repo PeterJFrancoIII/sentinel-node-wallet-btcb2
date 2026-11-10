@@ -222,6 +222,18 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "listtransactions", params: ["*", count, 0, true], walletName: walletName)
     }
 
+    public func bumpFee(txid: String, options: [String: Any]? = nil, walletName: String? = nil) async throws -> BumpFeeResponse {
+        if let options = options {
+            return try await call(method: "bumpfee", params: [txid, options], walletName: walletName)
+        } else {
+            return try await call(method: "bumpfee", params: [txid], walletName: walletName)
+        }
+    }
+
+    public func getRawMempoolVerbose() async throws -> [String: MempoolTxSummary] {
+        try await call(method: "getrawmempool", params: [true])
+    }
+
     public func sendToAddress(address: String, amount: Double, comment: String = "", walletName: String? = nil) async throws -> String {
         try await call(method: "sendtoaddress", params: [address, amount, comment], walletName: walletName)
     }
