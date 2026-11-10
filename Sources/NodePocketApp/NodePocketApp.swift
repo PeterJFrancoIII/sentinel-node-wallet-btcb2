@@ -2,8 +2,36 @@ import SwiftUI
 import AppKit
 import NodePocketCore
 
+final class WindowAccessorView: NSView {
+    var onWindow: ((NSWindow) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window = self.window {
+            onWindow?(window)
+        }
+    }
+}
+
+struct WindowAccessor: NSViewRepresentable {
+    let onWindow: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> WindowAccessorView {
+        let view = WindowAccessorView()
+        view.onWindow = onWindow
+        return view
+    }
+
+    func updateNSView(_ nsView: WindowAccessorView, context: Context) {
+        nsView.onWindow = onWindow
+        if let window = nsView.window {
+            onWindow(window)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    weak var mainWindow: NSWindow?
+    var mainWindow: NSWindow?
     private var isTerminating = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -42,54 +70,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        // First restore mainWindow if held
-        if let window = mainWindow {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-            sender.activate(ignoringOtherApps: true)
-            return true
-        }
-
-        // Fallback: Deminiaturize or unhide any window in sender.windows
-        var handled = false
-        for window in sender.windows where !window.isSheet {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-            handled = true
-        }
-        if handled {
-            sender.activate(ignoringOtherApps: true)
-            return true
-        }
-
-        sender.activate(ignoringOtherApps: true)
+        restoreAndActivate()
         return true
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        // When app is activated via Dock, Cmd-Tab, etc. and windows are hidden or minimized
+        restoreAndActivate()
+    }
+
+    func restoreAndActivate() {
         if let window = mainWindow {
             if window.isMiniaturized {
                 window.deminiaturize(nil)
             }
-            if !window.isVisible {
-                window.makeKeyAndOrderFront(nil)
-            }
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
         } else {
-            let hasVisibleWindow = NSApp.windows.contains { !$0.isMiniaturized && $0.isVisible && !$0.isSheet }
-            if !hasVisibleWindow {
-                for window in NSApp.windows where !window.isSheet {
-                    if window.isMiniaturized {
-                        window.deminiaturize(nil)
-                    }
-                    window.makeKeyAndOrderFront(nil)
+            for window in NSApp.windows where !window.isSheet {
+                if window.isMiniaturized {
+                    window.deminiaturize(nil)
                 }
+                window.makeKeyAndOrderFront(nil)
+                window.orderFrontRegardless()
             }
         }
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
@@ -107,57 +112,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc func restoreAllMinimizedWindows() {
-        if let window = mainWindow {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            for window in NSApp.windows where window.isMiniaturized {
-                window.deminiaturize(nil)
-                window.makeKeyAndOrderFront(nil)
-            }
-        }
-        NSApp.activate(ignoringOtherApps: true)
+        restoreAndActivate()
     }
 
     @objc func showMainWindow() {
-        if let window = mainWindow {
-            if window.isMiniaturized {
-                window.deminiaturize(nil)
-            }
-            window.makeKeyAndOrderFront(nil)
-        } else {
-            for window in NSApp.windows where !window.isSheet {
-                if window.isMiniaturized {
-                    window.deminiaturize(nil)
-                }
-                window.makeKeyAndOrderFront(nil)
-            }
-        }
-        NSApp.activate(ignoringOtherApps: true)
-    }
-}
-
-struct WindowAccessor: NSViewRepresentable {
-    let onWindow: (NSWindow) -> Void
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        DispatchQueue.main.async {
-            if let window = view.window {
-                onWindow(window)
-            }
-        }
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        DispatchQueue.main.async {
-            if let window = nsView.window {
-                onWindow(window)
-            }
-        }
+        restoreAndActivate()
     }
 }
 
