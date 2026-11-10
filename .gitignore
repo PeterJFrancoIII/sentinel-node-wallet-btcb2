@@ -29,3 +29,8 @@ dist/
 *.app
 *.zip
 *.tar.gz
+
+# Python
+__pycache__/
+*.pyc
+
