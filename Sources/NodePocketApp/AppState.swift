@@ -23,7 +23,11 @@ public final class AppState: ObservableObject {
     @Published public var isApplyingNodeSettings = false
     @Published public var appliedSettingsStatus: String = "Not yet verified"
     @Published public var storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB)
+    @Published public var canonicalReceiveAddress: String = ""
     @Published public var receiveAddress: String = ""
+    @Published public var activeReceiveAddresses: [ReceiveAddressRecord] = []
+    @Published public var archivedReceiveAddresses: [ReceiveAddressRecord] = []
+    public let receiveAddressStore: ReceiveAddressStore
     @Published public var logs: [String] = []
     @Published public var alertMessage: String?
     @Published public var showAlert: Bool = false
@@ -76,12 +80,14 @@ public final class AppState: ObservableObject {
             storageMode: .compact(pruneMB: StorageMode.defaultPruneMB)
         )
         let book = AddressBook()
+        let addrStore = ReceiveAddressStore()
         self.addressBook = book
+        self.receiveAddressStore = addrStore
         self.nodeManager = NodeManager(config: config)
         let authCoord = WalletAuthCoordinator(dataDirectory: config.dataDirectory)
         self.authCoordinator = authCoord
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book, authCoordinator: authCoord)
-        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, authCoordinator: authCoord)
+        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
         self.userPreferredProfile = config.profile.type
@@ -424,7 +430,10 @@ public final class AppState: ObservableObject {
             self.isWalletTabUnlocked = false
             self.isMigrationPending = await authCoordinator.isMigrationPending
             self.walletSnapshot = nil
+            self.canonicalReceiveAddress = ""
             self.receiveAddress = ""
+            self.activeReceiveAddresses = []
+            self.archivedReceiveAddresses = []
             self.transactions = []
             self.appendLog("[AUTH] Wallet Manager locked.")
         }
@@ -472,12 +481,15 @@ public final class AppState: ObservableObject {
                     let walletName = try await walletManager.ensureDefaultWalletLoaded(capability: self.authSession)
                     if self.isWalletTabUnlocked && self.authSession != nil {
                         walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-                        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+                        await self.loadOrEstablishReceiveAddresses(for: walletName)
                         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
                         appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded and ready.")
                     } else {
                         walletSnapshot = nil
+                        canonicalReceiveAddress = ""
                         receiveAddress = ""
+                        activeReceiveAddresses = []
+                        archivedReceiveAddresses = []
                         transactions = []
                         appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' discovered. Locked.")
                     }
@@ -537,7 +549,7 @@ public final class AppState: ObservableObject {
             name: name, passphrase: passphrase, storeInKeychain: storeInKeychain, capability: self.authSession
         )
         walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        await self.loadOrEstablishReceiveAddresses(for: name)
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         self.refreshWalletInventory()
         startupStatus = "Ready"
@@ -577,7 +589,7 @@ public final class AppState: ObservableObject {
     public func loadExistingWallet(name: String) async throws {
         try await walletManager.loadWallet(name: name, capability: self.authSession)
         walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
-        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        await self.loadOrEstablishReceiveAddresses(for: name)
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         startupStatus = "Ready"
         appendLog("[WALLET] Existing wallet '\(name)' loaded.")
@@ -779,7 +791,7 @@ public final class AppState: ObservableObject {
         )
         appendLog("[WALLET] Successfully restored wallet '\(restoredName)' from \(backupFile.lastPathComponent)")
         self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: currentSession)
-        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: currentSession)) ?? ""
+        await self.loadOrEstablishReceiveAddresses(for: restoredName)
         self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: currentSession)) ?? []
         return restoredName
     }
@@ -809,9 +821,9 @@ public final class AppState: ObservableObject {
     public func selectWallet(name: String) {
         Task { @MainActor in
             do {
-                try await walletManager.selectWallet(name: name)
+                try await walletManager.selectWallet(name: name, capability: self.authSession)
                 self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-                self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+                await self.loadOrEstablishReceiveAddresses(for: name)
                 self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
                 self.refreshCoinbaseRewards()
                 self.refreshFeeQuotes()
@@ -854,6 +866,10 @@ public final class AppState: ObservableObject {
                 refreshWalletInventory()
                 if walletSnapshot?.name == name {
                     walletSnapshot = nil
+                    canonicalReceiveAddress = ""
+                    receiveAddress = ""
+                    activeReceiveAddresses = []
+                    archivedReceiveAddresses = []
                 }
             } catch {
                 alertMessage = "Failed to archive wallet: \(error.localizedDescription)"
@@ -905,6 +921,10 @@ public final class AppState: ObservableObject {
                 refreshWalletInventory()
                 if walletSnapshot?.name == name {
                     walletSnapshot = nil
+                    canonicalReceiveAddress = ""
+                    receiveAddress = ""
+                    activeReceiveAddresses = []
+                    archivedReceiveAddresses = []
                 }
             } catch {
                 alertMessage = "Wallet deletion refused or failed: \(error.localizedDescription)"
@@ -913,12 +933,51 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func generateNewReceiveAddress() {
-        Task {
+    @MainActor
+    public func loadOrEstablishReceiveAddresses(for walletName: String) async {
+        guard !walletName.isEmpty else {
+            self.canonicalReceiveAddress = ""
+            self.receiveAddress = ""
+            self.activeReceiveAddresses = []
+            self.archivedReceiveAddresses = []
+            return
+        }
+
+        // 1. Establish or retrieve Canonical Receive Address (Permanent, locked to creation)
+        if let canonical = try? await walletManager.getOrCreateCanonicalAddress(for: walletName, capability: self.authSession) {
+            self.canonicalReceiveAddress = canonical
+        } else {
+            self.canonicalReceiveAddress = receiveAddressStore.getCanonicalAddress(for: walletName) ?? ""
+        }
+
+        // 2. Establish or retrieve Temporary Receive Addresses (Rotatable, dynamic)
+        var temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
+        let archived = receiveAddressStore.getArchivedAddresses(for: walletName)
+
+        // If no temporary addresses exist yet and none archived, generate the initial temporary address
+        if temps.isEmpty && archived.isEmpty {
+            if let _ = try? await walletManager.generateReceiveAddress(label: "Temporary Address 1", capability: self.authSession) {
+                temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
+            }
+        }
+
+        self.activeReceiveAddresses = temps
+        self.archivedReceiveAddresses = archived
+        if !temps.contains(where: { $0.address == self.receiveAddress }) {
+            self.receiveAddress = temps.first?.address ?? ""
+        }
+    }
+
+    public func generateNewReceiveAddress(label: String = "") {
+        Task { @MainActor in
             do {
-                let addr = try await walletManager.generateReceiveAddress(capability: self.authSession)
+                guard let name = await walletManager.currentWalletName, !name.isEmpty else {
+                    throw WalletCreationError.invalidWalletName("No active wallet selected")
+                }
+                let addr = try await walletManager.generateReceiveAddress(label: label, capability: self.authSession)
+                await loadOrEstablishReceiveAddresses(for: name)
                 self.receiveAddress = addr
-                appendLog("[WALLET] Generated new receive address: \(addr)")
+                appendLog("[WALLET] Generated new receive address: \(addr) (Wallet: '\(name)')")
             } catch {
                 alertMessage = "Failed to generate receive address: \(error.localizedDescription)"
                 showAlert = true
@@ -926,13 +985,53 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public func archiveReceiveAddress(_ address: String) {
+        Task { @MainActor in
+            guard let name = await walletManager.currentWalletName, !name.isEmpty else { return }
+            receiveAddressStore.archiveAddress(address, for: name)
+            appendLog("[WALLET] Archived receive address '\(address)' for wallet '\(name)'.")
+            await loadOrEstablishReceiveAddresses(for: name)
+        }
+    }
+
+    public func unarchiveReceiveAddress(_ address: String) {
+        Task { @MainActor in
+            guard let name = await walletManager.currentWalletName, !name.isEmpty else { return }
+            receiveAddressStore.unarchiveAddress(address, for: name)
+            appendLog("[WALLET] Unarchived receive address '\(address)' for wallet '\(name)'.")
+            await loadOrEstablishReceiveAddresses(for: name)
+            self.receiveAddress = address
+        }
+    }
+
+    public func deleteReceiveAddress(_ address: String) {
+        Task { @MainActor in
+            guard let name = await walletManager.currentWalletName, !name.isEmpty else { return }
+            receiveAddressStore.deleteAddress(address, for: name)
+            appendLog("[WALLET] Permanently deleted receive address '\(address)' from wallet '\(name)'.")
+            await loadOrEstablishReceiveAddresses(for: name)
+        }
+    }
+
+    public func selectReceiveAddress(_ address: String) {
+        self.receiveAddress = address
+    }
+
     public func refreshWallet() {
         Task {
             do {
                 guard self.isWalletTabUnlocked else { return }
                 let snap = try await walletManager.refreshWalletInfo(capability: self.authSession)
-                self.walletSnapshot = snap
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                await MainActor.run {
+                    self.walletSnapshot = snap
+                }
+                let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                await MainActor.run {
+                    self.transactions = txs
+                }
+                if let name = snap.name.isEmpty ? nil : snap.name {
+                    await self.loadOrEstablishReceiveAddresses(for: name)
+                }
             } catch {
                 // Wallet may not be loaded yet or locked
             }

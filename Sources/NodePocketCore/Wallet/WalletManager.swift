@@ -275,6 +275,7 @@ public actor WalletManager {
     public let keychainHelper: KeychainHelper
     private let passphraseCustody: any WalletPassphraseCustody
     public let addressBook: AddressBook
+    public let receiveAddressStore: ReceiveAddressStore
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
     public let stagingDirectory: URL
@@ -300,6 +301,7 @@ public actor WalletManager {
         keychainHelper: KeychainHelper = .shared,
         passphraseCustody: (any WalletPassphraseCustody)? = nil,
         addressBook: AddressBook = AddressBook(),
+        receiveAddressStore: ReceiveAddressStore = ReceiveAddressStore(),
         authCoordinator: WalletAuthCoordinator? = nil,
         allowUnauthenticatedForTesting: Bool = false,
         initialWalletName: String? = nil,
@@ -309,6 +311,7 @@ public actor WalletManager {
         self.keychainHelper = keychainHelper
         self.passphraseCustody = passphraseCustody ?? keychainHelper
         self.addressBook = addressBook
+        self.receiveAddressStore = receiveAddressStore
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
         self.currentWalletName = initialWalletName
@@ -597,6 +600,15 @@ public actor WalletManager {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
 
+        // Generate and lock Canonical Receive Address for new wallet
+        if let canonical = try? await rpcClient.getNewAddress(
+            label: "Canonical Creation Address",
+            addressType: "bech32",
+            walletName: name
+        ) {
+            receiveAddressStore.setCanonicalAddress(canonical, for: name)
+        }
+
         return WalletCreationResult(
             walletName: name,
             isEncrypted: true,
@@ -730,10 +742,29 @@ public actor WalletManager {
         return rewards
     }
 
-    /// Generates a new Bech32 (BIP-173 / native SegWit) receive address.
+    /// Generates a new Bech32 (BIP-173 / native SegWit) receive address and saves to ReceiveAddressStore.
     public func generateReceiveAddress(label: String = "", capability: WalletAuthCapability? = nil) async throws -> String {
         try await ensureAuthenticated(capability: capability)
-        return try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
+        let addr = try await rpcClient.getNewAddress(label: label, addressType: "bech32", walletName: currentWalletName)
+        if let walletName = currentWalletName, !walletName.isEmpty {
+            receiveAddressStore.addAddress(addr, for: walletName, label: label)
+        }
+        return addr
+    }
+
+    /// Retrieves or generates the permanent canonical receive address locked to the creation of a wallet.
+    public func getOrCreateCanonicalAddress(for walletName: String, capability: WalletAuthCapability? = nil) async throws -> String {
+        try await ensureAuthenticated(capability: capability)
+        if let existing = receiveAddressStore.getCanonicalAddress(for: walletName) {
+            return existing
+        }
+        let newAddr = try await rpcClient.getNewAddress(
+            label: "Canonical Creation Address",
+            addressType: "bech32",
+            walletName: walletName
+        )
+        receiveAddressStore.setCanonicalAddress(newAddr, for: walletName)
+        return newAddr
     }
 
     /// Fetches recent wallet transactions (receive, send, coinbase).

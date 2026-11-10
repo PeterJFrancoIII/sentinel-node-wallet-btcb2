@@ -172,12 +172,14 @@ public actor WalletInventory {
     private let dataDirectory: URL
     private var metadata: WalletMetadataRegistry
     private let metadataFileURL: URL
+    public let receiveAddressStore: ReceiveAddressStore
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
 
     public init(
         rpcClient: BitcoinRPCClient,
         dataDirectory: URL,
+        receiveAddressStore: ReceiveAddressStore = ReceiveAddressStore(),
         authCoordinator: WalletAuthCoordinator? = nil,
         allowUnauthenticatedForTesting: Bool = false
     ) {
@@ -185,6 +187,7 @@ public actor WalletInventory {
         self.dataDirectory = dataDirectory
         self.metadataFileURL = dataDirectory.appendingPathComponent("wallets_metadata.json")
         self.metadata = Self.loadMetadata(from: metadataFileURL)
+        self.receiveAddressStore = receiveAddressStore
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
     }
@@ -543,9 +546,10 @@ public actor WalletInventory {
             throw WalletInventoryError.fileManagerError(error.localizedDescription)
         }
 
-        // Remove from registry metadata
+        // Remove from registry metadata and receive address store
         metadata.archivedWallets.remove(name)
         metadata.cachedBalances.removeValue(forKey: name)
         saveMetadata()
+        receiveAddressStore.deleteAllAddresses(for: name)
     }
 }

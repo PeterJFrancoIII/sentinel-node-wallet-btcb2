@@ -73,6 +73,14 @@ public struct WalletView: View {
     @State private var showPriceOverrideSheet: Bool = false
     @State private var customPriceInput: String = ""
 
+    // Receive Address Management State
+    @State private var showNewAddressSheet: Bool = false
+    @State private var newAddressLabelInput: String = ""
+    @State private var showSavedAddressesList: Bool = false
+    @State private var showArchivedReceiveAddresses: Bool = false
+    @State private var addressToDelete: String? = nil
+    @State private var showDeleteAddressAlert: Bool = false
+
     // Node RPC Live Status in Create Sheet
     @State private var isCheckingRPC: Bool = false
     @State private var isRPCOnline: Bool = false
@@ -139,6 +147,22 @@ public struct WalletView: View {
         }
         .sheet(isPresented: $showPriceOverrideSheet) {
             priceOverrideSheet
+        }
+        .sheet(isPresented: $showNewAddressSheet) {
+            newAddressSheet
+        }
+        .alert("Permanently Delete Receive Address?", isPresented: $showDeleteAddressAlert) {
+            Button("Cancel", role: .cancel) {
+                addressToDelete = nil
+            }
+            Button("Delete Permanently", role: .destructive) {
+                if let addr = addressToDelete {
+                    state.deleteReceiveAddress(addr)
+                    addressToDelete = nil
+                }
+            }
+        } message: {
+            Text("Are you sure you want to delete '\(addressToDelete ?? "")'?\n\nThis address will be permanently removed from your active and archived address lists in Sentinel Node Wallet.")
         }
     }
 
@@ -339,44 +363,323 @@ public struct WalletView: View {
                 .padding()
                 .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
-                // Receive Section with QR Code
-                VStack(alignment: .leading, spacing: 14) {
+                // Receive Section: Canonical Creation Address & Temporary Rotated Addresses
+                VStack(alignment: .leading, spacing: 18) {
+                    // Header
                     HStack {
                         Image(systemName: "arrow.down.circle.fill")
                             .foregroundColor(.blue)
+                            .font(.title3)
                         Text("Receive BTCB2")
-                            .font(.headline)
+                            .font(.title3)
+                            .bold()
+
+                        if let currentName = state.walletSnapshot?.name {
+                            Text("• \(currentName)")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        // Count badges
+                        if !state.activeReceiveAddresses.isEmpty {
+                            Text("\(state.activeReceiveAddresses.count) Temporary Active")
+                                .font(.caption2)
+                                .bold()
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.blue.opacity(0.15)))
+                                .foregroundColor(.blue)
+                        }
+
+                        if !state.archivedReceiveAddresses.isEmpty {
+                            Button(action: { showArchivedReceiveAddresses.toggle() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "archivebox")
+                                    Text("Archived (\(state.archivedReceiveAddresses.count))")
+                                }
+                                .font(.caption2)
+                                .bold()
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                                .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button(action: {
+                            newAddressLabelInput = ""
+                            showNewAddressSheet = true
+                        }) {
+                            Label("New Temporary Address", systemImage: "plus.circle")
+                                .font(.caption)
+                        }
                     }
 
-                    if !state.receiveAddress.isEmpty {
-                        HStack(alignment: .top, spacing: 20) {
-                            QRCodeView(string: state.receiveAddress, size: 130)
+                    // 1. CANONICAL WALLET ADDRESS CARD (Permanent & Locked to Creation)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "lock.shield.fill")
+                                .foregroundColor(.purple)
+                            Text("Canonical Wallet Address")
+                                .font(.headline)
 
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Native SegWit Bech32 Receive Address:")
+                            Text("PERMANENT • LOCKED TO CREATION")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.purple.opacity(0.15)))
+                                .foregroundColor(.purple)
+
+                            Spacer()
+
+                            if !state.canonicalReceiveAddress.isEmpty {
+                                Button(action: {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(state.canonicalReceiveAddress, forType: .string)
+                                    state.appendLog("[UI] Copied canonical receive address to clipboard.")
+                                }) {
+                                    Label("Copy Canonical Address", systemImage: "doc.on.doc")
+                                }
+                            }
+                        }
+
+                        Text("Permanent immutable receive address bound to the creation of '\(state.walletSnapshot?.name ?? "this wallet")'. This address never changes and cannot be deleted or archived. Recommended for MiningRigRentals mining pool payouts, exchange whitelisting, and recurring deposits.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if !state.canonicalReceiveAddress.isEmpty {
+                            HStack(alignment: .top, spacing: 16) {
+                                QRCodeView(string: state.canonicalReceiveAddress, size: 105)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Locked Creation Bech32 (Native SegWit):")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+
+                                    Text(state.canonicalReceiveAddress)
+                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .padding(10)
+                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
+
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .foregroundColor(.purple)
+                                            .font(.caption)
+                                        Text("Immutable creation address for \(state.walletSnapshot?.name ?? "wallet")")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        } else {
+                            HStack {
+                                ProgressView().scaleEffect(0.7)
+                                Text("Loading canonical creation address...")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor).opacity(0.6)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.purple.opacity(0.2), lineWidth: 1)
+                    )
 
-                                Text(state.receiveAddress)
-                                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                                    .textSelection(.enabled)
-                                    .padding(10)
-                                    .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
+                    // 2. TEMPORARY RECEIVE ADDRESS CARD (Rotatable & Regenerable)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                                .foregroundColor(.blue)
+                            Text("Temporary Receive Address")
+                                .font(.headline)
 
-                                HStack(spacing: 12) {
-                                    Button(action: {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(state.receiveAddress, forType: .string)
-                                        state.appendLog("[UI] Copied receive address to clipboard.")
-                                    }) {
-                                        Label("Copy Address", systemImage: "doc.on.doc")
+                            Text("ROTATABLE • REGENERABLE")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.blue.opacity(0.15)))
+                                .foregroundColor(.blue)
+
+                            Spacer()
+
+                            Button(action: {
+                                newAddressLabelInput = ""
+                                showNewAddressSheet = true
+                            }) {
+                                Label("New Address", systemImage: "plus.circle")
+                            }
+                        }
+
+                        Text("Dynamic receive address for one-off payments and enhanced privacy rotation. Can be regenerated multiple times, archived from view, or permanently deleted.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if !state.receiveAddress.isEmpty {
+                            HStack(alignment: .top, spacing: 16) {
+                                QRCodeView(string: state.receiveAddress, size: 105)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Text("Active Temporary Bech32 Address:")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+
+                                        if let record = state.activeReceiveAddresses.first(where: { $0.address == state.receiveAddress }),
+                                           !record.label.isEmpty {
+                                            Text("• \(record.label)")
+                                                .font(.caption2)
+                                                .bold()
+                                                .foregroundColor(.blue)
+                                        }
                                     }
 
-                                    Button(action: {
-                                        state.generateNewReceiveAddress()
-                                    }) {
-                                        Label("New Address", systemImage: "plus.circle")
+                                    Text(state.receiveAddress)
+                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .padding(10)
+                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
+
+                                    HStack(spacing: 12) {
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(state.receiveAddress, forType: .string)
+                                            state.appendLog("[UI] Copied temporary receive address to clipboard.")
+                                        }) {
+                                            Label("Copy Address", systemImage: "doc.on.doc")
+                                        }
+
+                                        Button(action: {
+                                            state.archiveReceiveAddress(state.receiveAddress)
+                                        }) {
+                                            Label("Archive", systemImage: "archivebox")
+                                        }
+                                        .help("Removes address from active view while safely preserving it and its funds in the wallet database.")
+
+                                        Button(role: .destructive, action: {
+                                            addressToDelete = state.receiveAddress
+                                            showDeleteAddressAlert = true
+                                        }) {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                        .help("Permanently deletes address record from Sentinel Node Wallet.")
                                     }
+                                }
+                            }
+
+                            // Saved Temporary Addresses List
+                            if state.activeReceiveAddresses.count > 1 {
+                                DisclosureGroup(
+                                    isExpanded: $showSavedAddressesList,
+                                    content: {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            ForEach(state.activeReceiveAddresses) { record in
+                                                HStack {
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        HStack {
+                                                            Text(record.address)
+                                                                .font(.system(size: 11, design: .monospaced))
+                                                                .lineLimit(1)
+                                                            if record.address == state.receiveAddress {
+                                                                Text("ACTIVE")
+                                                                    .font(.system(size: 9, weight: .bold))
+                                                                    .padding(.horizontal, 4)
+                                                                    .padding(.vertical, 1)
+                                                                    .background(Capsule().fill(Color.blue))
+                                                                    .foregroundColor(.white)
+                                                        }
+                                                    }
+                                                    HStack(spacing: 8) {
+                                                        if !record.label.isEmpty {
+                                                            Text(record.label)
+                                                                .font(.caption2)
+                                                                .bold()
+                                                                .foregroundColor(.secondary)
+                                                        }
+                                                        Text(record.createdAt, style: .date)
+                                                            .font(.caption2)
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                }
+
+                                                Spacer()
+
+                                                if record.address != state.receiveAddress {
+                                                    Button("Select") {
+                                                        state.selectReceiveAddress(record.address)
+                                                    }
+                                                    .buttonStyle(.bordered)
+                                                    .controlSize(.small)
+                                                }
+
+                                                Button(action: {
+                                                    NSPasteboard.general.clearContents()
+                                                    NSPasteboard.general.setString(record.address, forType: .string)
+                                                    state.appendLog("[UI] Copied address to clipboard.")
+                                                }) {
+                                                    Image(systemName: "doc.on.doc")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help("Copy Address")
+
+                                                Button(action: {
+                                                    state.archiveReceiveAddress(record.address)
+                                                }) {
+                                                    Image(systemName: "archivebox")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help("Archive Address")
+
+                                                Button(action: {
+                                                    addressToDelete = record.address
+                                                    showDeleteAddressAlert = true
+                                                }) {
+                                                    Image(systemName: "trash")
+                                                        .foregroundColor(.red)
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help("Delete Address")
+                                            }
+                                            .padding(6)
+                                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor).opacity(0.5)))
+                                        }
+                                    }
+                                    .padding(.top, 6)
+                                },
+                                label: {
+                                    Text("Saved Temporary Addresses for \(state.walletSnapshot?.name ?? "Wallet") (\(state.activeReceiveAddresses.count))")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            )
+                        }
+                    } else if !state.archivedReceiveAddresses.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("All temporary receive addresses for '\(state.walletSnapshot?.name ?? "this wallet")' are currently archived.")
+                                .font(.callout)
+                                .foregroundColor(.secondary)
+                            Text("Archived addresses remain fully valid and funds sent to them are safely preserved. You can unarchive an address below or generate a new temporary address.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            HStack(spacing: 12) {
+                                Button(action: {
+                                    newAddressLabelInput = ""
+                                    showNewAddressSheet = true
+                                }) {
+                                    Label("Generate New Address", systemImage: "plus.circle.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+
+                                Button(action: {
+                                    showArchivedReceiveAddresses = true
+                                }) {
+                                    Label("View Archived (\(state.archivedReceiveAddresses.count))", systemImage: "archivebox")
                                 }
                             }
                         }
@@ -384,13 +687,97 @@ public struct WalletView: View {
                         Button(action: {
                             state.generateNewReceiveAddress()
                         }) {
-                            Label("Generate Receive Address", systemImage: "plus.circle.fill")
+                            Label("Generate Temporary Receive Address", systemImage: "plus.circle.fill")
                         }
                         .buttonStyle(.borderedProminent)
                     }
+
+                    // Archived Addresses Section
+                    if showArchivedReceiveAddresses && !state.archivedReceiveAddresses.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Divider()
+                            HStack {
+                                Image(systemName: "archivebox.fill")
+                                    .foregroundColor(.secondary)
+                                Text("Archived Receive Addresses (\(state.archivedReceiveAddresses.count))")
+                                    .font(.subheadline)
+                                    .bold()
+                                Spacer()
+                                Button("Hide") {
+                                    showArchivedReceiveAddresses = false
+                                }
+                                .buttonStyle(.plain)
+                                .font(.caption)
+                            }
+
+                            Text("Archived addresses are removed from your active view, but their presence and all associated funds remain safely in your Bitcoin Knots wallet database. You can retrieve/unarchive them at any time.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            ForEach(state.archivedReceiveAddresses) { record in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(record.address)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .lineLimit(1)
+                                        HStack(spacing: 8) {
+                                            if !record.label.isEmpty {
+                                                Text(record.label)
+                                                    .font(.caption2)
+                                                    .bold()
+                                            }
+                                            if let archDate = record.archivedAt {
+                                                Text("Archived: \(archDate, style: .date)")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    Button("Unarchive") {
+                                        state.unarchiveReceiveAddress(record.address)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+
+                                    Button(action: {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(record.address, forType: .string)
+                                        state.appendLog("[UI] Copied archived address to clipboard.")
+                                    }) {
+                                        Image(systemName: "doc.on.doc")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Copy Address")
+
+                                    Button(action: {
+                                        addressToDelete = record.address
+                                        showDeleteAddressAlert = true
+                                    }) {
+                                        Image(systemName: "trash")
+                                            .foregroundColor(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Delete Permanently")
+                                }
+                                .padding(8)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor).opacity(0.4)))
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
                 }
-                .padding()
-                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor).opacity(0.6)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.blue.opacity(0.2), lineWidth: 1)
+                )
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
                 // Send Composer Section (Minimalist, Gated, V7-Compliant)
                 VStack(alignment: .leading, spacing: 14) {
@@ -2434,5 +2821,52 @@ public struct WalletView: View {
         }
         .padding(20)
         .frame(width: 480, height: 380)
+    }
+
+    private var newAddressSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Image(systemName: "plus.circle.fill")
+                    .foregroundColor(.blue)
+                    .font(.title2)
+                Text("Generate New Receive Address")
+                    .font(.headline)
+                Spacer()
+                Button("Cancel") {
+                    showNewAddressSheet = false
+                }
+                .buttonStyle(.plain)
+            }
+
+            Text("Generate a new Native SegWit Bech32 (bc1...) receive address attached to '\(state.walletSnapshot?.name ?? "active wallet")'.")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Address Label (Optional):")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                TextField("e.g. Mining Pool Payout, Cold Storage, etc.", text: $newAddressLabelInput)
+                    .textFieldStyle(.roundedBorder)
+            }
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    showNewAddressSheet = false
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Generate Address") {
+                    let label = newAddressLabelInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                    state.generateNewReceiveAddress(label: label)
+                    showNewAddressSheet = false
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }
