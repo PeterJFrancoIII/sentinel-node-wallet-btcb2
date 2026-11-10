@@ -1,8 +1,8 @@
 # Sentinel Node Wallet BTCB2 — Project Status
 
-**Snapshot:** 2026-11-09 (America/New_York). **Status:** development candidate; **production, public distribution and real funds: NO-GO**.
-**Code baseline:** [b711b5c](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/b711b5c4fc92f10ad71e7e77ff4d663b5f63557b) on [open PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107; not merged to main.
-**CI:** [42729526880](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42729526880): 123 executed, **122 passed, 0 failed, 1 skipped** (interactive Keychain). A green build is not native-app or wallet-security certification.
+**Snapshot:** 2026-11-10 (America/New_York). **Status:** development candidate; **production, public distribution and real funds: NO-GO**.
+**Code baseline:** [b8c73a0](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/b8c73a0464c67bf94afa133b9a6ec197289d182f) on [open PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107; not merged to main.
+**CI:** [42753854782](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42753854782): 129 executed, **128 passed, 0 failed, 1 skipped** (interactive Keychain). A green build is not native-app or wallet-security certification.
 
 **Evidence labels:** **BUILT** = present in source; **PEER-REPORTED** = another agent's runtime claim, not independently reproduced; **OPEN** = failing, unproven or missing acceptance; **GATE** = mandatory before release. Do not turn source presence or peer receipts into a native PASS.
 
@@ -16,7 +16,7 @@
 | Access | Local multi-user username/password, RFC6238 TOTP, recovery codes, short-lived wallet capability and step-up framework; Keychain integration; Apple Passwords-oriented UI hooks. |
 | Pricing | Neoxa/NonKYC BTCB2 quote service, attribution, freshness handling and manual override path. |
 | Security | Backup staging, non-clobber publication and receipt logic; core signing/broadcast disabled pending BTCB2 SIGHASH_UNIFIED verification. |
-| Recent repairs | #069 RPC-stage diagnostics; #070 Dock/window restoration; #071 daemon-adoption recognition of owned .cookie **or** bitcoin.conf plus typed rejection errors; #075 receive address store and strict userPresence capability reconciliation; #076 single-window lifecycle close-to-hide and targeted mainWindow restore; #077 live daemon 1-click launch and end-to-end encrypted descriptor wallet creation/lock/unlock/address qualification. |
+| Recent repairs | #069 RPC-stage diagnostics; #070 Dock/window restoration; #071 daemon-adoption recognition of owned .cookie **or** bitcoin.conf plus typed rejection errors; #075 receive address store and strict userPresence capability reconciliation; #076 single-window lifecycle close-to-hide and targeted mainWindow restore; #077 live daemon 1-click launch and end-to-end encrypted descriptor wallet creation/lock/unlock/address qualification; #078 wallet renaming, RBF bump fee, pending vs confirmed spendable balance isolation, and live mempool percentile fee intelligence; #079 sync-gated hashrate tracker with 30-block consensus derivation, fully armed send pipeline with Bech32 validation, allowlist enforcement, funded simulation, BIP-125 RBF, automatic deferred wallet re-lock, and reactive live USD fiat preview. |
 
 ## In progress — independently identified defects / proof gaps
 
