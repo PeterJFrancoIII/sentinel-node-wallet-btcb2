@@ -7,7 +7,7 @@
 - BTCB2 BLAKE2b/BIP-110 MainNet-only, authenticated loopback RPC, verified Knots daemon, owned datadir/configuration and pinned fork/chain anchors; no unrelated runtime coupling, wallet cloud sync or remote RPC.
 - Encrypted descriptor wallets and explicitly authorized local multi-user login (password + TOTP + recovery). Enforce authentication and high-risk device-owner approval **in core**, not only UI. Never silently weaken failed Keychain entitlements or user-presence enforcement.
 - Preserve wallets, secrets, backup identity, metadata and chainstate. Backup before reversible Trash deletion; fail closed on nonzero/unknown balance, mismatch, non-durable backup, cancellation or restore uncertainty.
-- Core send/broadcast stays disabled until independent BTCB2 SIGHASH_UNIFIED replay-safe signing, integer-satoshi fees, trusted-recipient/PSBT binding, one-use approval and locked-after-action semantics are proven.
+- Core send/broadcast stays disabled until independent BTCB2 SIGHASH_UNIFIED replay-safe signing, integer-satoshi fees, trusted-recipient/PSBT binding, one-use approval and locked-after-action semantics are proven. **P0 fix c19332b** adds both WalletManager + generic-RPC hard denial of signing/send/RBF methods and UI lock; 2 Swift CI regressions passed at run 42931815052, but this does not certify fork signing, notarization, or external RPC clients.
 - Apple Passwords requires owner-approved HTTPS webcredentials + AASA, actual Team ID/bundle ID and signed app; a generic app Keychain item is **not** an Apple Passwords login. Do not claim secure two-factor behavior without hardware acceptance. A compromised user session/OS can defeat a software hot wallet.
 
 ## Open security findings (fail-release)

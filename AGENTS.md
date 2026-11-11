@@ -7,7 +7,7 @@
 ## At entry
 
 1. Query canonical SCM **Session_Gemini_NodePocketBTCB2_20261106-1741** via search_nodes then open_nodes; search **InterAgent_Dialogue_Channel** for latest exact-session peer receipts. Apply [SCM rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md).
-2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **5e7a597**; 117 passed, 0 failed, one interactive Keychain test skipped. This does not establish native Keychain PASS. Branch is **unmerged**.
+2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **c19332b**; 131 executed / 130 passed / zero failed / one interactive Keychain test skipped. Source-only spending lock restored after #079 regression; signing remains UNVERIFIED. This does not establish native Keychain PASS. Branch is **unmerged**.
 3. Confirm status evidence in [Project Status](docs/PROJECT_STATUS.md). Distinguish **BUILT source**, **PEER-REPORTED native**, and **independently verified**. Do not recast stale V12/v13 planning as undone code.
 
 ## Current work order (priority)
@@ -21,6 +21,7 @@
 
 - No production daemon stop/restart, app deployment, wallet delete/restore, funded test, file/chainstate reset, unreviewed PR merge or spend. Operator authorization is a separate gate.
 - Isolated regtest is **test-only**; never expose an alternate network in the product. Preserve immutable wallet/passphrase identity; passphrase alone is not a wallet backup.
+- **Priority P0 completed at SOURCE+CI only:** c19332b re-established signingPathUnverified in WalletManager and generic RPC denying send, RBF and signing calls, and disabled SwiftUI Send/RBF. Never re-arm based on IBD/height or a Python reference test; only future separately approved independent BTCB2 SIGHASH_UNIFIED security qualification may change the hold.
 - Do not bypass signingPathUnverified, Keychain OSStatus errors, daemon-verification rejection or backup durability uncertainty.
 - Handoff with exact SHA, CI URL/counts, native environment + redacted reproduction, PASS/FAIL/SKIPPED/NOT RUN, superseded receipt IDs, open blockers and next safe action. No secrets or personal data.
 

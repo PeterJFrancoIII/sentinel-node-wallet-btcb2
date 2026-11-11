@@ -13,7 +13,7 @@
 
 - Review on [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107. **No unreviewed merge or production release.** Preserve historical receipts; report supersession explicitly.
 - Every change/receipt records exact code SHA, test run + pass/fail/skip, installed-Mac evidence versus mocked/source proof, unresolved P0/P1 and operator impact. Never call an optional/skipped test a native PASS.
-- Code and CI evidence baseline: **5e7a597**; CI [42705121938](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42705121938): **117 passed / 0 failed / 1 skipped** (118 executed). The Keychain creation fail-open path was corrected at source/CI level; hardware verification is still open. This documents development progress only.
+- Code and CI evidence baseline: **c19332b**; CI [42931815052](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42931815052): **130 passed / 0 failed / 1 skipped** (131 executed). The earlier Keychain creation fail-open correction remains in source; c19332b reinstated the mandatory app-layer signing/send/RBF hold following #079. Native hardware, BTCB2 signing and recovery verification remain open. This documents development progress only.
 - All security/production release gates in [SECURITY.md](SECURITY.md) and [TEST_AND_RELEASE_MATRIX.md](TEST_AND_RELEASE_MATRIX.md) require independently inspectable evidence; the owner authorizes production changes separately.
 
 ## Shared agent governance
