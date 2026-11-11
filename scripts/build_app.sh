@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "=== Building Sentinel Node Wallet - BTCB2 Native macOS Release Binary ==="
+echo "=== Building Sentinel Node Wallet - BTCB2 LOCAL DEVELOPMENT BUNDLE (ad-hoc signed, NOT production) ==="
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -11,7 +11,7 @@ cd "${ROOT_DIR}"
 # Build release configuration with Swift Package Manager
 swift build -c release --arch arm64
 
-BIN_DIR="$(swift build -c release --show-bin-path)"
+BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
 BIN_PATH="${BIN_DIR}/NodePocketApp"
 APP_BUNDLE="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 
