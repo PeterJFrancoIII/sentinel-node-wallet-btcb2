@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Never leave credentials readable outside this isolated test directory.
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
@@ -21,8 +23,9 @@ echo "Binary Provenance SHA-256: ${BITCOIND_SHA}"
 
 # 2. Setup isolated temporary regtest datadir and port
 TEST_DATADIR="$(mktemp -d /tmp/knots_regtest_qualification_XXXXXX)"
-TEST_RPC_PORT=28443
-TEST_P2P_PORT=28444
+# Collision-resistant, non-production ports on an ephemeral CI worker.
+TEST_RPC_PORT=$((28000 + RANDOM % 16000))
+TEST_P2P_PORT=$((TEST_RPC_PORT + 1))
 TEST_RPC_USER="test_operator"
 TEST_RPC_PASS="test_secret_passphrase_12345"
 
@@ -43,6 +46,8 @@ cat <<EOF > "${TEST_DATADIR}/bitcoin.conf"
 regtest=1
 server=1
 listen=0
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
 rpcuser=${TEST_RPC_USER}
 rpcpassword=${TEST_RPC_PASS}
 rpcport=${TEST_RPC_PORT}
@@ -96,7 +101,7 @@ if [ -z "${IS_MINE}" ]; then
     echo "ERROR: Derived address is not owned by wallet!" >&2
     exit 1
 fi
-echo "Verified: Derived Bech32 address ${RECV_ADDR} ismine=true."
+echo "Verified: Derived Bech32 address ismine=true (address redacted)."
 
 # 7. Export atomic backup
 BACKUP_PATH="${TEST_DATADIR}/wallet_backup.dat"
