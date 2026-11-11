@@ -456,10 +456,10 @@ final class RemediationPhaseValidationTests: XCTestCase {
                        "walletprocesspsbt", "signrawtransactionwithwallet", "finalizepsbt"] {
             do {
                 let _: String = try await rpc.call(method: method, params: [], walletName: "isolated_test_wallet")
-                XCTFail("Dangerous RPC \\(method) must never reach the node")
+                XCTFail("Dangerous RPC \(method) must never reach the node")
             } catch let error as RPCClientError {
                 guard case .transactionBroadcastDisabled = error else {
-                    XCTFail("Expected transactionBroadcastDisabled for \\(method), got \\(error)")
+                    XCTFail("Expected transactionBroadcastDisabled for \(method), got \(error)")
                     continue
                 }
             }
@@ -468,18 +468,18 @@ final class RemediationPhaseValidationTests: XCTestCase {
             _ = try await rpc.sendToAddress(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 0.01)
             XCTFail("sendToAddress wrapper must fail closed")
         } catch let error as RPCClientError {
-            guard case .transactionBroadcastDisabled = error else { XCTFail("Wrong error: \\(error)"); return }
+            guard case .transactionBroadcastDisabled = error else { XCTFail("Wrong error: \(error)"); return }
         }
         do {
             _ = try await rpc.bumpFee(txid: String(repeating: "0", count: 64))
             XCTFail("bumpFee wrapper must fail closed")
         } catch let error as RPCClientError {
-            guard case .transactionBroadcastDisabled = error else { XCTFail("Wrong error: \\(error)"); return }
+            guard case .transactionBroadcastDisabled = error else { XCTFail("Wrong error: \(error)"); return }
         }
     }
 
     func testWalletActorSendAndRBFRemainDisabledEvenInTestMode() async throws {
-        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("btcb2_send_lock_\\(UUID().uuidString)")
+        let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("btcb2_send_lock_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tmp) }
         let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
@@ -489,13 +489,13 @@ final class RemediationPhaseValidationTests: XCTestCase {
             _ = try await manager.executeAuthorizedSend(preview: preview, capability: nil, approval: nil)
             XCTFail("WalletManager must not broadcast or unlock even in test mode")
         } catch let error as WalletSecurityError {
-            guard case .signingPathUnverified = error else { XCTFail("Wrong error: \\(error)"); return }
+            guard case .signingPathUnverified = error else { XCTFail("Wrong error: \(error)"); return }
         }
         do {
             _ = try await manager.bumpFee(txid: String(repeating: "0", count: 64))
             XCTFail("WalletManager must not submit RBF replacement")
         } catch let error as WalletSecurityError {
-            guard case .signingPathUnverified = error else { XCTFail("Wrong error: \\(error)"); return }
+            guard case .signingPathUnverified = error else { XCTFail("Wrong error: \(error)"); return }
         }
     }
 

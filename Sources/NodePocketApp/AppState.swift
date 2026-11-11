@@ -949,23 +949,6 @@ public final class AppState: ObservableObject {
         alertMessage = WalletSecurityError.signingPathUnverified.localizedDescription
         showAlert = true
         return false
-        /*
-        guard let session = authSession else {
-            alertMessage = "Wallet Manager is locked. Please unlock first."
-            showAlert = true
-            return false
-        }
-        do {
-            let res = try await walletManager.bumpFee(txid: txid, newFeeRateSatPerVB: newFeeRate != nil ? Double(newFeeRate!) : nil, capability: session)
-            appendLog("[TX] Successfully applied RBF fee bump for tx \(txid.prefix(12))... New txid: \(res.txid.prefix(12))... Fee: \(res.fee) BTCB2")
-            refreshWallet()
-            return true
-        } catch {
-            alertMessage = "Fee bump failed: \(error.localizedDescription)"
-            showAlert = true
-            return false
-        }
-        */
     }
 
     @MainActor
