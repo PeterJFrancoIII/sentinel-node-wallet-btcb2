@@ -7,7 +7,7 @@
 ## At entry
 
 1. Query canonical SCM **Session_Gemini_NodePocketBTCB2_20261106-1741** via search_nodes then open_nodes; search **InterAgent_Dialogue_Channel** for latest exact-session peer receipts. Apply [SCM rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md).
-2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **c19332b**; 131 executed / 130 passed / zero failed / one interactive Keychain test skipped. Source-only spending lock restored after #079 regression; signing remains UNVERIFIED. This does not establish native Keychain PASS. Branch is **unmerged**.
+2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **2aa0e15**; 133 executed / 132 passed / zero failed / one interactive Keychain test skipped. macOS optimized NodePocketApp Release compile and packaging syntax PASS. Source-only spending lock remains active; signing is UNVERIFIED. This does not establish native Keychain PASS. Branch is **unmerged**.
 3. Confirm status evidence in [Project Status](docs/PROJECT_STATUS.md). Distinguish **BUILT source**, **PEER-REPORTED native**, and **independently verified**. Do not recast stale V12/v13 planning as undone code.
 
 ## Current work order (priority)
@@ -15,7 +15,8 @@
 - **P0** Keychain failure/mismatched-secret creation path is now source/CI remediated (5e7a597); independently verify actual Keychain hardware accept/deny/cancel and offline-custody acknowledgment, then prove encrypted wallet RPC creation and immediate inventory on an installed Mac using only isolated zero-funds test data.
 - **P0** Prove positive bitcoin.conf and cookie-only daemon adoption; bind RPC endpoint to PID/executable/datadir; validate credentials and safe file types/permissions.
 - **P1** Correct window recreation/force unwrap/targeted zoom; independently exercise Dock/Cmd+Tab/closed window.
-- **P0 release gates** Native Keychain/2FA/Apple Passwords, recoverable backups, Ultra profile transitions, fork/signing and distribution audit. Keep send disabled.
+- **P0 destructive operation HOLD** 2aa0e15 disables ALL wallet Delete/Trash operations until a genuine isolated encrypted-wallet restore proof is recorded. A matching backup header/receipt is not a recovery proof. Archive remains available. No tests are permitted to use the operator MainNet datadir, even when an environment flag is set.
+- **P0 release gates** Native Keychain/2FA/Apple Passwords, recoverable backups, Ultra profile transitions, fork/signing and distribution audit. Keep send disabled; see [guarded owner-run release checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md).
 
 ## Safety and receipts
 

@@ -1,8 +1,8 @@
 # Sentinel Node Wallet BTCB2 — Project Status
 
 **Snapshot:** 2026-11-10 (America/New_York). **Status:** development candidate; **production, public distribution and real funds: NO-GO**.
-**Code baseline:** [c19332b](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/c19332b4e7fb26c1e874b1ead85e8e57aec285c7) on [open PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107; not merged to main.
-**CI:** [42931815052](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42931815052): 131 executed, **130 passed, 0 failed, 1 skipped** (interactive Keychain). A green build is not native-app or wallet-security certification.
+**Code baseline:** [2aa0e15](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/2aa0e155329c141cbee72a9ea8adb1b20ccb392a) on [open PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), branch fix/v13-1-security-remediation-20261107; not merged to main.
+**CI:** [42938948275](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42938948275): 133 executed, **132 passed, 0 failed, 1 skipped** (interactive Keychain). A green build is not native-app or wallet-security certification.
 
 **Evidence labels:** **BUILT** = present in source; **PEER-REPORTED** = another agent's runtime claim, not independently reproduced; **OPEN** = failing, unproven or missing acceptance; **GATE** = mandatory before release. Do not turn source presence or peer receipts into a native PASS.
 
@@ -12,13 +12,16 @@
 |---|---|
 | Native app | SwiftUI Node / Wallet / Network views; one Advanced sheet; autonomous startup flow; status, health and sync telemetry. |
 | Node | BTCB2 BLAKE2b/BIP-110 MainNet-only Knots RPC and fork-anchor checks; quiet/balanced/fast profiles; persisted pruning/inbound preferences; rolling history, hashrate and ETA; battery/charging Ultra target **4 peers, listen=0**. |
-| Wallet | Explicit encrypted-descriptor create path with RPC preflight and indeterminate-commit reconciliation; per-wallet RPC; loaded/on-disk inventory, archive, guarded Trash deletion, address/history/maturity and backup/restore infrastructure. |
+| Wallet | Explicit encrypted-descriptor create path with RPC preflight and indeterminate-commit reconciliation; per-wallet RPC; loaded/on-disk inventory and nondestructive archive; **Trash deletion temporarily blocked until independently verified isolated recovery**, address/history/maturity and backup/restore infrastructure. |
 | Access | Local multi-user username/password, RFC6238 TOTP, recovery codes, short-lived wallet capability and step-up framework; Keychain integration; Apple Passwords-oriented UI hooks. |
 | Pricing | Neoxa/NonKYC BTCB2 quote service, attribution, freshness handling and manual override path. |
 | Security | Backup staging, non-clobber publication and receipt logic; core signing/broadcast/RBF re-disabled at c19332b (wallet actor + generic RPC + UI); 2 new regression tests pass. BTCB2 SIGHASH_UNIFIED remains unaudited. |
 | Recent repairs | #069 RPC-stage diagnostics; #070 Dock/window restoration; #071 daemon-adoption recognition of owned .cookie **or** bitcoin.conf plus typed rejection errors; #075 receive address store and strict userPresence capability reconciliation; #076 single-window lifecycle close-to-hide and targeted mainWindow restore; #077 live daemon 1-click launch and end-to-end encrypted descriptor wallet creation/lock/unlock/address qualification; #078 wallet renaming, RBF bump fee, pending vs confirmed spendable balance isolation, and live mempool percentile fee intelligence; #079 sync-gated hashrate tracker with 30-block consensus derivation, a previously armed send pipeline with Bech32 validation, allowlist, estimated funded preview and deferred relock (P0 security regression); **c19332b restores unconditional send/RBF hold**. Live USD fiat preview remains informational. |
 
 ## In progress — independently identified defects / proof gaps
+
+**NEW SOURCE/CI MILESTONE: FAIL-CLOSED DELETION AND RELEASE EXECUTABLE COMPILE.** Code 2aa0e15 removes the prior `try?` live-daemon restore that ignored failure before moving wallet files to Trash. Core deletion is now prohibited without an independent isolated Knots encrypted-wallet recovery proof; current implementation deliberately rejects all deletion attempts, even with a durable receipt. SwiftUI disables Trash and directs the operator to Archive. The previous opt-in destructive test targeting the real Application Support datadir was removed. [macOS CI 42938948275](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42938948275) passes 132/133 tests (one interactive Keychain skip), the optimized `NodePocketApp` Release-mode compile, and packaging shell syntax. New guarded Developer ID/AASA/notary DMG script is **SOURCE ONLY, NOT RUN with owner credentials and NOT released**. See [Production release checklist](PRODUCTION_RELEASE_CHECKLIST.md).
+
 
 **P0 SEND SAFETY SOURCE/CI REPAIRED:** The earlier #079 sendtoaddress and bumpfee paths contradicted the production freeze. c19332b now throws before unlock/broadcast at WalletManager, denies known sign/send/bump RPC methods in the generic client and keeps the UI disabled, regardless of IBD. [CI 42931815052](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42931815052) confirms 2 new regressions (130/131 pass, one Keychain skip). **No signed-Mac acceptance, no authorized spending and no independent fork-signing proof**. The local Knots daemon and any external RPC clients remain outside this application's guarantee.
 

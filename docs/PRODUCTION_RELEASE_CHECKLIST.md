@@ -4,7 +4,7 @@
 
 ## Verified automated build foundation
 
-GitHub Actions performs Swift unit tests, a Release-mode compile of the native SwiftUI NodePocketApp executable, and packaging-script syntax checks. This is a source/CI qualification only. The packaged app, embedded Knots provenance, Apple Passwords saving, real Keychain presence prompts, wallet recovery, Gatekeeper and notarization require separate evidence.
+GitHub Actions #42938948275 at source SHA 2aa0e15 completed **SUCCESS: 133 executed / 132 passed / 0 failed / one interactive Keychain skip; optimized Release-mode SwiftUI NodePocketApp compile PASS; all packaging script syntax checks PASS**. This is source/CI qualification only. The packaged app, embedded Knots provenance, Apple Passwords saving, real Keychain presence prompts, wallet recovery, Gatekeeper and notarization require separate evidence.
 
 Wallet Send and RBF remain disabled. Destructive wallet deletion is also blocked until a separately verified encrypted-wallet restore has been completed on an isolated Knots daemon. Use Archive instead. Never test against live operator wallet files, real Keychain items, datadir, IBD or chainstate.
 

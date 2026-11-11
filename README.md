@@ -7,7 +7,7 @@ Standalone, self-custodial **BTCB2 BLAKE2b/BIP-110 MainNet-only** native macOS S
 ## Built in source
 
 - Knots RPC, fork/chain anchors, local node status, pruning, persistent Quiet/Balanced/Fast preferences, battery/charging Ultra (**4 max peers, listen=0**), rolling network hashrate and sync ETA.
-- Encrypted descriptor wallet creation code, per-wallet RPC, all-wallet inventory, receive/history, coinbase maturity, reversible archive, guarded Trash deletion, staging/backup/restore.
+- Encrypted descriptor wallet creation code, per-wallet RPC, all-wallet inventory, receive/history, coinbase maturity, nondestructive archive, **temporarily disabled Trash deletion pending isolated backup recovery**, staging/backup/restore.
 - Local multi-account login, password/TOTP/recovery/step-up framework, Keychain hooks and Apple Passwords candidate integration.
 - Neoxa / NonKYC BTCB2 price quotes, source/freshness handling and manual override.
 - **Signing and broadcasting remain disabled in core** until independent BTCB2 replay-safe SIGHASH_UNIFIED approval.
@@ -16,7 +16,7 @@ Standalone, self-custodial **BTCB2 BLAKE2b/BIP-110 MainNet-only** native macOS S
 
 ## Development
 
-Requires macOS 13+, Apple Silicon, Swift 5.9+; use a **disposable zero-funds test datadir**. Run tests with `swift test`; inspect `scripts/build_app.sh` and `scripts/build_dmg.sh` before packaging a development artifact. The test suite's Keychain user-presence case requires explicit authorized on-device execution. Do not use an operator wallet or interrupt an active node.
+Requires macOS 13+, Apple Silicon, Swift 5.9+; use a **disposable zero-funds test datadir**. Run tests with `swift test`; CI also runs `swift build -c release --product NodePocketApp`. Existing `scripts/build_app.sh` / `scripts/build_dmg.sh` create **development/ad-hoc only** packages. Owner-approved Developer ID/notarized candidate packaging is separately gated in [Release Checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md) and `scripts/build_production_dmg.sh`. The test suite's Keychain user-presence case requires explicit authorized on-device execution. Do not use an operator wallet or interrupt an active node.
 
 Active review is [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), not merged or production-authorized. See [Contributing](CONTRIBUTING.md), [Architecture](docs/ARCHITECTURE.md), [Agent instructions](AGENTS.md), and [v7 wallet specification](docs/WALLET_MANAGER_V7.md). Historical feature specifications are contracts, not proof of native release acceptance.
 
