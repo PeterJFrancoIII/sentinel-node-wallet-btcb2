@@ -264,7 +264,9 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         let walletBytes = Data("never-trash-or-modify".utf8)
         try walletBytes.write(to: original)
         let backup = temp.appendingPathComponent("encrypted_backup.dat")
-        try Data(repeating: 0x51, count: 2048).write(to: backup)
+        var backupBytes = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
+        backupBytes.append(Data(repeating: 0, count: 2032))
+        try backupBytes.write(to: backup)
         let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
         let inventory = WalletInventory(rpcClient: rpc, dataDirectory: temp, allowUnauthenticatedForTesting: true)
         for durable in [false, true] {
