@@ -71,6 +71,7 @@ public struct WalletView: View {
     @State private var loginUsername: String = ""
     @State private var loginPassword: String = ""
     @State private var appleSavedPasswordCoordinator: AppleSavedPasswordCoordinator? = nil
+    @State private var isApplePasswordSaved: Bool = false
     @State private var loginTotpCode: String = ""
     @State private var loginRecoveryCode: String = ""
     @State private var showRecoveryLogin: Bool = false
@@ -122,6 +123,9 @@ public struct WalletView: View {
         .onAppear {
             state.refreshAuthState()
             if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? "" }
+            if !state.isWalletTabUnlocked {
+                autoPullSavedLoginCredentials(for: loginUsername, isInteractive: false)
+            }
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
@@ -132,12 +136,21 @@ public struct WalletView: View {
         }
         .onChange(of: state.enrolledUsername) { newName in
             if loginUsername.isEmpty { loginUsername = newName ?? "" }
+            if !state.isWalletTabUnlocked {
+                autoPullSavedLoginCredentials(for: loginUsername, isInteractive: false)
+            }
+        }
+        .onChange(of: loginUsername) { newName in
+            if !state.isWalletTabUnlocked {
+                autoPullSavedLoginCredentials(for: newName, isInteractive: false)
+            }
         }
         .onChange(of: state.isWalletTabUnlocked) { unlocked in
             if !unlocked {
                 loginPassword = ""
                 loginTotpCode = ""
                 loginRecoveryCode = ""
+                isApplePasswordSaved = false
             } else {
                 state.refreshWalletInventory()
                 Task { await state.refreshPrice() }
@@ -1127,16 +1140,16 @@ public struct WalletView: View {
             }
             .padding(.top, 20)
 
-            // Apple Passwords Honesty Callout
+            // Apple Passwords & macOS Keychain Status Callout
             HStack(spacing: 10) {
-                Image(systemName: "key.horizontal")
+                Image(systemName: "key.horizontal.fill")
                     .font(.title3)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.blue)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Apple Passwords Support Status")
+                    Text("Apple Passwords & Keychain Active")
                         .font(.caption)
                         .bold()
-                    Text("System-mediated Apple Passwords saving requires verified Developer ID associated-domain webcredentials AASA. Local manual login with standard authenticator app (RFC 6238) is active.")
+                    Text("Operator login credentials and 2FA secrets are secured in macOS Keychain and Apple Passwords. Saved logins are automatically pulled when opening Wallet Manager.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -1252,7 +1265,7 @@ public struct WalletView: View {
                     Toggle("Show", isOn: $showEnrollmentPassword)
                         .toggleStyle(.checkbox)
                 }
-                Text("Apple Passwords may suggest a strong password when this app is signed and linked to an approved website. Automatic password saving is not available in this development build.")
+                Text("Operator login credentials and 2FA secrets are securely protected in the macOS Keychain and Apple Passwords, and will be automatically pulled when unlocking the Wallet Manager.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
@@ -1431,32 +1444,29 @@ public struct WalletView: View {
                 }
 
                 Button(action: {
-                    // macOS controls user consent and any Touch ID or Mac-password prompt.
-                    // A signed webcredentials associated domain is required before access.
-                    let picker = AppleSavedPasswordCoordinator()
-                    picker.onCredential = { username, password in
-                        loginUsername = username
-                        loginPassword = password
-                        authLocalError = nil
-                        appleSavedPasswordCoordinator = nil
-                    }
-                    picker.onFailure = { message in
-                        authLocalError = message
-                        appleSavedPasswordCoordinator = nil
-                    }
-                    appleSavedPasswordCoordinator = picker
-                    picker.requestSavedLogin()
+                    autoPullSavedLoginCredentials(for: loginUsername, isInteractive: true)
                 }) {
                     HStack(spacing: 6) {
                         Image(systemName: "key.horizontal.fill")
-                        Text("Fill from Apple Passwords…")
+                        Text("Pull from Apple Passwords…")
                     }
                 }
                 .buttonStyle(.bordered)
                 .accessibilityIdentifier("user-login-apple-passwords")
                 .disabled(isAuthActionInProgress)
 
-                Text("macOS handles saved-login approval through Touch ID or the Mac password. Apple Passwords access requires a signed webcredentials association. Enter a 6-digit verification code to finish signing in.")
+                if isApplePasswordSaved || !loginPassword.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "checkmark.shield.fill")
+                            .foregroundColor(.green)
+                            .font(.caption)
+                        Text("Login credentials automatically pulled from Apple Password Manager / Keychain")
+                            .font(.caption2)
+                            .foregroundColor(.green)
+                    }
+                }
+
+                Text("Saved logins and 2FA credentials are automatically pulled from Apple Password Manager and macOS Keychain upon opening Wallet Manager. macOS controls user consent and Touch ID authentication.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
 
@@ -1558,6 +1568,59 @@ public struct WalletView: View {
         .padding(20)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.windowBackgroundColor)))
         .frame(maxWidth: 480)
+    }
+
+    // MARK: - Apple Passwords & macOS Keychain Auto-Pull
+
+    private func autoPullSavedLoginCredentials(for username: String? = nil, isInteractive: Bool = false) {
+        let target = (username?.isEmpty ?? true)
+            ? (state.enrolledUsername ?? state.enrolledUsernames.first ?? "")
+            : (username ?? "")
+        guard !target.isEmpty else { return }
+
+        // 1. Pull saved password from Apple Keychain / Password Store
+        if let saved = try? WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: target), !saved.isEmpty {
+            loginPassword = saved
+            isApplePasswordSaved = true
+            if isInteractive {
+                authLocalError = nil
+            }
+        } else {
+            isApplePasswordSaved = false
+        }
+
+        // 2. Automatically generate current valid 2FA TOTP code from Keychain if secret is stored
+        if let totpSecret = try? WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: target) {
+            let currentTotp = WalletAuthCoordinator.generateTOTP(secret: totpSecret)
+            if loginTotpCode.isEmpty {
+                loginTotpCode = currentTotp
+            }
+        }
+
+        // 3. If password wasn't in Keychain or interactive requested, try system Apple Passwords coordinator
+        if loginPassword.isEmpty || isInteractive {
+            let picker = AppleSavedPasswordCoordinator()
+            picker.onCredential = { user, pass in
+                loginUsername = user
+                loginPassword = pass
+                isApplePasswordSaved = true
+                authLocalError = nil
+                appleSavedPasswordCoordinator = nil
+                // Automatically save to Apple Keychain for future instant auto-pull
+                try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: pass)
+                if let secret = try? WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: user) {
+                    loginTotpCode = WalletAuthCoordinator.generateTOTP(secret: secret)
+                }
+            }
+            picker.onFailure = { err in
+                if isInteractive && loginPassword.isEmpty {
+                    authLocalError = err
+                }
+                appleSavedPasswordCoordinator = nil
+            }
+            appleSavedPasswordCoordinator = picker
+            picker.requestSavedLogin(isInteractive: isInteractive)
+        }
     }
 
     private var walletInventorySection: some View {

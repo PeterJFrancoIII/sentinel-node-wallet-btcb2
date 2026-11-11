@@ -248,6 +248,7 @@ public actor WalletAuthCoordinator {
     private var mockDeviceOwnerSuccessForTesting = false
     private var mockDeviceOwnerHook: DeviceOwnerChallengeHook? = nil
     private static var inMemoryTOTPSecretsForTesting: [String: String] = [:]
+    private static var inMemoryPasswordsForTesting: [String: String] = [:]
     private static var allowInMemoryMockForTesting = false
     private static var simulatedKeychainFailureStatus: OSStatus? = nil
 
@@ -268,6 +269,10 @@ public actor WalletAuthCoordinator {
         inMemoryTOTPSecretsForTesting[username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = secretBase32
     }
 
+    public static func setMockPasswordForTesting(username: String, password: String) {
+        inMemoryPasswordsForTesting[username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] = password
+    }
+
     public static func setAllowInMemoryMockForTesting(_ allow: Bool) {
         self.allowInMemoryMockForTesting = allow
     }
@@ -278,6 +283,7 @@ public actor WalletAuthCoordinator {
 
     public static func clearTestOverrides() {
         inMemoryTOTPSecretsForTesting.removeAll()
+        inMemoryPasswordsForTesting.removeAll()
         allowInMemoryMockForTesting = false
         simulatedKeychainFailureStatus = nil
     }
@@ -418,6 +424,8 @@ public actor WalletAuthCoordinator {
 
         // P0-1: Save TOTP secret in Keychain, not in plaintext json
         try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
+        // Automatically save operator login password in macOS Keychain / Apple Passwords
+        try? Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
 
         let salt = try Self.randomBytes(count: 32)
         let hash = try Self.deriveKey(password: password, salt: salt)
@@ -629,6 +637,9 @@ public actor WalletAuthCoordinator {
         freshRec.lockedUntil = nil
         self.records[userKey] = freshRec
         try saveRecords()
+
+        // Automatically update/save operator login password in macOS Keychain / Apple Passwords
+        try? Self.saveOperatorPasswordToKeychain(username: freshRec.username, password: password)
 
         let session = WalletAuthCapability(
             username: freshRec.username,
@@ -1280,6 +1291,100 @@ public actor WalletAuthCoordinator {
         inMemoryTOTPSecretsForTesting.removeValue(forKey: cleanUser)
         #endif
         let account = "totp_" + cleanUser
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.nodepocket.btcb2.auth",
+            kSecAttrAccount as String: account
+        ]
+        SecItemDelete(query as CFDictionary)
+    }
+
+    // MARK: - Operator Login Password Keychain & Apple Passwords Storage
+
+    public static func saveOperatorPasswordToKeychain(username: String, password: String) throws {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !cleanUser.isEmpty, !password.isEmpty else { return }
+        guard let data = password.data(using: .utf8) else {
+            throw WalletAuthError.storageError("Failed to encode operator password.")
+        }
+
+        let account = "operator_login_" + cleanUser
+        let service = "app.nodepocket.btcb2.auth"
+
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecAttrLabel as String: "Sentinel Node Wallet (Apple Passwords): " + username,
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        ]
+
+        var status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            let updateQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account
+            ]
+            let updateAttrs: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            ]
+            status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+        }
+
+        #if DEBUG
+        if (status == errSecMissingEntitlement || status == -34018) && allowInMemoryMockForTesting {
+            inMemoryPasswordsForTesting[cleanUser] = password
+            return
+        }
+        #endif
+
+        guard status == errSecSuccess else {
+            throw WalletAuthError.storageError("Failed to save operator password to Keychain: status \(status)")
+        }
+
+        #if DEBUG
+        inMemoryPasswordsForTesting[cleanUser] = password
+        #endif
+    }
+
+    public static func loadOperatorPasswordFromKeychain(username: String) throws -> String {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        #if DEBUG
+        if let mock = inMemoryPasswordsForTesting[cleanUser] {
+            return mock
+        }
+        if let simStatus = simulatedKeychainFailureStatus {
+            throw WalletAuthError.storageError("Failed to load operator password from Keychain: status \(simStatus)")
+        }
+        #endif
+
+        let account = "operator_login_" + cleanUser
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: "app.nodepocket.btcb2.auth",
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne
+        ]
+
+        var dataTypeRef: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
+            throw WalletAuthError.storageError("Failed to load operator password from Keychain: status \(status)")
+        }
+        return str
+    }
+
+    public static func deleteOperatorPasswordFromKeychain(username: String) {
+        let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        #if DEBUG
+        inMemoryPasswordsForTesting.removeValue(forKey: cleanUser)
+        #endif
+        let account = "operator_login_" + cleanUser
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "app.nodepocket.btcb2.auth",

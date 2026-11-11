@@ -3,6 +3,32 @@ import XCTest
 
 final class WalletAuthCoordinatorTests: XCTestCase {
 
+    func testOperatorPasswordKeychainStorageLifecycle() throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let user = "OperatorAlpha"
+        let pass = "StrongPassword123!@#"
+
+        try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: pass)
+        let loaded = try WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: user)
+        XCTAssertEqual(loaded, pass)
+
+        // Case insensitivity
+        let loadedLower = try WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: "operatoralpha")
+        XCTAssertEqual(loadedLower, pass)
+
+        // Overwrite / update
+        let updatedPass = "EvenStronger456$%^"
+        try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: updatedPass)
+        let loadedUpdated = try WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: user)
+        XCTAssertEqual(loadedUpdated, updatedPass)
+
+        // Delete
+        WalletAuthCoordinator.deleteOperatorPasswordFromKeychain(username: user)
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: user))
+    }
+
     func testGenerateStrongOperatorLoginPassword() throws {
         var generated = Set<String>()
         for _ in 0..<32 {
@@ -245,6 +271,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(capability.username, "operator1")
         XCTAssertFalse(capability.isExpired)
+
+        // Verify operator password was automatically saved to Keychain on enrollment
+        let savedEnrollmentPass = try WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: "operator1")
+        XCTAssertEqual(savedEnrollmentPass, "StrongPassword123!@#")
 
         let isEnrolledNow = await coordinator.isEnrolled
         XCTAssertTrue(isEnrolledNow)
