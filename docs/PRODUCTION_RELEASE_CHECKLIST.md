@@ -4,7 +4,7 @@
 
 ## Verified automated build foundation
 
-GitHub Actions #42938948275 at source SHA 2aa0e15 completed **SUCCESS: 133 executed / 132 passed / 0 failed / one interactive Keychain skip; optimized Release-mode SwiftUI NodePocketApp compile PASS; all packaging script syntax checks PASS**. This is source/CI qualification only. The packaged app, embedded Knots provenance, Apple Passwords saving, real Keychain presence prompts, wallet recovery, Gatekeeper and notarization require separate evidence.
+GitHub Actions [#42940525641](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42940525641) at source SHA **7bdfd0e** completed **SUCCESS: 133 executed / 132 passed / 0 failed / 1 interactive Keychain skip; optimized SwiftUI Release executable, SHA256-pinned Knots ad-hoc .app bundle and codesign/manifest validation PASS; real isolated Knots regtest encrypted-wallet backup→restore PASS (24,576-byte backup, distinct identity, locked, descriptors, address ownership)**. This is development CI qualification only; it does not prove the installed signed-app UI workflow. The packaged app, embedded Knots provenance, Apple Passwords saving, real Keychain presence prompts, wallet recovery, Gatekeeper and notarization require separate evidence.
 
 Wallet Send and RBF remain disabled. Destructive wallet deletion is also blocked until a separately verified encrypted-wallet restore has been completed on an isolated Knots daemon. Use Archive instead. Never test against live operator wallet files, real Keychain items, datadir, IBD or chainstate.
 
@@ -13,7 +13,7 @@ Wallet Send and RBF remain disabled. Destructive wallet deletion is also blocked
 - Owner-managed Apple Developer Program team and installed Developer ID Application certificate, with validated Team ID.
 - Owner-approved standalone HTTPS Apple Passwords webcredentials domain serving an AASA file with webcredentials.apps containing the exact TEAMID.app.nodepocket.btcb2 application identifier. The AASA host must never receive wallet data, passwords or TOTP secrets.
 - Apple notarization credentials stored on the authorized Mac via xcrun notarytool store-credentials, not in Git or plaintext build logs.
-- Independent binary provenance audit of the embedded BTCB2-compatible Knots fork, including publisher authenticity, BTCB2/BIP-110 compatibility and exact binary hashes.
+- Independent binary provenance audit of the embedded BTCB2-compatible Knots fork, including publisher authenticity, BTCB2/BIP-110 compatibility and exact binary hashes. The app currently pins **29.4.3.knots20260508**; [29.5.knots20260508](https://github.com/bitcoinknots/bitcoin/releases/tag/v29.5.knots20260508) was released 2026-11-06. Before upgrade, inspect signed SHA256SUMS and changelog and test consensus/wallet compatibility on isolated data, without affecting existing MainNet chainstate.
 - Signed native macOS tests of password/TOTP user consent (including -34018, cancel and denial), wallet creation and restoring an encrypted zero-funds descriptor wallet using a dedicated temporary datadir.
 - Positive/negative RPC daemon PID/executable/datadir binding; authorized Ultra battery/charging transitions; UI/window and complete release security/supply-chain review; independent wallet transaction-signing audit before ever enabling Send.
 - Explicit external approval before setting SENTINEL_RELEASE_SECURITY_APPROVED=1. This is a manual approval assertion; the environment variable by itself is not security certification.

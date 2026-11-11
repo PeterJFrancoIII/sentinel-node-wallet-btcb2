@@ -10,6 +10,10 @@
 - Core send/broadcast stays disabled until independent BTCB2 SIGHASH_UNIFIED replay-safe signing, integer-satoshi fees, trusted-recipient/PSBT binding, one-use approval and locked-after-action semantics are proven. **P0 fix c19332b** adds both WalletManager + generic-RPC hard denial of signing/send/RBF methods and UI lock; 2 Swift CI regressions passed at run 42931815052, but this does not certify fork signing, notarization, or external RPC clients.
 - Apple Passwords requires owner-approved HTTPS webcredentials + AASA, actual Team ID/bundle ID and signed app; a generic app Keychain item is **not** an Apple Passwords login. Do not claim secure two-factor behavior without hardware acceptance. A compromised user session/OS can defeat a software hot wallet.
 
+## Verified CI evidence (not production certification)
+
+At source SHA **7bdfd0e**, [CI 42940525641](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42940525641) passed the 133-test macOS suite (132 pass, 1 skipped real Keychain), optimized Release compile, pinned Knots ad-hoc bundle verification, and genuine **isolated** Knots regtest encrypted descriptor-wallet backup→restore. No existing operator wallet, Keychain or MainNet node was contacted by this test. This does **not** qualify an installed Developer ID signed SwiftUI app, restore-on-delete proof, SIGHASH_UNIFIED or any real funds. Upstream Knots 29.5 exists and the pinned 29.4.3 requires a separate authentic upgrade review.
+
 ## Open security findings (fail-release)
 
 1. **P0 native acceptance still open** Requested Keychain save failure, duplicate mismatch and canceled user presence now block createwallet **in source and CI** at 5e7a597 (five deterministic regressions passed). Verify behavior on an actually signed Mac, explicit offline-custody acknowledgment, and durable passphrase recovery before declaring the risk closed.
