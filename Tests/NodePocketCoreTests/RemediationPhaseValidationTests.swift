@@ -93,58 +93,61 @@ final class RemediationPhaseValidationTests: XCTestCase {
         await manager.unregisterStagingSession(sessionB)
     }
 
-    // MARK: - P0-02: Wallet Deletion Requires Valid SQLite / BDB Header
+    // MARK: - P0-02: Wallet deletion requires BOTH valid backup format
+    // and independent proof of recovery on an isolated Knots datadir.
 
     func testWalletDeletionRejectsCorruptedDatabaseHeader() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("del_header_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "u", password: "p")
+        // The mock endpoint cannot represent a live operator daemon.
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "u", password: "p", timeoutInterval: 0.1)
         let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, allowUnauthenticatedForTesting: true)
 
-        // 1. File >= 1024 bytes but corrupted (zeros or text, not SQLite/BDB header)
-        let corruptedBackup = tempDir.appendingPathComponent("corrupted_backup.dat")
-        let dummyData = Data(repeating: 0x41, count: 2048) // 'AAAA...'
-        try dummyData.write(to: corruptedBackup)
-
+        let corrupted = tempDir.appendingPathComponent("corrupted_backup.dat")
+        try Data(repeating: 0x41, count: 2048).write(to: corrupted)
+        let corruptReceipt = VerifiedBackupReceipt(
+            walletName: "wallet_test", backupPath: corrupted.path,
+            sha256Digest: String(repeating: "a", count: 64),
+            bytesWritten: 2048, isDurabilityConfirmed: true
+        )
         do {
             try await inventory.deleteWalletFromMac(
-                name: "wallet_test",
-                typedConfirmation: "wallet_test",
-                verifiedBackupPath: corruptedBackup.path
+                name: "wallet_test", typedConfirmation: "wallet_test",
+                verifiedBackupPath: corrupted.path, verifiedReceipt: corruptReceipt
             )
-            XCTFail("Must fail when backup database header is not SQLite or BDB")
-        } catch let err as WalletInventoryError {
-            if case .backupEmpty = err {
-                // Expected: rejected due to invalid database header
-            } else {
-                XCTFail("Expected backupEmpty for corrupted database header, got: \(err)")
+            XCTFail("Corrupt wallet backup must never permit deletion")
+        } catch let error as WalletInventoryError {
+            guard case .backupEmpty = error else {
+                XCTFail("Expected corrupted backup rejection, got \(error)")
+                return
             }
         }
 
-        // 2. File with valid SQLite header (>= 1024 bytes)
-        let validBackup = tempDir.appendingPathComponent("valid_sqlite_backup.dat")
-        var sqliteData = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
-        sqliteData.append(Data(repeating: 0, count: 2048))
-        try sqliteData.write(to: validBackup)
-
-        // Since wallet does not exist on disk, preflight check will fail with walletNotFoundOnDisk,
-        // proving header verification passed!
+        let valid = tempDir.appendingPathComponent("valid_sqlite_backup.dat")
+        var sqliteBytes = Data("SQLite format 3\u{0}".utf8)
+        sqliteBytes.append(Data(repeating: 0, count: 2048))
+        try sqliteBytes.write(to: valid)
+        let receipt = VerifiedBackupReceipt(
+            walletName: "wallet_test", backupPath: valid.path,
+            sha256Digest: String(repeating: "a", count: 64),
+            bytesWritten: Int64(sqliteBytes.count), isDurabilityConfirmed: true
+        )
         do {
             try await inventory.deleteWalletFromMac(
-                name: "wallet_test",
-                typedConfirmation: "wallet_test",
-                verifiedBackupPath: validBackup.path
+                name: "wallet_test", typedConfirmation: "wallet_test",
+                verifiedBackupPath: valid.path, verifiedReceipt: receipt
             )
-            XCTFail("Should fail at preflight since wallet is not on disk")
-        } catch let err as WalletInventoryError {
-            if case .walletNotFoundOnDisk = err {
-                // Header check passed! Reached preflight check.
-            } else {
-                XCTFail("Unexpected error after valid header check: \(err)")
+            XCTFail("A valid database header never substitutes for isolated restore proof")
+        } catch let error as WalletInventoryError {
+            guard case .restoreVerificationFailed = error else {
+                XCTFail("Expected independent recovery proof gate, got \(error)")
+                return
             }
         }
+        XCTAssertEqual(try Data(contentsOf: valid), sqliteBytes)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: corrupted.path))
     }
 
     // MARK: - P1-01: Hashrate Tracker Tip Deduplication & Reorg Branch Pruning

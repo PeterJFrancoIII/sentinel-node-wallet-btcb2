@@ -528,6 +528,32 @@ public actor WalletInventory {
             )
         }
 
+        // Reject clearly malformed wallet backups, but NEVER confuse a valid
+        // SQLite/BDB signature with proof that a wallet is recoverable.
+        // No daemon is contacted and the original wallet remains untouched.
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: verifiedBackupPath))
+        let header: Data
+        do {
+            header = try handle.read(upToCount: 16) ?? Data()
+            try handle.close()
+        } catch {
+            try? handle.close()
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Backup file could not be read for verification. The original wallet was preserved."
+            )
+        }
+        let sqliteMagic = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
+        let bdbMagicLE = Data([0x62, 0x31, 0x05, 0x00])
+        let bdbMagicBE = Data([0x00, 0x05, 0x31, 0x62])
+        guard header.starts(with: sqliteMagic)
+                || header.prefix(4) == bdbMagicLE
+                || header.prefix(4) == bdbMagicBE
+                || (header.count >= 16 && header[12..<16] == bdbMagicLE) else {
+            throw WalletInventoryError.backupEmpty(
+                "Backup is corrupt or does not have a recognized wallet database header."
+            )
+        }
+
         // A receipt, magic header and matching byte count cannot prove that a
         // wallet can actually be restored. No live-node 'try?' restore is valid
         // evidence; it can create stray wallets in the operator's real datadir.
