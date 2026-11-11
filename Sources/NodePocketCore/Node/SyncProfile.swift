@@ -13,13 +13,13 @@ public enum SyncProfileType: String, CaseIterable, Codable, Sendable {
     public var description: String {
         switch self {
         case .ultra:
-            return "Automatic Ultra power saver: 1 thread, 128 MiB cache, max 4 peers, listen=0, background CPU/IO priority. Preserves consensus while minimizing power draw."
+            return "Automatic Ultra power saver: 1 thread, 128 MiB cache, max 3 peers, listen=0, background CPU/IO priority."
         case .quiet:
-            return "Ultra-low CPU/RAM footprint. Recommended on battery for MacBook Air."
+            return "Hyper-conservative profile: 1 thread, 128 MiB cache, max 3 peers, background CPU & disk I/O. Draws almost zero energy and resources."
         case .balanced:
-            return "Standard operation for daily desktop use with steady sync."
+            return "Balanced daily profile: 2 threads, 256 MiB cache, max 8 peers. Moderate resource consumption for steady sync."
         case .fast:
-            return "Maximum verification throughput for initial block download on AC power."
+            return "Maximum verification throughput for initial block download on AC power: 4 threads, 1024 MiB cache, max 24 peers."
         }
     }
 }
@@ -63,18 +63,18 @@ public struct SyncProfile: Codable, Equatable, Sendable {
             return SyncProfile(
                 type: .quiet,
                 parThreads: 1,
-                dbCacheMB: 256,
-                maxConnections: 16,
-                maxUploadTargetMB: 256,
+                dbCacheMB: 128,
+                maxConnections: 3,
+                maxUploadTargetMB: 64,
                 pruneMB: StorageMode.defaultPruneMB
             )
         case .balanced:
             return SyncProfile(
                 type: .balanced,
                 parThreads: 2,
-                dbCacheMB: 512,
-                maxConnections: 24,
-                maxUploadTargetMB: 512,
+                dbCacheMB: 256,
+                maxConnections: 8,
+                maxUploadTargetMB: 256,
                 pruneMB: StorageMode.defaultPruneMB
             )
         case .fast:
@@ -82,7 +82,7 @@ public struct SyncProfile: Codable, Equatable, Sendable {
                 type: .fast,
                 parThreads: 4,
                 dbCacheMB: 1024,
-                maxConnections: 32,
+                maxConnections: 24,
                 maxUploadTargetMB: 1024,
                 pruneMB: StorageMode.defaultPruneMB
             )

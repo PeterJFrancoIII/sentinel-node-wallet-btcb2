@@ -223,9 +223,9 @@ public final class NodeManager: @unchecked Sendable {
             arguments.append(contentsOf: [
                 "-par=1",
                 "-dbcache=128",
-                "-maxconnections=4",
+                "-maxconnections=3",
                 "-listen=0",
-                "-maxuploadtarget=128"
+                "-maxuploadtarget=64"
             ])
         } else {
             self.isUltraActive = false
@@ -285,7 +285,7 @@ public final class NodeManager: @unchecked Sendable {
             self.stdoutPipe = outPipe
             self.stderrPipe = errPipe
             let pid = proc.processIdentifier
-            if self.isUltraActive {
+            if self.isUltraActive || self.config.profile.type == .quiet {
                 #if os(macOS)
                 let tpProc = Process()
                 tpProc.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
@@ -450,9 +450,30 @@ public final class NodeManager: @unchecked Sendable {
         config.allowInboundP2P = requestedInbound
         do {
             try config.writeToDisk()
+            ProfileSettingsStore.shared.saveParameters(
+                for: newProfile.type,
+                parameters: ProfileParameters(
+                    parThreads: newProfile.parThreads,
+                    dbCacheMB: newProfile.dbCacheMB,
+                    maxConnections: newProfile.maxConnections,
+                    maxUploadTargetMB: newProfile.maxUploadTargetMB
+                )
+            )
+            ProfileSettingsStore.shared.setSelectedProfileType(newProfile.type)
+
             if wasRunning && !queuedForUltra {
                 try start(ultraOverride: false)
                 try await waitForRPCReadiness(timeoutSeconds: 90)
+            }
+
+            if let curPid = process?.processIdentifier ?? adoptedPid {
+                #if os(macOS)
+                let tpProc = Process()
+                tpProc.executableURL = URL(fileURLWithPath: "/usr/bin/taskpolicy")
+                tpProc.arguments = [newProfile.type == .quiet ? "-b" : "-B", "-p", "\(curPid)"]
+                try? tpProc.run()
+                setpriority(PRIO_PROCESS, id_t(curPid), newProfile.type == .quiet ? 19 : 0)
+                #endif
             }
             let status: String
             if queuedForUltra {

@@ -131,10 +131,10 @@ public struct AdvancedSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .onChange(of: selectedProfile) { newProfile in
-                            let preset = SyncProfile.preset(for: newProfile)
-                            dbCacheInput = "\(preset.dbCacheMB)"
-                            parInput = "\(preset.parThreads)"
-                            maxConnectionsInput = "\(preset.maxConnections)"
+                            let params = ProfileSettingsStore.shared.getParameters(for: newProfile)
+                            dbCacheInput = "\(params.dbCacheMB)"
+                            parInput = "\(params.parThreads)"
+                            maxConnectionsInput = "\(params.maxConnections)"
                         }
 
                         Text(selectedProfile.description)
@@ -162,8 +162,21 @@ public struct AdvancedSheet: View {
 
                     // Resource Limits
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("Fine-Tuned Resource Limits")
-                            .font(.headline)
+                        HStack {
+                            Text("Fine-Tuned Resource Limits (\(selectedProfile.rawValue))")
+                                .font(.headline)
+                            Spacer()
+                            Button("Restore Defaults") {
+                                ProfileSettingsStore.shared.restoreDefaults(for: selectedProfile)
+                                let def = ProfileParameters.defaultParameters(for: selectedProfile)
+                                dbCacheInput = "\(def.dbCacheMB)"
+                                parInput = "\(def.parThreads)"
+                                maxConnectionsInput = "\(def.maxConnections)"
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityIdentifier("restore-profile-defaults")
+                        }
 
                         HStack {
                             Text("Database Cache (MB):")
@@ -303,9 +316,10 @@ public struct AdvancedSheet: View {
 
         let currentProfile = state.nodeManager.config.profile
         selectedProfile = currentProfile.type
-        dbCacheInput = "\(currentProfile.dbCacheMB)"
-        parInput = "\(currentProfile.parThreads)"
-        maxConnectionsInput = "\(currentProfile.maxConnections)"
+        let params = ProfileSettingsStore.shared.getParameters(for: currentProfile.type)
+        dbCacheInput = "\(params.dbCacheMB)"
+        parInput = "\(params.parThreads)"
+        maxConnectionsInput = "\(params.maxConnections)"
         enableInboundP2P = state.nodeManager.config.allowInboundP2P
     }
 
@@ -335,7 +349,16 @@ public struct AdvancedSheet: View {
             return
         }
 
-        var profile = SyncProfile.preset(for: selectedProfile)
+        let customParams = ProfileParameters(
+            parThreads: par,
+            dbCacheMB: cache,
+            maxConnections: peers,
+            maxUploadTargetMB: SyncProfile.preset(for: selectedProfile).maxUploadTargetMB
+        )
+        ProfileSettingsStore.shared.saveParameters(for: selectedProfile, parameters: customParams)
+        ProfileSettingsStore.shared.setSelectedProfileType(selectedProfile)
+
+        var profile = ProfileSettingsStore.shared.getProfile(for: selectedProfile, pruneMB: mode.pruneMB)
         profile.dbCacheMB = cache
         profile.parThreads = par
         profile.maxConnections = peers

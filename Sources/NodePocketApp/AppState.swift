@@ -75,10 +75,7 @@ public final class AppState: ObservableObject {
     private let timeFormatter: DateFormatter
 
     public init() {
-        let config = NodeConfig(
-            profile: .preset(for: .balanced),
-            storageMode: .compact(pruneMB: StorageMode.defaultPruneMB)
-        )
+        let config = NodeConfig()
         let book = AddressBook()
         let addrStore = ReceiveAddressStore()
         self.addressBook = book
@@ -91,6 +88,8 @@ public final class AppState: ObservableObject {
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
         self.userPreferredProfile = config.profile.type
+        self.ultraStatusTitle = "\(config.profile.type.rawValue) Profile Active"
+        self.ultraStatusSubtitle = "\(config.profile.parThreads) threads, \(config.profile.dbCacheMB) MiB dbcache, max \(config.profile.maxConnections) peers"
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
@@ -786,14 +785,8 @@ public final class AppState: ObservableObject {
     public func applyProfile(_ profileType: SyncProfileType) {
         self.userPreferredProfile = profileType
         self.selectedProfileType = profileType
-        var profile = SyncProfile.preset(for: profileType)
-        profile.pruneMB = storageMode.pruneMB
-
-        if isUltraActive {
-            appendLog("[POWER] Saved preferred profile \(profileType.rawValue). Ultra power mode remains active until Mac is on stable AC power.")
-            ultraStatusSubtitle = "Preferred \(profileType.rawValue) resumes when fully AC / not charging"
-            return
-        }
+        ProfileSettingsStore.shared.setSelectedProfileType(profileType)
+        let profile = ProfileSettingsStore.shared.getProfile(for: profileType, pruneMB: storageMode.pruneMB)
 
         Task {
             do {

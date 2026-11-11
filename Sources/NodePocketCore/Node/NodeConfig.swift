@@ -60,6 +60,7 @@ public struct NodeConfig: Sendable {
         self.rpcUser = user
         self.rpcPassword = pass
         self.p2pPort = p2pPort
+        ProfileSettingsStore.shared.configure(dataDirectory: dir)
         // Preserve explicit existing P2P listening policy when migrating older installations.
         self.allowInboundP2P = Self.persistedInboundP2P(at: dir.appendingPathComponent("bitcoin.conf"), fallback: allowInboundP2P)
         // Use the last effective on-disk settings, not a new Quiet/Balance default
@@ -130,11 +131,20 @@ public struct NodeConfig: Sendable {
                 }
             }
         }
-        var output = SyncProfile.preset(for: type)
-        output.parThreads = (1...8).contains(found["par"] ?? -1) ? found["par"]! : fallback.parThreads
-        output.dbCacheMB = (128...4096).contains(found["dbcache"] ?? -1) ? found["dbcache"]! : fallback.dbCacheMB
-        output.maxConnections = (1...64).contains(found["maxconnections"] ?? -1) ? found["maxconnections"]! : fallback.maxConnections
-        output.maxUploadTargetMB = (1...20_000).contains(found["maxuploadtarget"] ?? -1) ? found["maxuploadtarget"]! : fallback.maxUploadTargetMB
+        var output = ProfileSettingsStore.shared.getProfile(for: type, pruneMB: fallback.pruneMB)
+        if !ProfileSettingsStore.shared.isCustomized(type: type) {
+            let isOldDefaultQuiet = (type == .quiet && found["maxconnections"] == 16 && (found["dbcache"] == 256 || found["dbcache"] == nil))
+            let isOldDefaultBalanced = (type == .balanced && found["maxconnections"] == 24 && (found["dbcache"] == 512 || found["dbcache"] == nil))
+            let isOldDefaultFast = (type == .fast && found["maxconnections"] == 32 && (found["dbcache"] == 1024 || found["dbcache"] == nil))
+            let isOldDefault = isOldDefaultQuiet || isOldDefaultBalanced || isOldDefaultFast
+
+            if !isOldDefault {
+                if let par = found["par"], (1...8).contains(par) { output.parThreads = par }
+                if let cache = found["dbcache"], (128...4096).contains(cache) { output.dbCacheMB = cache }
+                if let maxC = found["maxconnections"], (1...64).contains(maxC) { output.maxConnections = maxC }
+                if let upload = found["maxuploadtarget"], (1...20_000).contains(upload) { output.maxUploadTargetMB = upload }
+            }
+        }
         output.pruneMB = fallback.pruneMB
         return output
     }
@@ -194,5 +204,16 @@ public struct NodeConfig: Sendable {
         let content = renderBitcoinConf()
         try content.write(to: configFileURL, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configFileURL.path)
+
+        ProfileSettingsStore.shared.saveParameters(
+            for: profile.type,
+            parameters: ProfileParameters(
+                parThreads: profile.parThreads,
+                dbCacheMB: profile.dbCacheMB,
+                maxConnections: profile.maxConnections,
+                maxUploadTargetMB: profile.maxUploadTargetMB
+            )
+        )
+        ProfileSettingsStore.shared.setSelectedProfileType(profile.type)
     }
 }

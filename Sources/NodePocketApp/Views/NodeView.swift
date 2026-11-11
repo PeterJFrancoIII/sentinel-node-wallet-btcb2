@@ -55,6 +55,14 @@ public struct NodeView: View {
                         HStack(spacing: 8) {
                             Text(state.ultraStatusTitle)
                                 .font(.headline)
+                            if ProfileSettingsStore.shared.isCustomized(type: state.selectedProfileType) {
+                                Text("(Customized)")
+                                    .font(.caption2)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.blue.opacity(0.15)))
+                                    .foregroundColor(.blue)
+                            }
                             if !state.isUltraActive {
                                 Text("• \(state.nodeManager.config.profile.parThreads) threads, \(state.nodeManager.config.profile.dbCacheMB) MiB dbcache, max \(state.nodeManager.config.profile.maxConnections) peers")
                                     .font(.caption)
@@ -66,6 +74,12 @@ public struct NodeView: View {
                             .foregroundColor(.secondary)
                     }
                     Spacer()
+                    Button(action: { showAdvancedSheet = true }) {
+                        Text("Configure")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: 12).fill(Color(NSColor.controlBackgroundColor)))

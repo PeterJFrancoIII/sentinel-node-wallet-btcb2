@@ -15,11 +15,11 @@ final class ConsensusSecurityDefaultsTests: XCTestCase {
         XCTAssertTrue(config.storageMode.isPruned)
         XCTAssertEqual(config.storageMode.pruneMB, 2048)
         XCTAssertEqual(config.profile.parThreads, 2)
-        XCTAssertEqual(config.profile.dbCacheMB, 512)
-        XCTAssertEqual(config.profile.maxConnections, 24)
+        XCTAssertEqual(config.profile.dbCacheMB, 256)
+        XCTAssertEqual(config.profile.maxConnections, 8)
         let conf = config.renderBitcoinConf()
         for required in [
-            "prune=2048", "pruneduringinit=550", "maxconnections=24",
+            "prune=2048", "pruneduringinit=550", "maxconnections=8",
             "natpmp=0", "upnp=0", "listen=0", "blocksonly=0",
             "v2transport=1", "rest=0", "rpcbind=127.0.0.1",
             "rpcallowip=127.0.0.1", "[main]"
@@ -81,9 +81,9 @@ final class ConsensusSecurityDefaultsTests: XCTestCase {
     }
 
     func testProfilesChangeBudgetNotPruneMode() {
-        XCTAssertEqual(SyncProfile.preset(for: .quiet).maxConnections, 16)
-        XCTAssertEqual(SyncProfile.preset(for: .balanced).maxConnections, 24)
-        XCTAssertEqual(SyncProfile.preset(for: .fast).maxConnections, 32)
+        XCTAssertEqual(SyncProfile.preset(for: .quiet).maxConnections, 3)
+        XCTAssertEqual(SyncProfile.preset(for: .balanced).maxConnections, 8)
+        XCTAssertEqual(SyncProfile.preset(for: .fast).maxConnections, 24)
         for type in SyncProfileType.allCases {
             XCTAssertEqual(SyncProfile.preset(for: type).pruneMB, StorageMode.defaultPruneMB)
         }

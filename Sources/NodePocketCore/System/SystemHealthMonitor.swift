@@ -9,10 +9,8 @@ public enum MacPowerState: String, Codable, Sendable, Equatable {
 
     public var isUltraRequired: Bool {
         switch self {
-        case .battery, .charging:
-            return true
-        case .acNotCharging, .unknown:
-            return false
+        case .battery, .charging: return true
+        case .acNotCharging, .unknown: return false
         }
     }
 

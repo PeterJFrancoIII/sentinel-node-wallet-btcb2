@@ -31,7 +31,7 @@ final class NodeSubprocessIntegrationTests: XCTestCase {
         XCTAssertTrue(content.contains("rpcbind=127.0.0.1"))
         XCTAssertTrue(content.contains("rpcallowip=127.0.0.1"))
         XCTAssertTrue(content.contains("par=1"))
-        XCTAssertTrue(content.contains("dbcache=256"))
+        XCTAssertTrue(content.contains("dbcache=128"))
     }
 
     func testWrongForkRejection() {
