@@ -93,6 +93,16 @@ codesign --force --deep --sign - "${APP_BUNDLE}"
 
 # Generate reproducible Build Manifest
 GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
+CI_CHECKOUT_COMMIT="${GIT_COMMIT}"
+if [ "${GITHUB_EVENT_NAME:-}" = "pull_request" ]; then
+    # GitHub PR workflows normally check out a synthetic MERGE commit; report
+    # the actual reviewed source HEAD SHA as well as the checkout SHA.
+    GIT_COMMIT="${SENTINEL_PR_HEAD_SHA:-}"
+fi
+[[ "${GIT_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || {
+    echo "ERROR: Cannot identify exact Git source SHA for build manifest." >&2
+    exit 1
+}
 BUILD_DATE="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 APP_SHA="$(shasum -a 256 "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet" | awk '{print $1}')"
 BITCOIND_SHA="$(shasum -a 256 "${APP_BUNDLE}/Contents/MacOS/bitcoind" | awk '{print $1}')"
@@ -103,6 +113,7 @@ cat <<EOF > "${ROOT_DIR}/dist/BUILD_MANIFEST.json"
 {
   "build_timestamp": "${BUILD_DATE}",
   "git_commit": "${GIT_COMMIT}",
+  "ci_checkout_commit": "${CI_CHECKOUT_COMMIT}",
   "artifacts": {
     "SentinelNodeWallet_sha256": "${APP_SHA}",
     "bitcoind_sha256": "${BITCOIND_SHA}",
