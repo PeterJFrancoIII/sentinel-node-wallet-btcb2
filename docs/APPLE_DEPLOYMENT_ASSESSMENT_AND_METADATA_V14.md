@@ -87,7 +87,7 @@ Designed for sovereignty and privacy, Sentinel Node Wallet bundles and pins the 
 KEY CAPABILITIES:
 • EMBEDDED BITCOIN KNOTS DAEMON: Automatic adoption and management of local bitcoind, displaying live block synchronization progress, peer connections, and pruned storage metrics.
 • CONSENSUS NETWORK HASHRATE TRACKER: Real-time 30-block difficulty trend and 120-block smoothed network hashrate analytics, computed entirely from local block headers with an interactive 30-sample sparkline history.
-• LOCAL ACCOUNT SECURITY: Protected by local operator credentials stored in macOS Keychain with user-presence authorization.
+• LOCAL ACCOUNT SECURITY: Protected by local operator authentication using salted password verifiers stored in a restricted local registry, with optional Keychain custody for wallet passphrases and 2FA secrets.
 • LOCAL WALLET INVENTORY: Track receiving addresses, transaction history, and wallet confirmations with zero external tracking.
 • FAIL-CLOSED SECURITY: On-chain transaction broadcast and destructive wallet deletion remain fail-closed pending consensus SIGHASH audit. Balance tracking and receiving are fully functional.
 
@@ -108,9 +108,8 @@ Run a bundled Bitcoin Knots node natively on macOS with real-time local consensu
 ### URLs & Support
 - **Support URL:** `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/issues`
 - **Marketing URL:** `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2`
-- **Privacy Policy URL (Branch Active / HTTP 200 Verified):**  
-  `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/blob/fix/v13-1-security-remediation-20261107/docs/PRIVACY.md`  
-  *(Main-branch route `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/blob/main/docs/PRIVACY.md` becomes active upon merge).*
+- **Privacy Policy URL (Verified Permanent / HTTP 200):**  
+  `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/blob/main/docs/PRIVACY.md`
 
 ### App Privacy Questionnaire
 - **Data Collection:** No personal data or user identity collected.
@@ -136,7 +135,7 @@ Generated from live, unmanipulated native SwiftUI window captures on macOS (Reti
 | `02_Sentinel_Network_Hashrate_2880x1800.png` | 2880 × 1800 | RGB | None | Live Network view: 46.85 PH/s 30-block trend, 45.34 PH/s 120-block smoothed, 30-sample sparkline. Zero PII. |
 | `03_Sentinel_Wallet_Authentication_2880x1800.png` | 2880 × 1800 | RGB | None | Operator authentication view: Local Keychain protection and user-presence authorization. Scrubbed demo identity. |
 
-*Local directory:* `/Users/computer/Developer/NodePocketBTCB2/dist/app_store_screenshots/`
+*Local artifact directory:* `dist/app_store_screenshots/`
 
 ---
 
@@ -144,5 +143,5 @@ Generated from live, unmanipulated native SwiftUI window captures on macOS (Reti
 
 - **Spend / Broadcast:** `FAIL-CLOSED` (`signingPathUnverified`). Real mainnet funds cannot be spent ($0.00 risk).
 - **Wallet Deletion:** `HARD-DISABLED`. Destructive deletion blocked; non-destructive Archive enabled.
-- **Host Daemon:** PID 96536 / 54484 running synchronized at block 981,450+; undisturbed.
-- **Operator Wallet:** `Kevin` untouched and locked.
+- **Local Node Daemon:** Running synchronized at block 981,450+; undisturbed.
+- **Operator Wallet:** Untouched, isolated, and locked.
