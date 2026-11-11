@@ -7,6 +7,7 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     case invalidResponse
     case serializationError(String)
     case unverifiedDaemon(String)
+    case transactionBroadcastDisabled
 
     public var errorDescription: String? {
         switch self {
@@ -22,6 +23,8 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
             return "JSON Serialization error: \(msg)"
         case .unverifiedDaemon(let msg):
             return "Daemon verification rejected: \(msg)"
+        case .transactionBroadcastDisabled:
+            return "Wallet signing, broadcasting and fee replacement are disabled pending independent BTCB2 SIGHASH_UNIFIED security approval."
         }
     }
 }
@@ -32,6 +35,15 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     public let user: String
     public let password: String
     private let session: URLSession
+
+    // Defense-in-depth: the generic RPC API is publicly callable by other first-party
+    // modules. Do not rely solely on SwiftUI or WalletManager to block fund outflow.
+    // No release-mode override or test-mode bypass exists for these dangerous RPCs.
+    private static let restrictedSpendMethods: Set<String> = [
+        "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
+        "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
+        "signrawtransactionwithwallet", "signrawtransactionwithkey", "finalizepsbt"
+    ]
 
     public init(
         host: String = "127.0.0.1",
@@ -66,6 +78,9 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     }
 
     public func call<T: Decodable>(method: String, params: [Any] = [], walletName: String? = nil) async throws -> T {
+        guard !Self.restrictedSpendMethods.contains(method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+            throw RPCClientError.transactionBroadcastDisabled
+        }
         guard let url = getEndpointURL(walletName: walletName) else {
             throw RPCClientError.invalidURL
         }

@@ -106,10 +106,9 @@ public struct WalletView: View {
     }
 
     public var isSendAllowed: Bool {
-        // Mainnet requires completion of IBD past the fork checkpoint
-        let inIBD = state.blockchainInfo?.initialblockdownload ?? true
-        let height = state.blockchainInfo?.blocks ?? 0
-        return !inIBD && height >= BTCB2ConsensusConstants.forkActivationHeight
+        // A synced chain does NOT establish fork-safe signing or broadcast approval.
+        // Keep both Send and RBF disabled even if IBD has completed.
+        false
     }
 
     public var body: some View {
@@ -855,7 +854,7 @@ public struct WalletView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text(isSendAllowed ? "Send Armed" : "IBD Incomplete")
+                        Text("Sending Gated")
                             .font(.caption2)
                             .bold()
                             .padding(.horizontal, 8)
@@ -864,15 +863,9 @@ public struct WalletView: View {
                             .foregroundColor(isSendAllowed ? .green : .orange)
                     }
 
-                    if !isSendAllowed {
-                        Text("Sending on Mainnet is strictly locked until Initial Block Download passes BIP-110 hard-fork height \(BTCB2ConsensusConstants.forkActivationHeight).")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    } else {
-                        Text("Sending is enabled: Native SegWit Bech32 • BIP-125 RBF enabled • Automatic wallet re-lock.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
+                    Text("Safety lock: Sending and RBF remain disabled until BTCB2 BLAKE2b SIGHASH_UNIFIED signing, funded transaction authorization, and wallet re-lock pass independent security review. Receiving and history remain available.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
 
                     // Recipient Selector / Input
                     VStack(alignment: .leading, spacing: 6) {
@@ -2099,7 +2092,7 @@ public struct WalletView: View {
                     }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(isBumpingFee || (Int(bumpFeeRateInput) ?? 0) <= 0)
+                .disabled(!isSendAllowed || isBumpingFee || (Int(bumpFeeRateInput) ?? 0) <= 0)
             }
         }
         .padding(20)
@@ -2249,7 +2242,8 @@ public struct WalletView: View {
                             .foregroundColor(.blue)
                         }
                         .buttonStyle(.plain)
-                        .help("Apply BIP-125 Replace-By-Fee (RBF) to accelerate this pending transaction")
+                        .help("RBF is disabled until BTCB2 fork-specific signing and broadcasting have passed security review")
+                        .disabled(!isSendAllowed)
                     }
                 }
 

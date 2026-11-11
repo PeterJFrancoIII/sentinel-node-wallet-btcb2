@@ -657,24 +657,11 @@ public final class AppState: ObservableObject {
     }
 
     public func executeAuthorizedSend(preview: FundedTxPreview, explicitPassphrase: String? = nil) async throws -> String {
-        guard isWalletTabUnlocked, let session = self.authSession else {
+        guard isWalletTabUnlocked, self.authSession != nil else {
             throw WalletAuthError.unauthenticated
         }
-        let approval = try await requestHighRiskApproval(
-            action: "send",
-            target: preview.destinationAddress,
-            reason: "Authorize sending \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
-        )
-        let txid = try await walletManager.executeAuthorizedSend(
-            preview: preview,
-            explicitPassphrase: explicitPassphrase,
-            capability: session,
-            approval: approval
-        )
-        appendLog("[TRANSACTION] Broadcasted \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress): \(txid)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: session)
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: session)) ?? []
-        return txid
+        // Prevent even requesting device-owner approval for a disabled broadcast path.
+        throw WalletSecurityError.signingPathUnverified
     }
 
     public func refreshFeeQuotes() {
@@ -958,6 +945,11 @@ public final class AppState: ObservableObject {
 
     @discardableResult
     public func bumpTransactionFee(txid: String, newFeeRate: Int? = nil) async -> Bool {
+        // Fee bump would broadcast a replacement transaction. Stop before any RPC.
+        alertMessage = WalletSecurityError.signingPathUnverified.localizedDescription
+        showAlert = true
+        return false
+        /*
         guard let session = authSession else {
             alertMessage = "Wallet Manager is locked. Please unlock first."
             showAlert = true
@@ -973,6 +965,7 @@ public final class AppState: ObservableObject {
             showAlert = true
             return false
         }
+        */
     }
 
     @MainActor
