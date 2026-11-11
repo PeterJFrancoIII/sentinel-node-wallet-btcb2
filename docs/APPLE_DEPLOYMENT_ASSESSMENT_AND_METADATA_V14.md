@@ -2,18 +2,18 @@
 
 > **Canonical Operating Authority:**  
 > `Shared Memory MCP Rules: https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md`  
-> Directives Reference: `MSG:SENTINEL-NODE-WALLET-APPLE-DEPLOYMENT-HANDOFF-20261110-GPT6-083`, `PRODUCTION_RELEASE_CHECKLIST.md`, `PROJECT_STATUS.md`
+> Directives Reference: `MSG:SENTINEL-NODE-WALLET-APPLE-DEPLOYMENT-HANDOFF-20261110-GPT6-083`, `MSG:SENTINEL-NODE-WALLET-APPLE-REVIEW-CORRECTION-20261111-GPT6-085`, `PRODUCTION_RELEASE_CHECKLIST.md`, `PROJECT_STATUS.md`
 
 ---
 
 ## 1. Executive Summary & Audit Baseline
 
-In accordance with owner directive and architectural handoff `MSG:SENTINEL-NODE-WALLET-APPLE-DEPLOYMENT-HANDOFF-20261110-GPT6-083`, this document provides the comprehensive local read-only inventory, release channel qualification, App Store Connect metadata staging, and screenshot assets for **Sentinel Node Wallet** (`app.nodepocket.btcb2`).
+In accordance with owner directive `MSG:SENTINEL-NODE-WALLET-APPLE-DEPLOYMENT-HANDOFF-20261110-GPT6-083` and architect review `MSG:SENTINEL-NODE-WALLET-APPLE-REVIEW-CORRECTION-20261111-GPT6-085`, this document provides the verified local read-only inventory, release channel qualification, App Store Connect metadata staging, privacy disclosure, and screenshot assets for **Sentinel Node Wallet** (`app.nodepocket.btcb2`).
 
 - **Repository:** `PeterJFrancoIII/sentinel-node-wallet-btcb2`
-- **Branch:** `fix/v13-1-security-remediation-20261107` (Head: `f17faec`)
+- **Branch:** `fix/v13-1-security-remediation-20261107`
 - **PR:** [#10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10)
-- **CI Status:** GitHub Actions Run [#42941042667](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42941042667) — SUCCESS (132 passed, 0 failed, 1 Keychain interactive skip).
+- **CI Status:** GitHub Actions Run [#42962560046](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42962560046) — **SUCCESS (GREEN)** (133 XCTest: 132 passed, 0 failed, 1 Keychain interactive skip; native build, shell syntax, pinned Knots bundle, isolated regtest descriptor backup/restore all PASS).
 - **Security Posture:** Transaction broadcast and destructive wallet deletion remain strictly **FAIL-CLOSED** (`signingPathUnverified`) pending independent consensus signing audit ($0.00 spent).
 
 ---
@@ -25,10 +25,11 @@ In accordance with owner directive and architectural handoff `MSG:SENTINEL-NODE-
 - **File:** `AuthKey_C9XYR2HH83.p8` (257 bytes, PKCS#8 ECDSA private key).
 - **Key ID:** `C9XYR2HH83`.
 - **Download Provenance:** Downloaded directly via Safari from `appstoreconnect.apple.com` on `2026-11-10 22:22 EST`.
-- **App Store Connect REST API Status:**
-  - An App Store Connect API token requires both the Key ID (`C9XYR2HH83`) and the organization's **Issuer ID** (UUID format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
-  - The Issuer ID is displayed on the App Store Connect web portal under *Users and Access → Integrations → App Store Connect API*.
-  - Candidate Xcode UUIDs (`DE82A39A-00AD-4CB0-86DC-ADD0ABC9664E` and `943F31B0-C4EE-4E77-9F8E-AEA1F42915F9`) return HTTP 401 Not Authorized against `https://api.appstoreconnect.apple.com/v1/apps`. Programmatic REST API automation requires the exact Issuer ID UUID from that portal page.
+- **Key Type & Authentication Evaluation:**
+  - Evaluated against official Apple documentation for both **Team Keys** and **Individual Keys**.
+  - Testing an Individual Key JWT structure (`"sub": "user"`, `"aud": "appstoreconnect-v1"`, with and without `"scope": ["GET /v1/apps"]`) returned HTTP `401 Not Authorized`.
+  - Testing a Team Key JWT structure without the portal Issuer ID returned HTTP `401 Not Authorized`.
+  - **Conclusion:** `AuthKey_C9XYR2HH83.p8` was generated under *Users and Access → Integrations → App Store Connect API* as a Team Key. It requires the account's **Issuer ID** (UUID format `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` displayed at the top of that portal page) to authenticate programmatic REST API calls.
 
 ### B. TimeProof Reference Project (Read-Only)
 - **Path:** `/Users/computer/App Development/TimeProof/TimeProof (App Store)/Current/TimeProof_1.3.1_Release`
@@ -36,15 +37,14 @@ In accordance with owner directive and architectural handoff `MSG:SENTINEL-NODE-
 - **Public Team ID:** `S8QMQZA656`
 - **Team Name:** `Peter Franco`
 - **Team Type (Xcode):** `Individual` (`isFreeProvisioningTeam = 0; teamID = S8QMQZA656; teamName = "Peter Franco"; teamType = Individual;`)
-- **Signing Identity:** `Apple Development: Peter Franco (89V8F6QJC2)`
-- **Entitlements:** Sandboxed (`com.apple.security.app-sandbox = true`), scope bookmarks, and read-write user-selected files.
+- **Bundle ID:** `com.PeterJFrancoIIILLC.TimeProof`
 
-### C. Host Code Signing Identities
-- `security find-identity -v -p codesigning`:
-  - `1) 2D5961BBD628EA81C8901392526869E29FDB7D37 "Apple Development: Peter Franco (89V8F6QJC2)"`
-  - Valid identities found: 1 (Development only).
-  - `Developer ID Application` identity: **Not currently installed in Keychain**.
-  - `Apple Distribution` identity: **Not currently installed in Keychain**.
+### C. Host Code Signing Certificate Verification
+- Inspected installed identity: `"Apple Development: peterjfrancoiii@icloud.com (89V8F6QJC2)"`
+  - **X.509 Certificate Subject:**
+    `UID=VCQDAZ4TAD, CN=Apple Development: peterjfrancoiii@icloud.com (89V8F6QJC2), OU=S8QMQZA656, O=Peter Franco, C=US`
+  - **Verification:** The Organizational Unit (`OU=S8QMQZA656`) exactly matches Team ID `S8QMQZA656`. The alphanumeric suffix `89V8F6QJC2` is the developer user identifier (CN), not a divergent team identifier.
+  - **Distribution Identities:** Neither a `Developer ID Application` nor an `Apple Distribution` identity is currently installed in the Keychain on this Mac.
 
 ---
 
@@ -53,17 +53,17 @@ In accordance with owner directive and architectural handoff `MSG:SENTINEL-NODE-
 ### Channel A: Mac App Store (MAS)
 - **Apple App Store Review Guideline 3.1.5(i) (Cryptocurrency Wallets):**
   > *"Wallets: The app may facilitate transmission of approved virtual currencies, provided that it may only be offered in countries or regions where the developer has appropriate licensing and permissions to do so, and the app must be submitted by an organization, not an individual developer."*
-- **Regulatory Gate:** Account `S8QMQZA656` is currently enrolled as an **Individual** account (`teamType = Individual`).
-- **Remediation Required for MAS:** The owner must initiate an account conversion in Apple Developer Account settings from Individual to **Organization** (e.g. `Peter J. Franco III LLC`, requiring D-U-N-S verification).
-- **Technical Sandbox Barrier:** Mac App Store mandates `com.apple.security.app-sandbox`. Running an embedded full Bitcoin Knots daemon (`bitcoind`) with local peer P2P sockets and database datadir within MAS App Sandbox requires specific network client/server entitlements and security-scoped bookmark architecture.
+- **Regulatory Gate:** Developer account `S8QMQZA656` is currently registered as an **Individual** account (`teamType = Individual`).
+- **Remediation Required for MAS:** The owner must convert the Apple Developer account from Individual to **Organization** (e.g. `Peter J. Franco III LLC`, requiring D-U-N-S verification).
+- **Technical Sandbox Barrier:** Mac App Store mandates `com.apple.security.app-sandbox`. Running an embedded full Bitcoin Knots daemon (`bitcoind`) with local peer P2P sockets and blockchain datadir within MAS App Sandbox requires specific network client/server entitlements and security-scoped bookmark architecture.
 
 ### Channel B: Developer ID Notarized Outside-Store Distribution (DMG)
-- **Eligibility:** **100% Eligible** for both Individual and Organization accounts.
+- **Eligibility:** Eligible for Individual accounts once distribution certificates and notarization credentials are provisioned.
 - **Guideline 3.1.5(i) Applicability:** Does **not** apply to outside-store Developer ID notarization.
-- **Sandboxing:** Uses macOS Hardened Runtime (`--options runtime`) without App Sandbox constraints, allowing embedded `bitcoind` full native performance and isolated datadir management.
-- **Automated Pipeline:** Fully scripted and validated via `scripts/build_production_dmg.sh`.
+- **Sandboxing:** Uses macOS Hardened Runtime (`--options runtime`) without App Sandbox constraints, allowing embedded `bitcoind` full native execution.
+- **Automated Pipeline:** Scripted in `scripts/build_production_dmg.sh`.
 - **Prerequisites for DMG Signing:**
-  1. Generate / install `Developer ID Application: Peter Franco (89V8F6QJC2)` certificate in Keychain.
+  1. Generate and install a `Developer ID Application: Peter Franco (89V8F6QJC2)` certificate in Keychain.
   2. Configure notary credentials via `xcrun notarytool store-credentials "notarytool-profile" --apple-id ... --team-id S8QMQZA656`.
   3. Serve Apple App Site Association (AASA) JSON for `webcredentials:S8QMQZA656.app.nodepocket.btcb2` over the approved HTTPS domain.
 
@@ -87,16 +87,17 @@ Derived strictly from truthful, current runtime functionality without unverified
 ```text
 Sentinel Node Wallet is a native macOS application engineered for running and managing an authentic Bitcoin Knots node with integrated local wallet monitoring.
 
-Designed for sovereignty and privacy, Sentinel Node Wallet embeds a verified Bitcoin Knots node daemon directly on your Mac, allowing you to validate the blockchain locally without relying on third-party APIs or external hosted nodes.
+Designed for sovereignty and privacy, Sentinel Node Wallet bundles and pins the Bitcoin Knots node daemon (v29.4.3) directly on your Mac, allowing you to validate the blockchain locally without relying on external hosted full nodes.
 
 KEY CAPABILITIES:
 • EMBEDDED BITCOIN KNOTS DAEMON: Automatic adoption and management of local bitcoind, displaying live block synchronization progress, peer connections, and pruned storage metrics.
 • CONSENSUS NETWORK HASHRATE TRACKER: Real-time 30-block difficulty trend and 120-block smoothed network hashrate analytics, computed entirely from local block headers with an interactive 30-sample sparkline history.
-• PASSKEY & KEYCHAIN INTEGRATION: Protected by macOS Keychain and Passkey security, supporting operator credentials and Apple Passwords autofill.
+• LOCAL ACCOUNT SECURITY: Protected by local operator credentials stored in macOS Keychain and compatible with Apple Saved Passwords autofill.
 • LOCAL WALLET INVENTORY: Track receiving addresses, transaction history, and wallet confirmations with zero external tracking.
 • FAIL-CLOSED SECURITY: On-chain transaction broadcast and destructive wallet deletion remain fail-closed pending consensus SIGHASH audit. Balance tracking and receiving are fully functional.
 
-Sentinel Node Wallet communicates strictly over local RPC to your Bitcoin Knots daemon. No user data, telemetry, or private keys are ever transmitted to external servers.
+NETWORK & PRIVACY DISCLOSURE:
+Sentinel Node Wallet communicates strictly over local loopback RPC (127.0.0.1) to your local Bitcoin Knots daemon. Zero wallet addresses, private keys, or personal telemetry are transmitted to external servers. To provide estimated USD fiat valuations, the app performs read-only public market ticker queries against public exchange endpoints (neoxa.exchange and api.nonkyc.io) without sending user identifiers or wallet balances.
 ```
 
 ### Keywords (89 / 100 characters)
@@ -106,18 +107,21 @@ bitcoin,knots,node,btcb2,hashrate,crypto,blockchain,wallet,pruned,consensus,mini
 
 ### Promotional Text
 ```text
-Run a verified Bitcoin Knots node natively on macOS with real-time local consensus hashrate analytics and passkey-protected wallet monitoring.
+Run a bundled Bitcoin Knots node natively on macOS with real-time local consensus hashrate analytics and secure wallet monitoring.
 ```
 
 ### URLs & Support
 - **Support URL:** `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/issues`
 - **Marketing URL:** `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2`
-- **Privacy Policy URL:** `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/blob/main/docs/PRIVACY.md`
+- **Privacy Policy URL:** `https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/blob/main/docs/PRIVACY.md` (Verified present in repo)
 
 ### App Privacy Questionnaire
-- **Data Collection:** No data collected.
-- **Telemetry:** Zero third-party trackers, zero analytical SDKs.
-- **Network Access:** Localhost loopback RPC (127.0.0.1) and peer-to-peer Bitcoin protocol network sockets.
+- **Data Collection:** No personal data or user identity collected.
+- **Telemetry:** Zero third-party analytics trackers, zero advertising frameworks.
+- **Network Access:**
+  - Localhost loopback RPC (`127.0.0.1`) for wallet and node management.
+  - Peer-to-peer Bitcoin protocol sockets for decentralized blockchain synchronization.
+  - Optional read-only public exchange pricing tickers (`neoxa.exchange`, `api.nonkyc.io`) for fiat estimates (zero user data sent).
 
 ### Export Compliance & Cryptography
 - **Uses Encryption:** Yes (Standard system TLS/HTTPS and CryptoKit/CommonCrypto).
@@ -133,7 +137,7 @@ Generated from live, unmanipulated native SwiftUI window captures on macOS (Reti
 | :--- | :---: | :---: | :---: | :--- |
 | `01_Sentinel_Node_Status_2880x1800.png` | 2880 × 1800 | RGB | None | Live Node status: 100.00% sync, block 981,450+, 4 peers, pruned 550MB, Ultra mode. |
 | `02_Sentinel_Network_Hashrate_2880x1800.png` | 2880 × 1800 | RGB | None | Live Network view: 46.85 PH/s 30-block trend, 45.34 PH/s 120-block smoothed, 30-sample sparkline. |
-| `03_Sentinel_Wallet_Authentication_2880x1800.png` | 2880 × 1800 | RGB | None | Operator authentication view: Passkey / Keychain protection and Apple Passwords autofill. |
+| `03_Sentinel_Wallet_Authentication_2880x1800.png` | 2880 × 1800 | RGB | None | Operator authentication view: Local Keychain protection and Apple Saved Passwords autofill. |
 
 *Local directory:* `/Users/computer/Developer/NodePocketBTCB2/dist/app_store_screenshots/`
 
