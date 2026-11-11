@@ -18,3 +18,7 @@ jobs:
         run: swift --version
       - name: Compile and run native unit tests
         run: swift test
+      - name: Compile optimized native SwiftUI application
+        run: swift build -c release --product NodePocketApp
+      - name: Validate packaging shell syntax (no credentials or binaries)
+        run: bash -n scripts/build_app.sh scripts/build_dmg.sh scripts/fetch-verify-knots.sh

@@ -472,6 +472,12 @@ public actor WalletInventory {
         return walletURL
     }
 
+    /// Deliberately fail closed until the app can prove a clean encrypted-wallet
+    /// recovery using a DIFFERENT, isolated Knots data directory.
+    ///
+    /// Earlier builds ignored a failed live-daemon restore and then trashed the
+    /// wallet. That behavior risks unrecoverable loss and can mutate MainNet
+    /// data. No destructive file or RPC calls are permitted on this path.
     public func deleteWalletFromMac(
         name: String,
         typedConfirmation: String,
@@ -481,27 +487,27 @@ public actor WalletInventory {
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
-        if !allowUnauthenticatedForTesting {
-            guard let coord = authCoordinator, let app = approval else {
-                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet deletion.")
-            }
-            try await coord.consumeHighRiskApproval(app, action: "delete", target: name)
-        }
+        try Self.validateWalletName(name)
         guard typedConfirmation == name else {
             throw WalletInventoryError.confirmationMismatch(expected: name, got: typedConfirmation)
         }
 
-        // Verify receipt identity binding if provided
-        if let receipt = verifiedReceipt {
-            guard receipt.walletName == name else {
-                throw WalletInventoryError.backupIdentityMismatch(expected: name, got: receipt.walletName)
-            }
-            guard receipt.backupPath == verifiedBackupPath else {
-                throw WalletInventoryError.backupIdentityMismatch(expected: verifiedBackupPath, got: receipt.backupPath)
-            }
+        guard let receipt = verifiedReceipt else {
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Wallet deletion is paused: a durable, wallet-bound backup receipt AND separately verified recovery are mandatory. Use Archive instead."
+            )
         }
-
-        // Verify backup exists, is not a symlink, and is a regular file
+        guard receipt.walletName == name else {
+            throw WalletInventoryError.backupIdentityMismatch(expected: name, got: receipt.walletName)
+        }
+        guard receipt.backupPath == verifiedBackupPath else {
+            throw WalletInventoryError.backupIdentityMismatch(expected: verifiedBackupPath, got: receipt.backupPath)
+        }
+        guard receipt.isDurabilityConfirmed else {
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Backup storage durability is unconfirmed; deletion is prohibited. Save and independently recover a new backup first."
+            )
+        }
         guard FileManager.default.fileExists(atPath: verifiedBackupPath) else {
             throw WalletInventoryError.backupNotFound(verifiedBackupPath)
         }
@@ -516,52 +522,20 @@ public actor WalletInventory {
         guard size >= 1024 else {
             throw WalletInventoryError.backupEmpty(verifiedBackupPath)
         }
-
-        // Verify database format (SQLite or BDB header)
-        if let handle = try? FileHandle(forReadingFrom: URL(fileURLWithPath: verifiedBackupPath)) {
-            defer { try? handle.close() }
-            let header = (try? handle.read(upToCount: 16)) ?? Data()
-            let sqliteMagic = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
-            let bdbMagicLE = Data([0x62, 0x31, 0x05, 0x00])
-            let bdbMagicBE = Data([0x00, 0x05, 0x31, 0x62])
-            let isSqlite = header.starts(with: sqliteMagic)
-            let isBdb = header.prefix(4) == bdbMagicLE || header.prefix(4) == bdbMagicBE || (header.count >= 16 && header[12..<16] == bdbMagicLE)
-            guard isSqlite || isBdb else {
-                throw WalletInventoryError.backupEmpty("Backup is corrupted or not a valid wallet database: \(verifiedBackupPath)")
-            }
+        guard size == receipt.bytesWritten else {
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Backup file size no longer matches its receipt. The original wallet was preserved."
+            )
         }
 
-        // Isolated restore proof: ensure backup can actually be restored by the daemon
-        let tempRestoreName = "del_verify_\(UUID().uuidString.prefix(8))"
-        if let restoreRes = try? await rpcClient.restoreWallet(name: tempRestoreName, backupFile: verifiedBackupPath) {
-            _ = try? await rpcClient.unloadWallet(name: restoreRes.name, loadOnStartup: false)
-        }
-
-        // Run preflight check
-        let walletURL = try await preflightDeleteCheck(name: name)
-
-        // Unload from Knots if still loaded
-        let loaded = try await rpcClient.listWallets()
-        if loaded.contains(name) {
-            _ = try await rpcClient.unloadWallet(name: name, loadOnStartup: false)
-        }
-        let remaining = try await rpcClient.listWallets()
-        if remaining.contains(name) {
-            throw WalletInventoryError.stillLoadedAfterUnload(name)
-        }
-
-        // Reversible trash via macOS FileManager.trashItem
-        var trashedURL: NSURL?
-        do {
-            try FileManager.default.trashItem(at: walletURL, resultingItemURL: &trashedURL)
-        } catch {
-            throw WalletInventoryError.fileManagerError(error.localizedDescription)
-        }
-
-        // Remove from registry metadata and receive address store
-        metadata.archivedWallets.remove(name)
-        metadata.cachedBalances.removeValue(forKey: name)
-        saveMetadata()
-        receiveAddressStore.deleteAllAddresses(for: name)
+        // A receipt, magic header and matching byte count cannot prove that a
+        // wallet can actually be restored. No live-node 'try?' restore is valid
+        // evidence; it can create stray wallets in the operator's real datadir.
+        // Re-enable deletion ONLY after implementing a verified isolated restore
+        // proof bound to this wallet identity and backup digest, with independent
+        // checks of descriptors, encryption, address ownership and re-locking.
+        throw WalletInventoryError.restoreVerificationFailed(
+            "Wallet preserved. Deletion requires a successful, separately verified encrypted-wallet restore on an isolated Knots data directory. This verification is not implemented yet; use Archive instead."
+        )
     }
 }

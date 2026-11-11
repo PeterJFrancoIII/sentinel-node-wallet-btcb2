@@ -1756,10 +1756,8 @@ public struct WalletView: View {
                 }
                 .buttonStyle(.plain)
                 .controlSize(.small)
-                .disabled(!summary.canDeleteSafely)
-                .help(summary.canDeleteSafely
-                      ? "Safely move verified empty wallet to macOS Trash (reversible)"
-                      : "Cannot delete wallet with non-zero or unverified balance to prevent loss of funds. Use Archive instead.")
+                .disabled(true)
+                .help("Deletion is temporarily unavailable: an independently verified encrypted-wallet recovery is required. Use Archive to remove a wallet from active memory without deleting files.")
             }
         }
         .padding(10)
