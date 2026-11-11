@@ -46,11 +46,8 @@ cat <<EOF > "${TEST_DATADIR}/bitcoin.conf"
 regtest=1
 server=1
 listen=0
-rpcuser=${TEST_RPC_USER}
-rpcpassword=${TEST_RPC_PASS}
-rpcport=${TEST_RPC_PORT}
-port=${TEST_P2P_PORT}
 fallbackfee=0.0001
+# Bind, authentication and ports are REGTEST-ONLY: never shared with MainNet.
 [regtest]
 rpcbind=127.0.0.1
 rpcallowip=127.0.0.1
