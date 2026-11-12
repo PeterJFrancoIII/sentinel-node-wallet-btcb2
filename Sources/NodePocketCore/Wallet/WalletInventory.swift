@@ -554,27 +554,14 @@ public actor WalletInventory {
             )
         }
 
-        // 1. Verify zero balance and resolve directory
-        let walletURL = try await preflightDeleteCheck(name: name)
-
-        // 2. Unload wallet from Knots daemon if currently loaded
-        if let loaded = try? await rpcClient.listWallets(), loaded.contains(name) {
-            _ = try await rpcClient.unloadWallet(name: name, loadOnStartup: false)
-        }
-
-        // 3. Move the wallet directory to macOS Trash
-        var trashedURL: NSURL?
-        try FileManager.default.trashItem(at: walletURL, resultingItemURL: &trashedURL)
-
-        // 4. Update metadata registry
-        metadata.archivedWallets.remove(name)
-        metadata.cachedBalances.removeValue(forKey: name)
-        saveMetadata()
-
-        // 5. Remove associated receive addresses
-        receiveAddressStore.deleteAllAddresses(for: name)
-
-        // 6. Remove passphrase from Keychain
-        try? KeychainHelper.shared.deletePassphrase(account: name)
+        // A receipt, magic header and matching byte count cannot prove that a
+        // wallet can actually be restored. No live-node 'try?' restore is valid
+        // evidence; it can create stray wallets in the operator's real datadir.
+        // Re-enable deletion ONLY after implementing a verified isolated restore
+        // proof bound to this wallet identity and backup digest, with independent
+        // checks of descriptors, encryption, address ownership and re-locking.
+        throw WalletInventoryError.restoreVerificationFailed(
+            "Wallet preserved. Deletion requires a successful, separately verified encrypted-wallet restore on an isolated Knots data directory. This verification is not implemented yet; use Archive instead."
+        )
     }
 }
