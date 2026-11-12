@@ -275,9 +275,12 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         replaceable: Bool = true,
         walletName: String? = nil
     ) async throws -> String {
-        var params: [Any] = [address, amount, comment, "", false, replaceable]
+        // Enforce 8-decimal fixed-point string representation for Bitcoin Core RPC compatibility
+        // Prevents floating-point scientific notation (e.g. 9.718e-05) which causes "RPC Server Error (-3): Invalid amount"
+        let amountStr = SatoshiMath.toBTCString(btc: amount)
+        var params: [Any] = [address, amountStr, comment, "", false, replaceable]
         if let feeRate = feeRateSatPerVB, feeRate > 0 {
-            params = [address, amount, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
+            params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
         }
         return try await call(method: "sendtoaddress", params: params, walletName: walletName)
     }
@@ -294,7 +297,8 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         if let rate = feeRateSatPerVB, rate > 0 {
             options["fee_rate"] = rate
         }
-        let formattedOutputs = outputs.map { [$0.key: $0.value] }
+        // Output amounts must be 8-decimal fixed-point strings to avoid scientific notation serialization
+        let formattedOutputs: [[String: String]] = outputs.map { [$0.key: SatoshiMath.toBTCString(btc: $0.value)] }
         return try await call(
             method: "walletcreatefundedpsbt",
             params: [[], formattedOutputs, 0, options],

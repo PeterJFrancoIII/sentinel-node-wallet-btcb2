@@ -14,6 +14,15 @@ public struct SatoshiMath {
         Double(sats) / Double(satsPerBTC)
     }
 
+    public static func toBTCString(sats: Int64) -> String {
+        let btc = toBTC(sats: sats)
+        return String(format: "%.8f", btc)
+    }
+
+    public static func toBTCString(btc: Double) -> String {
+        return String(format: "%.8f", btc)
+    }
+
     public static func formatSats(_ sats: Int64) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal

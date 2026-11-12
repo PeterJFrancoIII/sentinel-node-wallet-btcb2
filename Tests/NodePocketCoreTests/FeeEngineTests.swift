@@ -13,6 +13,15 @@ final class FeeEngineTests: XCTestCase {
         XCTAssertEqual(SatoshiMath.toBTC(sats: 100_000_000), 1.0)
         XCTAssertEqual(SatoshiMath.toBTC(sats: 1), 0.00000001)
 
+        // BTC String Formatting (fixed-point 8 decimals to prevent scientific notation in RPC)
+        XCTAssertEqual(SatoshiMath.toBTCString(sats: 1), "0.00000001")
+        XCTAssertEqual(SatoshiMath.toBTCString(sats: 9_718), "0.00009718")
+        XCTAssertEqual(SatoshiMath.toBTCString(sats: 10_000), "0.00010000")
+        XCTAssertEqual(SatoshiMath.toBTCString(sats: 100_000_000), "1.00000000")
+        XCTAssertEqual(SatoshiMath.toBTCString(btc: 0.00009718), "0.00009718")
+        XCTAssertEqual(SatoshiMath.toBTCString(btc: 0.00000001), "0.00000001")
+        XCTAssertFalse(SatoshiMath.toBTCString(btc: 0.00009718).contains("e"))
+
         // Formatting
         XCTAssertEqual(SatoshiMath.formatSats(100_000_000), "100,000,000")
         XCTAssertEqual(SatoshiMath.formatSats(12345), "12,345")
