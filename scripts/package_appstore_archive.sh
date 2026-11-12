@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 BUNDLE_ID="pool.sentineldefensetechnologies.co.za"
 VERSION="1.0"
-BUILD_NUMBER="1"
+BUILD_NUMBER="2"
 APP_NAME="Sentinel Node Wallet"
 TEAM_ID="S8QMQZA656"
 SIGNING_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
@@ -237,7 +237,7 @@ EOF
 # 13. Write deployment instructions
 cat <<EOF > "${DIST_DIR}/DEPLOYMENT_INSTRUCTIONS_APPSTORE.txt"
 ================================================================================
-SENTINEL NODE WALLET 1.0 (BUILD 1) - APP STORE DEPLOYMENT INSTRUCTIONS
+SENTINEL NODE WALLET 1.0 (BUILD 2) - APP STORE DEPLOYMENT INSTRUCTIONS
 ================================================================================
 
 App Store Connect App ID: 6833290684
