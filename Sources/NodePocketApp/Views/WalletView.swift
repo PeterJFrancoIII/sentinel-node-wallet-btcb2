@@ -19,6 +19,7 @@ public struct WalletView: View {
     @State private var sendAmountUSDInput = ""
     @State private var sendAmountPercentInput = ""
     @State private var isSyncingAmountInputs = false
+    @State private var isMaxSelected = false
     @State private var selectedFeePreset: FeePresetType = .normal
     @State private var customSatPerVBInput = "2"
     @State private var activePreview: FundedTxPreview?
@@ -157,6 +158,21 @@ public struct WalletView: View {
                 Task { await state.refreshPrice() }
             }
         }
+        .onChange(of: selectedFeePreset) { _ in
+            if isMaxSelected {
+                applyMaxAmount()
+            }
+        }
+        .onChange(of: customSatPerVBInput) { _ in
+            if isMaxSelected {
+                applyMaxAmount()
+            }
+        }
+        .onChange(of: state.walletSnapshot?.trustedBalance) { _ in
+            if isMaxSelected {
+                applyMaxAmount()
+            }
+        }
         .sheet(isPresented: $showPreviewSheet) {
             sendPreviewSheet
         }
@@ -291,792 +307,11 @@ public struct WalletView: View {
                 // All Discovered Wallets Inventory Section
                 walletInventorySection
 
-                // Balance Card
-                VStack(alignment: .leading, spacing: 14) {
-                    // Pending incoming transfer alert
-                    if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
-                        HStack(spacing: 12) {
-                            Image(systemName: "clock.badge.exclamationmark.fill")
-                                .font(.title2)
-                                .foregroundColor(.orange)
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text("Incoming Transfer Pending (0 Confirmations)")
-                                        .font(.system(size: 13, weight: .bold))
-                                        .foregroundColor(.orange)
-                                    Text("ACTIVELY BEING RECEIVED")
-                                        .font(.system(size: 9, weight: .bold))
-                                        .padding(.horizontal, 6)
-                                        .padding(.vertical, 2)
-                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
-                                        .foregroundColor(.orange)
-                                }
-                                Text("+\(String(format: "%.8f", state.walletSnapshot?.pendingBalance ?? 0.0)) BTCB2 (\(SatoshiMath.formatSats(state.walletSnapshot?.pendingBalanceSats ?? 0)) sats) is unconfirmed in the mempool. This pending transfer is NOT yet spendable until confirmed in a block.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            Spacer()
-                        }
-                        .padding(10)
-                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
-                        )
-                    }
-
-                    HStack(alignment: .firstTextBaseline) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Verified Spendable Balance")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-
-                            Text(String(format: "%.8f BTCB2", state.walletSnapshot?.trustedBalance ?? 0.0))
-                                .font(.system(size: 34, weight: .bold, design: .monospaced))
-
-                            HStack(spacing: 8) {
-                                Text("\(SatoshiMath.formatSats(state.walletSnapshot?.trustedBalanceSats ?? 0)) sats")
-                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
-                                    .foregroundColor(.secondary)
-
-                                if state.priceState.effectivePrice > 0 {
-                                    Text("• ≈ \(state.priceState.formatFiat(satoshis: state.walletSnapshot?.trustedBalanceSats ?? 0))")
-                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                        .foregroundColor(.primary)
-                                }
-                            }
-                        }
-
-                        Spacer()
-
-                        if state.walletSnapshot?.isEncrypted == true {
-                            Label("Encrypted & Locked", systemImage: "lock.shield.fill")
-                                .font(.caption)
-                                .foregroundColor(.green)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 5)
-                                .background(Capsule().fill(Color.green.opacity(0.12)))
-                        }
-                    }
-
-                    Divider()
-
-                    HStack(spacing: 24) {
-                        balanceDetail(
-                            label: "Pending (0-Conf)",
-                            amount: state.walletSnapshot?.pendingBalance ?? 0.0,
-                            sats: state.walletSnapshot?.pendingBalanceSats ?? 0
-                        )
-                        balanceDetail(
-                            label: "Immature (Mining Rewards)",
-                            amount: state.walletSnapshot?.immatureBalance ?? 0.0,
-                            sats: state.walletSnapshot?.immatureBalanceSats ?? 0
-                        )
-                    }
-
-                    // Immature Coinbase Rewards Countdown & Epoch Breakdown
-                    if (state.walletSnapshot?.immatureBalance ?? 0.0) > 0 || !state.coinbaseRewards.isEmpty {
-                        Divider()
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Image(systemName: "hourglass.circle.fill")
-                                    .foregroundColor(.orange)
-                                Text("Coinbase Rewards Maturity Countdown")
-                                    .font(.subheadline)
-                                    .bold()
-                                Spacer()
-                                Text("BIP-110 Consensus Schedule")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            if state.coinbaseRewards.isEmpty {
-                                Text("Mining rewards detected. Maturity schedule: 100 blocks (< 973,440), 6,480 blocks (~45 days for 973,440-979,918), 25,920 blocks (~180 days for >= 979,919 until Sep 2027 MTP expiry).")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            } else {
-                                ForEach(state.coinbaseRewards.prefix(3)) { reward in
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text("Block #\(reward.originHeight) Reward (\(String(format: "%.4f", reward.amountBTC)) BTCB2)")
-                                                .font(.caption)
-                                                .bold()
-                                            Text("Matures at height #\(reward.maturityHeight) • \(reward.remainingBlocks) blocks remaining")
-                                                .font(.caption2)
-                                                .foregroundColor(.secondary)
-                                        }
-                                        Spacer()
-                                        VStack(alignment: .trailing, spacing: 2) {
-                                            Text(reward.estimatedTimeRemaining)
-                                                .font(.system(size: 12, weight: .bold, design: .monospaced))
-                                                .foregroundColor(reward.isMature ? .green : .orange)
-                                            if reward.isLowConfidence {
-                                                Text("Est. (~10m/blk)")
-                                                    .font(.system(size: 9))
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .padding(8)
-                                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor)))
-                                }
-                            }
-                        }
-                    }
-                }
-                .padding()
-                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
-
-                // Receive Section: Canonical Creation Address & Temporary Rotated Addresses
-                VStack(alignment: .leading, spacing: 18) {
-                    // Header
-                    HStack {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundColor(.blue)
-                            .font(.title3)
-                        Text("Receive BTCB2")
-                            .font(.title3)
-                            .bold()
-
-                        if let currentName = state.walletSnapshot?.name {
-                            Text("• \(currentName)")
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
-                        }
-
-                        Spacer()
-
-                        // Count badges
-                        if !state.activeReceiveAddresses.isEmpty {
-                            Text("\(state.activeReceiveAddresses.count) Temporary Active")
-                                .font(.caption2)
-                                .bold()
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.blue.opacity(0.15)))
-                                .foregroundColor(.blue)
-                        }
-
-                        if !state.archivedReceiveAddresses.isEmpty {
-                            Button(action: { showArchivedReceiveAddresses.toggle() }) {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "archivebox")
-                                    Text("Archived (\(state.archivedReceiveAddresses.count))")
-                                }
-                                .font(.caption2)
-                                .bold()
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
-                                .foregroundColor(.secondary)
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Button(action: {
-                            newAddressLabelInput = ""
-                            showNewAddressSheet = true
-                        }) {
-                            Label("New Temporary Address", systemImage: "plus.circle")
-                                .font(.caption)
-                        }
-                    }
-
-                    // 1. CANONICAL WALLET ADDRESS CARD (Permanent & Locked to Creation)
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Image(systemName: "lock.shield.fill")
-                                .foregroundColor(.purple)
-                            Text("Canonical Wallet Address")
-                                .font(.headline)
-
-                            Text("PERMANENT • LOCKED TO CREATION")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.purple.opacity(0.15)))
-                                .foregroundColor(.purple)
-
-                            Spacer()
-
-                            if !state.canonicalReceiveAddress.isEmpty {
-                                Button(action: {
-                                    NSPasteboard.general.clearContents()
-                                    NSPasteboard.general.setString(state.canonicalReceiveAddress, forType: .string)
-                                    state.appendLog("[UI] Copied canonical receive address to clipboard.")
-                                }) {
-                                    Label("Copy Canonical Address", systemImage: "doc.on.doc")
-                                }
-                            }
-                        }
-
-                        Text("Permanent immutable receive address bound to the creation of '\(state.walletSnapshot?.name ?? "this wallet")'. This address never changes and cannot be deleted or archived. Recommended for MiningRigRentals mining pool payouts, exchange whitelisting, and recurring deposits.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if !state.canonicalReceiveAddress.isEmpty {
-                            HStack(alignment: .top, spacing: 16) {
-                                QRCodeView(string: state.canonicalReceiveAddress, size: 105)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Locked Creation Bech32 (Native SegWit):")
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
-
-                                    Text(state.canonicalReceiveAddress)
-                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                                        .textSelection(.enabled)
-                                        .padding(10)
-                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
-
-                                    HStack(spacing: 8) {
-                                        Image(systemName: "checkmark.seal.fill")
-                                            .foregroundColor(.purple)
-                                            .font(.caption)
-                                        Text("Immutable creation address for \(state.walletSnapshot?.name ?? "wallet")")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                            }
-                        } else {
-                            HStack {
-                                ProgressView().scaleEffect(0.7)
-                                Text("Loading canonical creation address...")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                        }
-                    }
-                    .padding(14)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor).opacity(0.6)))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.purple.opacity(0.2), lineWidth: 1)
-                    )
-
-                    // 2. TEMPORARY RECEIVE ADDRESS CARD (Rotatable & Regenerable)
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                                .foregroundColor(.blue)
-                            Text("Temporary Receive Address")
-                                .font(.headline)
-
-                            Text("ROTATABLE • REGENERABLE")
-                                .font(.system(size: 9, weight: .bold))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(Color.blue.opacity(0.15)))
-                                .foregroundColor(.blue)
-
-                            Spacer()
-
-                            Button(action: {
-                                newAddressLabelInput = ""
-                                showNewAddressSheet = true
-                            }) {
-                                Label("New Address", systemImage: "plus.circle")
-                            }
-                        }
-
-                        Text("Dynamic receive address for one-off payments and enhanced privacy rotation. Can be regenerated multiple times, archived from view, or permanently deleted.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        if !state.receiveAddress.isEmpty {
-                            HStack(alignment: .top, spacing: 16) {
-                                QRCodeView(string: state.receiveAddress, size: 105)
-
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack {
-                                        Text("Active Temporary Bech32 Address:")
-                                            .font(.caption2)
-                                            .foregroundColor(.secondary)
-
-                                        if let record = state.activeReceiveAddresses.first(where: { $0.address == state.receiveAddress }),
-                                           !record.label.isEmpty {
-                                            Text("• \(record.label)")
-                                                .font(.caption2)
-                                                .bold()
-                                                .foregroundColor(.blue)
-                                        }
-                                    }
-
-                                    Text(state.receiveAddress)
-                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                                        .textSelection(.enabled)
-                                        .padding(10)
-                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
-
-                                    HStack(spacing: 12) {
-                                        Button(action: {
-                                            NSPasteboard.general.clearContents()
-                                            NSPasteboard.general.setString(state.receiveAddress, forType: .string)
-                                            state.appendLog("[UI] Copied temporary receive address to clipboard.")
-                                        }) {
-                                            Label("Copy Address", systemImage: "doc.on.doc")
-                                        }
-
-                                        Button(action: {
-                                            state.archiveReceiveAddress(state.receiveAddress)
-                                        }) {
-                                            Label("Archive", systemImage: "archivebox")
-                                        }
-                                        .help("Removes address from active view while safely preserving it and its funds in the wallet database.")
-
-                                        Button(role: .destructive, action: {
-                                            addressToDelete = state.receiveAddress
-                                            showDeleteAddressAlert = true
-                                        }) {
-                                            Label("Delete", systemImage: "trash")
-                                        }
-                                        .help("Permanently deletes address record from Sentinel Node Wallet.")
-                                    }
-                                }
-                            }
-
-                            // Saved Temporary Addresses List
-                            if state.activeReceiveAddresses.count > 1 {
-                                DisclosureGroup(
-                                    isExpanded: $showSavedAddressesList,
-                                    content: {
-                                        VStack(alignment: .leading, spacing: 8) {
-                                            ForEach(state.activeReceiveAddresses) { record in
-                                                HStack {
-                                                    VStack(alignment: .leading, spacing: 2) {
-                                                        HStack {
-                                                            Text(record.address)
-                                                                .font(.system(size: 11, design: .monospaced))
-                                                                .lineLimit(1)
-                                                            if record.address == state.receiveAddress {
-                                                                Text("ACTIVE")
-                                                                    .font(.system(size: 9, weight: .bold))
-                                                                    .padding(.horizontal, 4)
-                                                                    .padding(.vertical, 1)
-                                                                    .background(Capsule().fill(Color.blue))
-                                                                    .foregroundColor(.white)
-                                                        }
-                                                    }
-                                                    HStack(spacing: 8) {
-                                                        if !record.label.isEmpty {
-                                                            Text(record.label)
-                                                                .font(.caption2)
-                                                                .bold()
-                                                                .foregroundColor(.secondary)
-                                                        }
-                                                        Text(record.createdAt, style: .date)
-                                                            .font(.caption2)
-                                                            .foregroundColor(.secondary)
-                                                    }
-                                                }
-
-                                                Spacer()
-
-                                                if record.address != state.receiveAddress {
-                                                    Button("Select") {
-                                                        state.selectReceiveAddress(record.address)
-                                                    }
-                                                    .buttonStyle(.bordered)
-                                                    .controlSize(.small)
-                                                }
-
-                                                Button(action: {
-                                                    NSPasteboard.general.clearContents()
-                                                    NSPasteboard.general.setString(record.address, forType: .string)
-                                                    state.appendLog("[UI] Copied address to clipboard.")
-                                                }) {
-                                                    Image(systemName: "doc.on.doc")
-                                                }
-                                                .buttonStyle(.plain)
-                                                .help("Copy Address")
-
-                                                Button(action: {
-                                                    state.archiveReceiveAddress(record.address)
-                                                }) {
-                                                    Image(systemName: "archivebox")
-                                                }
-                                                .buttonStyle(.plain)
-                                                .help("Archive Address")
-
-                                                Button(action: {
-                                                    addressToDelete = record.address
-                                                    showDeleteAddressAlert = true
-                                                }) {
-                                                    Image(systemName: "trash")
-                                                        .foregroundColor(.red)
-                                                }
-                                                .buttonStyle(.plain)
-                                                .help("Delete Address")
-                                            }
-                                            .padding(6)
-                                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor).opacity(0.5)))
-                                        }
-                                    }
-                                    .padding(.top, 6)
-                                },
-                                label: {
-                                    Text("Saved Temporary Addresses for \(state.walletSnapshot?.name ?? "Wallet") (\(state.activeReceiveAddresses.count))")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
-                            )
-                        }
-                    } else if !state.archivedReceiveAddresses.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("All temporary receive addresses for '\(state.walletSnapshot?.name ?? "this wallet")' are currently archived.")
-                                .font(.callout)
-                                .foregroundColor(.secondary)
-                            Text("Archived addresses remain fully valid and funds sent to them are safely preserved. You can unarchive an address below or generate a new temporary address.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            HStack(spacing: 12) {
-                                Button(action: {
-                                    newAddressLabelInput = ""
-                                    showNewAddressSheet = true
-                                }) {
-                                    Label("Generate New Address", systemImage: "plus.circle.fill")
-                                }
-                                .buttonStyle(.borderedProminent)
-
-                                Button(action: {
-                                    showArchivedReceiveAddresses = true
-                                }) {
-                                    Label("View Archived (\(state.archivedReceiveAddresses.count))", systemImage: "archivebox")
-                                }
-                            }
-                        }
-                    } else {
-                        Button(action: {
-                            state.generateNewReceiveAddress()
-                        }) {
-                            Label("Generate Temporary Receive Address", systemImage: "plus.circle.fill")
-                        }
-                        .buttonStyle(.borderedProminent)
-                    }
-
-                    // Archived Addresses Section
-                    if showArchivedReceiveAddresses && !state.archivedReceiveAddresses.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Divider()
-                            HStack {
-                                Image(systemName: "archivebox.fill")
-                                    .foregroundColor(.secondary)
-                                Text("Archived Receive Addresses (\(state.archivedReceiveAddresses.count))")
-                                    .font(.subheadline)
-                                    .bold()
-                                Spacer()
-                                Button("Hide") {
-                                    showArchivedReceiveAddresses = false
-                                }
-                                .buttonStyle(.plain)
-                                .font(.caption)
-                            }
-
-                            Text("Archived addresses are removed from your active view, but their presence and all associated funds remain safely in your Bitcoin Knots wallet database. You can retrieve/unarchive them at any time.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            ForEach(state.archivedReceiveAddresses) { record in
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(record.address)
-                                            .font(.system(size: 11, design: .monospaced))
-                                            .lineLimit(1)
-                                        HStack(spacing: 8) {
-                                            if !record.label.isEmpty {
-                                                Text(record.label)
-                                                    .font(.caption2)
-                                                    .bold()
-                                            }
-                                            if let archDate = record.archivedAt {
-                                                Text("Archived: \(archDate, style: .date)")
-                                                    .font(.caption2)
-                                                    .foregroundColor(.secondary)
-                                            }
-                                        }
-                                    }
-
-                                    Spacer()
-
-                                    Button("Unarchive") {
-                                        state.unarchiveReceiveAddress(record.address)
-                                    }
-                                    .buttonStyle(.bordered)
-                                    .controlSize(.small)
-
-                                    Button(action: {
-                                        NSPasteboard.general.clearContents()
-                                        NSPasteboard.general.setString(record.address, forType: .string)
-                                        state.appendLog("[UI] Copied archived address to clipboard.")
-                                    }) {
-                                        Image(systemName: "doc.on.doc")
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Copy Address")
-
-                                    Button(action: {
-                                        addressToDelete = record.address
-                                        showDeleteAddressAlert = true
-                                    }) {
-                                        Image(systemName: "trash")
-                                            .foregroundColor(.red)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .help("Delete Permanently")
-                                }
-                                .padding(8)
-                                .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor).opacity(0.4)))
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-                }
-                .padding(14)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor).opacity(0.6)))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.blue.opacity(0.2), lineWidth: 1)
-                )
-            }
-            .padding()
-            .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+                // Balance & Receive Section
+                balanceAndReceiveSection
 
                 // Send Composer Section (Active Wallet, V7-Compliant)
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack {
-                        Image(systemName: isSendAllowed ? "paperplane.fill" : "lock.fill")
-                            .foregroundColor(isSendAllowed ? .green : .orange)
-                        Text("Send BTCB2 Transaction")
-                            .font(.headline)
-                        Spacer()
-
-                        // Allowlist Badge & Manager Button
-                        Button(action: { showAddressBookSheet = true }) {
-                            HStack(spacing: 4) {
-                                Image(systemName: state.addressBook.isAllowlistEnabled ? "shield.checkmark.fill" : "shield.slash")
-                                    .foregroundColor(state.addressBook.isAllowlistEnabled ? .green : .orange)
-                                Text(state.addressBook.isAllowlistEnabled ? "Allowlist Active" : "Allowlist Off")
-                                    .font(.caption2)
-                                    .bold()
-                            }
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(Color(NSColor.windowBackgroundColor)))
-                        }
-                        .buttonStyle(.plain)
-
-                        Text(isSendAllowed ? "Active Wallet" : "Node Inactive")
-                            .font(.caption2)
-                            .bold()
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Capsule().fill((isSendAllowed ? Color.green : Color.orange).opacity(0.15)))
-                            .foregroundColor(isSendAllowed ? .green : .orange)
-                    }
-
-                    Text("Active BTCB2 Wallet: Transactions are validated against native BTCB2 consensus, previewed with live fee rates, and signed upon operator authorization.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-
-                    // Recipient Selector / Input
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Recipient Address:")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                            Spacer()
-                            if !state.addressBook.recipients.isEmpty {
-                                Menu("Select Trusted Recipient") {
-                                    ForEach(state.addressBook.recipients) { r in
-                                        Button("\(r.name) (\(r.address.prefix(12))...)") {
-                                            sendAddressInput = r.address
-                                        }
-                                    }
-                                }
-                                .menuStyle(.borderlessButton)
-                                .font(.caption)
-                            }
-                        }
-
-                        TextField("bc1... (Native SegWit Bech32 only)", text: $sendAddressInput)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    // Amount Input Section (BTCB2 / USD / Percentage 3-Way Auto-Calculation + Max)
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Amount to Send:")
-                                .font(.caption)
-                                .bold()
-                            Spacer()
-                            Text("Spendable Available: \(String(format: "%.8f", state.walletSnapshot?.trustedBalance ?? 0.0)) BTCB2")
-                                .font(.caption2)
-                                .bold()
-                                .foregroundColor(.green)
-                        }
-
-                        HStack(alignment: .bottom, spacing: 12) {
-                            // BTCB2 Field
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("BTCB2")
-                                    .font(.caption2)
-                                    .bold()
-                                    .foregroundColor(.secondary)
-                                TextField("0.00000000", text: Binding(
-                                    get: { sendAmountInput },
-                                    set: { updateAmountFromBTC($0) }
-                                ))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 140)
-                            }
-
-                            // USD Field
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 4) {
-                                    Text("USD ($)")
-                                        .font(.caption2)
-                                        .bold()
-                                        .foregroundColor(.secondary)
-                                    if state.priceState.effectivePrice > 0 {
-                                        Text("($\(String(format: "%.0f", state.priceState.effectivePrice)))")
-                                            .font(.system(size: 9))
-                                            .foregroundColor(.secondary)
-                                    }
-                                }
-                                TextField("0.00", text: Binding(
-                                    get: { sendAmountUSDInput },
-                                    set: { updateAmountFromUSD($0) }
-                                ))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 110)
-                            }
-
-                            // Percent Field
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Share (%)")
-                                    .font(.caption2)
-                                    .bold()
-                                    .foregroundColor(.secondary)
-                                TextField("0.0%", text: Binding(
-                                    get: { sendAmountPercentInput },
-                                    set: { updateAmountFromPercent($0) }
-                                ))
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 75)
-                            }
-
-                            // Quick Presets & MAX Button
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Presets")
-                                    .font(.caption2)
-                                    .bold()
-                                    .foregroundColor(.secondary)
-                                HStack(spacing: 4) {
-                                    Button("25%") { updateAmountFromPercent("25.0") }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-                                    Button("50%") { updateAmountFromPercent("50.0") }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-                                    Button("75%") { updateAmountFromPercent("75.0") }
-                                        .buttonStyle(.bordered)
-                                        .controlSize(.small)
-                                    Button("MAX") { applyMaxAmount() }
-                                        .buttonStyle(.borderedProminent)
-                                        .tint(.blue)
-                                        .controlSize(.small)
-                                        .help("Fills all available spendable funds minus the estimated network fee required for transmission")
-                                }
-                            }
-                        }
-
-                        HStack {
-                            let parsedBTC = Double(sendAmountInput) ?? 0.0
-                            let parsedSats = SatoshiMath.toSats(btc: parsedBTC)
-                            Text("≈ \(SatoshiMath.formatSats(parsedSats)) satoshis")
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundColor(.secondary)
-
-                            Spacer()
-
-                            let quote = (selectedFeePreset == .custom) ? FeeQuote(type: .custom, satPerVB: max(1, Int(customSatPerVBInput) ?? 1), targetBlocks: 0, estimatedMinutes: 0) : (state.feeQuotes[selectedFeePreset] ?? FeeQuote(type: selectedFeePreset, satPerVB: 2, targetBlocks: selectedFeePreset.targetBlocks, estimatedMinutes: 60))
-                            let estFeeBTC = Double(max(Int64(quote.satPerVB * 141), quote.medianTxFeeSats)) / 100_000_000.0
-                            Text("Estimated Fee Reserved on Max: ~\(String(format: "%.8f", estFeeBTC)) BTCB2 (\(quote.satPerVB) sat/vB)")
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                        }
-
-                        if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
-                            HStack(spacing: 4) {
-                                Image(systemName: "exclamationmark.circle.fill")
-                                    .foregroundColor(.orange)
-                                    .font(.caption2)
-                                Text("Pending incoming transfer of +\(String(format: "%.8f", state.walletSnapshot?.pendingBalance ?? 0.0)) BTCB2 is actively being received and cannot be spent yet.")
-                                    .font(.caption2)
-                                    .foregroundColor(.orange)
-                            }
-                        }
-                    }
-
-                    // Fee Selection (Cheapest / Normal / Fast / Custom)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Network Fee Target (Live Mempool-Derived Quotes):")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        HStack(spacing: 10) {
-                            feeOptionButton(title: "Cheapest", subtitle: "24 blks (~4h)", preset: .cheapest)
-                            feeOptionButton(title: "Normal", subtitle: "6 blks (~1h)", preset: .normal)
-                            feeOptionButton(title: "Fast", subtitle: "2 blks (~20m)", preset: .fast)
-                            feeOptionButton(title: "Custom", subtitle: "sat/vB", preset: .custom)
-                        }
-
-                        if let normalQuote = state.feeQuotes[.normal] {
-                            HStack(spacing: 6) {
-                                Image(systemName: "chart.bar.xaxis")
-                                    .foregroundColor(.blue)
-                                    .font(.caption)
-                                Text("Live Mempool: Median fee rate is \(normalQuote.satPerVB) sat/vB (median cost ~\(normalQuote.medianTxFeeSats) sats for ~\(normalQuote.estimatedMinutes)m confirmation).")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.top, 2)
-                        }
-
-                        if selectedFeePreset == .custom {
-                            HStack {
-                                Text("Custom Fee Rate:")
-                                    .font(.caption)
-                                TextField("sat/vB", text: $customSatPerVBInput)
-                                    .textFieldStyle(.roundedBorder)
-                                    .frame(width: 80)
-                                Text("sat/vB")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            .padding(.top, 4)
-                        }
-                    }
-
-                    // Review & Preview Button
-                    HStack {
-                        Spacer()
-                        Button(action: { generateSendPreview() }) {
-                            Label("Review Transaction Preview", systemImage: "magnifyingglass.circle.fill")
-                                .font(.headline)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 6)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
-                        .disabled(!isSendAllowed || sendAddressInput.isEmpty || (Double(sendAmountInput) ?? 0) <= 0)
-                    }
-                }
-                .padding()
-                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+                sendComposerSection
 
                 // Recent Transactions List with Verified Explorer Link
                 VStack(alignment: .leading, spacing: 12) {
@@ -2340,7 +1575,12 @@ public struct WalletView: View {
         let rate = quote?.satPerVB ?? (preset == .cheapest ? 1 : (preset == .normal ? 2 : 5))
         let medianCostSats = quote?.medianTxFeeSats ?? Int64(rate * 140)
 
-        return Button(action: { selectedFeePreset = preset }) {
+        return Button(action: {
+            selectedFeePreset = preset
+            if isMaxSelected {
+                applyMaxAmount()
+            }
+        }) {
             VStack(spacing: 3) {
                 Text(title)
                     .font(.caption)
@@ -2556,9 +1796,31 @@ public struct WalletView: View {
         }
     }
 
+    private func currentFeeQuote() -> FeeQuote {
+        if selectedFeePreset == .custom {
+            let customRate = max(1, Int(customSatPerVBInput) ?? 1)
+            return FeeQuote(type: .custom, satPerVB: customRate, targetBlocks: 0, estimatedMinutes: 0)
+        } else {
+            return state.feeQuotes[selectedFeePreset] ?? FeeQuote(
+                type: selectedFeePreset,
+                satPerVB: selectedFeePreset == .cheapest ? 1 : (selectedFeePreset == .normal ? 2 : 5),
+                targetBlocks: selectedFeePreset.targetBlocks,
+                estimatedMinutes: selectedFeePreset == .cheapest ? 240 : (selectedFeePreset == .normal ? 60 : 20)
+            )
+        }
+    }
+
+    private func estimatedFeeCalculation(quote: FeeQuote) -> (feeSats: Int64, feeBTC: Double, vSize: Int) {
+        let estVSize = 141
+        let feeSats = max(Int64(quote.satPerVB * estVSize), quote.medianTxFeeSats)
+        let feeBTC = Double(feeSats) / 100_000_000.0
+        return (feeSats, feeBTC, estVSize)
+    }
+
     private func updateAmountFromBTC(_ newBTC: String) {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
+        isMaxSelected = false
         defer { isSyncingAmountInputs = false }
 
         sendAmountInput = newBTC
@@ -2582,6 +1844,7 @@ public struct WalletView: View {
     private func updateAmountFromUSD(_ newUSD: String) {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
+        isMaxSelected = false
         defer { isSyncingAmountInputs = false }
 
         sendAmountUSDInput = newUSD
@@ -2606,6 +1869,7 @@ public struct WalletView: View {
     private func updateAmountFromPercent(_ newPct: String) {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
+        isMaxSelected = false
         defer { isSyncingAmountInputs = false }
 
         sendAmountPercentInput = newPct
@@ -2629,6 +1893,7 @@ public struct WalletView: View {
     private func applyMaxAmount() {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
+        isMaxSelected = true
         defer { isSyncingAmountInputs = false }
 
         let avail = state.walletSnapshot?.trustedBalance ?? 0.0
@@ -2639,19 +1904,9 @@ public struct WalletView: View {
             return
         }
 
-        let quote: FeeQuote
-        if selectedFeePreset == .custom {
-            let rate = max(1, Int(customSatPerVBInput) ?? 1)
-            quote = FeeQuote(type: .custom, satPerVB: rate, targetBlocks: 0, estimatedMinutes: 0)
-        } else {
-            quote = state.feeQuotes[selectedFeePreset] ?? FeeQuote(type: selectedFeePreset, satPerVB: 2, targetBlocks: selectedFeePreset.targetBlocks, estimatedMinutes: 60)
-        }
-
-        // Standard 1-in-2-out Native SegWit tx (~141 vB)
-        let estVSize = 141
-        let feeSats = max(Int64(quote.satPerVB * estVSize), quote.medianTxFeeSats)
-        let feeBTC = Double(feeSats) / 100_000_000.0
-        let maxSpendable = max(0.0, avail - feeBTC)
+        let quote = currentFeeQuote()
+        let feeCalc = estimatedFeeCalculation(quote: quote)
+        let maxSpendable = max(0.0, avail - feeCalc.feeBTC)
 
         sendAmountInput = String(format: "%.8f", maxSpendable)
         let price = state.priceState.effectivePrice
@@ -2666,14 +1921,7 @@ public struct WalletView: View {
     private func generateSendPreview() {
         let btc = Double(sendAmountInput) ?? 0.0
         let sats = SatoshiMath.toSats(btc: btc)
-
-        let quote: FeeQuote
-        if selectedFeePreset == .custom {
-            let customRate = max(1, Int(customSatPerVBInput) ?? 1)
-            quote = FeeQuote(type: .custom, satPerVB: customRate, targetBlocks: 0, estimatedMinutes: 0)
-        } else {
-            quote = state.feeQuotes[selectedFeePreset] ?? FeeQuote(type: selectedFeePreset, satPerVB: 2, targetBlocks: selectedFeePreset.targetBlocks, estimatedMinutes: 60)
-        }
+        let quote = currentFeeQuote()
 
         Task {
             do {
@@ -2690,6 +1938,989 @@ public struct WalletView: View {
                 }
             }
         }
+    }
+
+
+    // MARK: - Extracted Main Wallet Sections
+
+    @ViewBuilder private var balanceAndReceiveSection: some View {
+                VStack(alignment: .leading, spacing: 14) {
+                    // Pending incoming transfer alert
+                    if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
+                        HStack(spacing: 12) {
+                            Image(systemName: "clock.badge.exclamationmark.fill")
+                                .font(.title2)
+                                .foregroundColor(.orange)
+                            VStack(alignment: .leading, spacing: 2) {
+                                HStack(spacing: 6) {
+                                    Text("Incoming Transfer Pending (0 Confirmations)")
+                                        .font(.system(size: 13, weight: .bold))
+                                        .foregroundColor(.orange)
+                                    Text("ACTIVELY BEING RECEIVED")
+                                        .font(.system(size: 9, weight: .bold))
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Capsule().fill(Color.orange.opacity(0.2)))
+                                        .foregroundColor(.orange)
+                                }
+                                Text("+\(String(format: "%.8f", state.walletSnapshot?.pendingBalance ?? 0.0)) BTCB2 (\(SatoshiMath.formatSats(state.walletSnapshot?.pendingBalanceSats ?? 0)) sats) is unconfirmed in the mempool. This pending transfer is NOT yet spendable until confirmed in a block.")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8)
+                                .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                        )
+                    }
+
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Verified Spendable Balance")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+
+                            Text(String(format: "%.8f BTCB2", state.walletSnapshot?.trustedBalance ?? 0.0))
+                                .font(.system(size: 34, weight: .bold, design: .monospaced))
+
+                            HStack(spacing: 8) {
+                                Text("\(SatoshiMath.formatSats(state.walletSnapshot?.trustedBalanceSats ?? 0)) sats")
+                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                    .foregroundColor(.secondary)
+
+                                if state.priceState.effectivePrice > 0 {
+                                    Text("• ≈ \(state.priceState.formatFiat(satoshis: state.walletSnapshot?.trustedBalanceSats ?? 0))")
+                                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                        .foregroundColor(.primary)
+                                }
+                            }
+                        }
+
+                        Spacer()
+
+                        if state.walletSnapshot?.isEncrypted == true {
+                            Label("Encrypted & Locked", systemImage: "lock.shield.fill")
+                                .font(.caption)
+                                .foregroundColor(.green)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().fill(Color.green.opacity(0.12)))
+                        }
+                    }
+
+                    Divider()
+
+                    HStack(spacing: 24) {
+                        balanceDetail(
+                            label: "Pending (0-Conf)",
+                            amount: state.walletSnapshot?.pendingBalance ?? 0.0,
+                            sats: state.walletSnapshot?.pendingBalanceSats ?? 0
+                        )
+                        balanceDetail(
+                            label: "Immature (Mining Rewards)",
+                            amount: state.walletSnapshot?.immatureBalance ?? 0.0,
+                            sats: state.walletSnapshot?.immatureBalanceSats ?? 0
+                        )
+                    }
+
+                    // Immature Coinbase Rewards Countdown & Epoch Breakdown
+                    if (state.walletSnapshot?.immatureBalance ?? 0.0) > 0 || !state.coinbaseRewards.isEmpty {
+                        Divider()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Image(systemName: "hourglass.circle.fill")
+                                    .foregroundColor(.orange)
+                                Text("Coinbase Rewards Maturity Countdown")
+                                    .font(.subheadline)
+                                    .bold()
+                                Spacer()
+                                Text("BIP-110 Consensus Schedule")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            if state.coinbaseRewards.isEmpty {
+                                Text("Mining rewards detected. Maturity schedule: 100 blocks (< 973,440), 6,480 blocks (~45 days for 973,440-979,918), 25,920 blocks (~180 days for >= 979,919 until Sep 2027 MTP expiry).")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            } else {
+                                ForEach(state.coinbaseRewards.prefix(3)) { reward in
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text("Block #\(reward.originHeight) Reward (\(String(format: "%.4f", reward.amountBTC)) BTCB2)")
+                                                .font(.caption)
+                                                .bold()
+                                            Text("Matures at height #\(reward.maturityHeight) • \(reward.remainingBlocks) blocks remaining")
+                                                .font(.caption2)
+                                                .foregroundColor(.secondary)
+                                        }
+                                        Spacer()
+                                        VStack(alignment: .trailing, spacing: 2) {
+                                            Text(reward.estimatedTimeRemaining)
+                                                .font(.system(size: 12, weight: .bold, design: .monospaced))
+                                                .foregroundColor(reward.isMature ? .green : .orange)
+                                            if reward.isLowConfidence {
+                                                Text("Est. (~10m/blk)")
+                                                    .font(.system(size: 9))
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+                                    .padding(8)
+                                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor)))
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+
+                // Receive Section: Canonical Creation Address & Temporary Rotated Addresses
+                VStack(alignment: .leading, spacing: 18) {
+                    // Header
+                    HStack {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .foregroundColor(.blue)
+                            .font(.title3)
+                        Text("Receive BTCB2")
+                            .font(.title3)
+                            .bold()
+
+                        if let currentName = state.walletSnapshot?.name {
+                            Text("• \(currentName)")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        // Count badges
+                        if !state.activeReceiveAddresses.isEmpty {
+                            Text("\(state.activeReceiveAddresses.count) Temporary Active")
+                                .font(.caption2)
+                                .bold()
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.blue.opacity(0.15)))
+                                .foregroundColor(.blue)
+                        }
+
+                        if !state.archivedReceiveAddresses.isEmpty {
+                            Button(action: { showArchivedReceiveAddresses.toggle() }) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "archivebox")
+                                    Text("Archived (\(state.archivedReceiveAddresses.count))")
+                                }
+                                .font(.caption2)
+                                .bold()
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Capsule().fill(Color.secondary.opacity(0.15)))
+                                .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+
+                        Button(action: {
+                            newAddressLabelInput = ""
+                            showNewAddressSheet = true
+                        }) {
+                            Label("New Temporary Address", systemImage: "plus.circle")
+                                .font(.caption)
+                        }
+                    }
+
+                    // 1. CANONICAL WALLET ADDRESS CARD (Permanent & Locked to Creation)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "lock.shield.fill")
+                                .foregroundColor(.purple)
+                            Text("Canonical Wallet Address")
+                                .font(.headline)
+
+                            Text("PERMANENT • LOCKED TO CREATION")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.purple.opacity(0.15)))
+                                .foregroundColor(.purple)
+
+                            Spacer()
+
+                            if !state.canonicalReceiveAddress.isEmpty {
+                                Button(action: {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(state.canonicalReceiveAddress, forType: .string)
+                                    state.appendLog("[UI] Copied canonical receive address to clipboard.")
+                                }) {
+                                    Label("Copy Canonical Address", systemImage: "doc.on.doc")
+                                }
+                            }
+                        }
+
+                        Text("Permanent immutable receive address bound to the creation of '\(state.walletSnapshot?.name ?? "this wallet")'. This address never changes and cannot be deleted or archived. Recommended for MiningRigRentals mining pool payouts, exchange whitelisting, and recurring deposits.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if !state.canonicalReceiveAddress.isEmpty {
+                            HStack(alignment: .top, spacing: 16) {
+                                QRCodeView(string: state.canonicalReceiveAddress, size: 105)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Locked Creation Bech32 (Native SegWit):")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+
+                                    Text(state.canonicalReceiveAddress)
+                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .padding(10)
+                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
+
+                                    HStack(spacing: 8) {
+                                        Image(systemName: "checkmark.seal.fill")
+                                            .foregroundColor(.purple)
+                                            .font(.caption)
+                                        Text("Immutable creation address for \(state.walletSnapshot?.name ?? "wallet")")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                            }
+                        } else {
+                            HStack {
+                                ProgressView().scaleEffect(0.7)
+                                Text("Loading canonical creation address...")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(14)
+                    .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor).opacity(0.6)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10)
+                            .stroke(Color.purple.opacity(0.2), lineWidth: 1)
+                    )
+
+                    // 2. TEMPORARY RECEIVE ADDRESS CARD (Rotatable & Regenerable)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                                .foregroundColor(.blue)
+                            Text("Temporary Receive Address")
+                                .font(.headline)
+
+                            Text("ROTATABLE • REGENERABLE")
+                                .font(.system(size: 9, weight: .bold))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.blue.opacity(0.15)))
+                                .foregroundColor(.blue)
+
+                            Spacer()
+
+                            Button(action: {
+                                newAddressLabelInput = ""
+                                showNewAddressSheet = true
+                            }) {
+                                Label("New Address", systemImage: "plus.circle")
+                            }
+                        }
+
+                        Text("Dynamic receive address for one-off payments and enhanced privacy rotation. Can be regenerated multiple times, archived from view, or permanently deleted.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        if !state.receiveAddress.isEmpty {
+                            HStack(alignment: .top, spacing: 16) {
+                                QRCodeView(string: state.receiveAddress, size: 105)
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    HStack {
+                                        Text("Active Temporary Bech32 Address:")
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
+
+                                        if let record = state.activeReceiveAddresses.first(where: { $0.address == state.receiveAddress }),
+                                           !record.label.isEmpty {
+                                            Text("• \(record.label)")
+                                                .font(.caption2)
+                                                .bold()
+                                                .foregroundColor(.blue)
+                                        }
+                                    }
+
+                                    Text(state.receiveAddress)
+                                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                                        .textSelection(.enabled)
+                                        .padding(10)
+                                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
+
+                                    HStack(spacing: 12) {
+                                        Button(action: {
+                                            NSPasteboard.general.clearContents()
+                                            NSPasteboard.general.setString(state.receiveAddress, forType: .string)
+                                            state.appendLog("[UI] Copied temporary receive address to clipboard.")
+                                        }) {
+                                            Label("Copy Address", systemImage: "doc.on.doc")
+                                        }
+
+                                        Button(action: {
+                                            state.archiveReceiveAddress(state.receiveAddress)
+                                        }) {
+                                            Label("Archive", systemImage: "archivebox")
+                                        }
+                                        .help("Removes address from active view while safely preserving it and its funds in the wallet database.")
+
+                                        Button(role: .destructive, action: {
+                                            addressToDelete = state.receiveAddress
+                                            showDeleteAddressAlert = true
+                                        }) {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                        .help("Permanently deletes address record from Sentinel Node Wallet.")
+                                    }
+                                }
+                            }
+
+                            // Saved Temporary Addresses List
+                            if state.activeReceiveAddresses.count > 1 {
+                                DisclosureGroup(
+                                    isExpanded: $showSavedAddressesList,
+                                    content: {
+                                        VStack(alignment: .leading, spacing: 8) {
+                                            ForEach(state.activeReceiveAddresses) { record in
+                                                HStack {
+                                                    VStack(alignment: .leading, spacing: 2) {
+                                                        HStack {
+                                                            Text(record.address)
+                                                                .font(.system(size: 11, design: .monospaced))
+                                                                .lineLimit(1)
+                                                            if record.address == state.receiveAddress {
+                                                                Text("ACTIVE")
+                                                                    .font(.system(size: 9, weight: .bold))
+                                                                    .padding(.horizontal, 4)
+                                                                    .padding(.vertical, 1)
+                                                                    .background(Capsule().fill(Color.blue))
+                                                                    .foregroundColor(.white)
+                                                        }
+                                                    }
+                                                    HStack(spacing: 8) {
+                                                        if !record.label.isEmpty {
+                                                            Text(record.label)
+                                                                .font(.caption2)
+                                                                .bold()
+                                                                .foregroundColor(.secondary)
+                                                        }
+                                                        Text(record.createdAt, style: .date)
+                                                            .font(.caption2)
+                                                            .foregroundColor(.secondary)
+                                                    }
+                                                }
+
+                                                Spacer()
+
+                                                if record.address != state.receiveAddress {
+                                                    Button("Select") {
+                                                        state.selectReceiveAddress(record.address)
+                                                    }
+                                                    .buttonStyle(.bordered)
+                                                    .controlSize(.small)
+                                                }
+
+                                                Button(action: {
+                                                    NSPasteboard.general.clearContents()
+                                                    NSPasteboard.general.setString(record.address, forType: .string)
+                                                    state.appendLog("[UI] Copied address to clipboard.")
+                                                }) {
+                                                    Image(systemName: "doc.on.doc")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help("Copy Address")
+
+                                                Button(action: {
+                                                    state.archiveReceiveAddress(record.address)
+                                                }) {
+                                                    Image(systemName: "archivebox")
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help("Archive Address")
+
+                                                Button(action: {
+                                                    addressToDelete = record.address
+                                                    showDeleteAddressAlert = true
+                                                }) {
+                                                    Image(systemName: "trash")
+                                                        .foregroundColor(.red)
+                                                }
+                                                .buttonStyle(.plain)
+                                                .help("Delete Address")
+                                            }
+                                            .padding(6)
+                                            .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor).opacity(0.5)))
+                                        }
+                                    }
+                                    .padding(.top, 6)
+                                },
+                                label: {
+                                    Text("Saved Temporary Addresses for \(state.walletSnapshot?.name ?? "Wallet") (\(state.activeReceiveAddresses.count))")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                            )
+                        }
+                    } else if !state.archivedReceiveAddresses.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("All temporary receive addresses for '\(state.walletSnapshot?.name ?? "this wallet")' are currently archived.")
+                                .font(.callout)
+                                .foregroundColor(.secondary)
+                            Text("Archived addresses remain fully valid and funds sent to them are safely preserved. You can unarchive an address below or generate a new temporary address.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            HStack(spacing: 12) {
+                                Button(action: {
+                                    newAddressLabelInput = ""
+                                    showNewAddressSheet = true
+                                }) {
+                                    Label("Generate New Address", systemImage: "plus.circle.fill")
+                                }
+                                .buttonStyle(.borderedProminent)
+
+                                Button(action: {
+                                    showArchivedReceiveAddresses = true
+                                }) {
+                                    Label("View Archived (\(state.archivedReceiveAddresses.count))", systemImage: "archivebox")
+                                }
+                            }
+                        }
+                    } else {
+                        Button(action: {
+                            state.generateNewReceiveAddress()
+                        }) {
+                            Label("Generate Temporary Receive Address", systemImage: "plus.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    // Archived Addresses Section
+                    if showArchivedReceiveAddresses && !state.archivedReceiveAddresses.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Divider()
+                            HStack {
+                                Image(systemName: "archivebox.fill")
+                                    .foregroundColor(.secondary)
+                                Text("Archived Receive Addresses (\(state.archivedReceiveAddresses.count))")
+                                    .font(.subheadline)
+                                    .bold()
+                                Spacer()
+                                Button("Hide") {
+                                    showArchivedReceiveAddresses = false
+                                }
+                                .buttonStyle(.plain)
+                                .font(.caption)
+                            }
+
+                            Text("Archived addresses are removed from your active view, but their presence and all associated funds remain safely in your Bitcoin Knots wallet database. You can retrieve/unarchive them at any time.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            ForEach(state.archivedReceiveAddresses) { record in
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(record.address)
+                                            .font(.system(size: 11, design: .monospaced))
+                                            .lineLimit(1)
+                                        HStack(spacing: 8) {
+                                            if !record.label.isEmpty {
+                                                Text(record.label)
+                                                    .font(.caption2)
+                                                    .bold()
+                                            }
+                                            if let archDate = record.archivedAt {
+                                                Text("Archived: \(archDate, style: .date)")
+                                                    .font(.caption2)
+                                                    .foregroundColor(.secondary)
+                                            }
+                                        }
+                                    }
+
+                                    Spacer()
+
+                                    Button("Unarchive") {
+                                        state.unarchiveReceiveAddress(record.address)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+
+                                    Button(action: {
+                                        NSPasteboard.general.clearContents()
+                                        NSPasteboard.general.setString(record.address, forType: .string)
+                                        state.appendLog("[UI] Copied archived address to clipboard.")
+                                    }) {
+                                        Image(systemName: "doc.on.doc")
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Copy Address")
+
+                                    Button(action: {
+                                        addressToDelete = record.address
+                                        showDeleteAddressAlert = true
+                                    }) {
+                                        Image(systemName: "trash")
+                                            .foregroundColor(.red)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Delete Permanently")
+                                }
+                                .padding(8)
+                                .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor).opacity(0.4)))
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+                }
+                .padding(14)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Color(NSColor.windowBackgroundColor).opacity(0.6)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.blue.opacity(0.2), lineWidth: 1)
+                )
+            }
+            .padding()
+            .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
+    }
+
+    private var isSendDisabledDueToFunds: Bool {
+        let availBTC = state.walletSnapshot?.trustedBalance ?? 0.0
+        let availSats = SatoshiMath.toSats(btc: availBTC)
+        let recipientBTC = Double(sendAmountInput) ?? 0.0
+        let recipientSats = SatoshiMath.toSats(btc: recipientBTC)
+        let quote = currentFeeQuote()
+        let feeCalc = estimatedFeeCalculation(quote: quote)
+        let totalDebitSats = recipientSats + feeCalc.feeSats
+        return recipientSats > 0 && totalDebitSats > availSats
+    }
+
+    private var transactionCostBreakdownCard: some View {
+                    // Real-Time Transaction Cost Breakdown & Wallet Debit Card
+                    let availBTC = state.walletSnapshot?.trustedBalance ?? 0.0
+                    let availSats = SatoshiMath.toSats(btc: availBTC)
+                    let recipientBTC = Double(sendAmountInput) ?? 0.0
+                    let recipientSats = SatoshiMath.toSats(btc: recipientBTC)
+
+                    let currentQuote = currentFeeQuote()
+                    let feeCalc = estimatedFeeCalculation(quote: currentQuote)
+                    let feeBTC = feeCalc.feeBTC
+                    let feeSats = feeCalc.feeSats
+
+                    let totalDebitBTC = recipientBTC > 0 ? (recipientBTC + feeBTC) : 0.0
+                    let totalDebitSats = recipientSats > 0 ? (recipientSats + feeSats) : 0
+                    let remainingBTC = max(0.0, availBTC - totalDebitBTC)
+                    let remainingSats = max(0, availSats - totalDebitSats)
+                    let isInsufficientFunds = recipientSats > 0 && totalDebitSats > availSats
+                    let deficitSats = max(0, totalDebitSats - availSats)
+                    let deficitBTC = Double(deficitSats) / 100_000_000.0
+
+                    return VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: "creditcard.and.123")
+                                .foregroundColor(.blue)
+                                .font(.caption)
+                            Text("Transaction Cost Breakdown (Debit from Wallet)")
+                                .font(.caption)
+                                .bold()
+                            if isMaxSelected {
+                                Text("MAX MODE")
+                                    .font(.system(size: 9, weight: .bold))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Capsule().fill(Color.blue.opacity(0.15)))
+                                    .foregroundColor(.blue)
+                            }
+                            Spacer()
+                            Text("Spendable: \(String(format: "%.8f", availBTC)) BTCB2")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        VStack(spacing: 6) {
+                            // 1. Recipient Receives
+                            HStack {
+                                Text("Recipient Receives:")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 1) {
+                                    Text(String(format: "%.8f BTCB2", recipientBTC))
+                                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.primary)
+                                    HStack(spacing: 4) {
+                                        Text("\(SatoshiMath.formatSats(recipientSats)) sats")
+                                        if state.priceState.effectivePrice > 0 {
+                                            Text("• ≈ \(state.priceState.formatFiat(satoshis: recipientSats))")
+                                        }
+                                    }
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                }
+                            }
+
+                            // 2. Network Fee
+                            HStack {
+                                HStack(spacing: 3) {
+                                    Text("+ Network Mining Fee:")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                    Text("(\(currentQuote.satPerVB) sat/vB • ~\(feeCalc.vSize) vB)")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 1) {
+                                    Text(String(format: "+%.8f BTCB2", feeBTC))
+                                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                                        .foregroundColor(.orange)
+                                    HStack(spacing: 4) {
+                                        Text("+\(SatoshiMath.formatSats(feeSats)) sats")
+                                        if state.priceState.effectivePrice > 0 {
+                                            Text("• ≈ \(state.priceState.formatFiat(satoshis: feeSats))")
+                                        }
+                                    }
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.orange)
+                                }
+                            }
+
+                            Divider()
+
+                            // 3. Total Debit from Wallet
+                            HStack {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text("Total Cost to Send (Debit from Wallet):")
+                                        .font(.system(size: 12, weight: .bold))
+                                        .foregroundColor(.primary)
+                                    Text("Amount to Recipient + Network Fee")
+                                        .font(.system(size: 9))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                VStack(alignment: .trailing, spacing: 1) {
+                                    Text(String(format: "%.8f BTCB2", totalDebitBTC))
+                                        .font(.system(size: 13, weight: .bold, design: .monospaced))
+                                        .foregroundColor(isInsufficientFunds ? .red : .primary)
+                                    HStack(spacing: 4) {
+                                        Text("\(SatoshiMath.formatSats(totalDebitSats)) sats")
+                                        if state.priceState.effectivePrice > 0 {
+                                            Text("• ≈ \(state.priceState.formatFiat(satoshis: totalDebitSats))")
+                                        }
+                                    }
+                                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(isInsufficientFunds ? .red : .secondary)
+                                }
+                            }
+
+                            // 4. Remaining Balance
+                            HStack {
+                                Text("Remaining Spendable Balance:")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(.secondary)
+                                Spacer()
+                                Text(String(format: "%.8f BTCB2 (%@ sats)", remainingBTC, SatoshiMath.formatSats(remainingSats)))
+                                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                                    .foregroundColor(remainingSats == 0 && recipientBTC > 0 ? .secondary : .green)
+                            }
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.textBackgroundColor)))
+
+                        if isInsufficientFunds {
+                            HStack(spacing: 8) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundColor(.red)
+                                    .font(.callout)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Insufficient Funds for Amount + Fee")
+                                        .font(.caption)
+                                        .bold()
+                                        .foregroundColor(.red)
+                                    Text("Total debit of \(String(format: "%.8f", totalDebitBTC)) BTCB2 exceeds spendable balance by \(String(format: "%.8f", deficitBTC)) BTCB2.")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer()
+                                Button("Adjust to MAX") {
+                                    applyMaxAmount()
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                                .controlSize(.small)
+                            }
+                            .padding(8)
+                            .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.1)))
+                            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+                        }
+                    }
+
+
+    }
+
+    @ViewBuilder private var sendComposerSection: some View {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack {
+                        Image(systemName: isSendAllowed ? "paperplane.fill" : "lock.fill")
+                            .foregroundColor(isSendAllowed ? .green : .orange)
+                        Text("Send BTCB2 Transaction")
+                            .font(.headline)
+                        Spacer()
+
+                        // Allowlist Badge & Manager Button
+                        Button(action: { showAddressBookSheet = true }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: state.addressBook.isAllowlistEnabled ? "shield.checkmark.fill" : "shield.slash")
+                                    .foregroundColor(state.addressBook.isAllowlistEnabled ? .green : .orange)
+                                Text(state.addressBook.isAllowlistEnabled ? "Allowlist Active" : "Allowlist Off")
+                                    .font(.caption2)
+                                    .bold()
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color(NSColor.windowBackgroundColor)))
+                        }
+                        .buttonStyle(.plain)
+
+                        Text(isSendAllowed ? "Active Wallet" : "Node Inactive")
+                            .font(.caption2)
+                            .bold()
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill((isSendAllowed ? Color.green : Color.orange).opacity(0.15)))
+                            .foregroundColor(isSendAllowed ? .green : .orange)
+                    }
+
+                    Text("Active BTCB2 Wallet: Transactions are validated against native BTCB2 consensus, previewed with live fee rates, and signed upon operator authorization.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    // Recipient Selector / Input
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Recipient Address:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            if !state.addressBook.recipients.isEmpty {
+                                Menu("Select Trusted Recipient") {
+                                    ForEach(state.addressBook.recipients) { r in
+                                        Button("\(r.name) (\(r.address.prefix(12))...)") {
+                                            sendAddressInput = r.address
+                                        }
+                                    }
+                                }
+                                .menuStyle(.borderlessButton)
+                                .font(.caption)
+                            }
+                        }
+
+                        TextField("bc1... (Native SegWit Bech32 only)", text: $sendAddressInput)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    // Amount Input Section (BTCB2 / USD / Percentage 3-Way Auto-Calculation + Max)
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Amount to Send (Recipient Receives):")
+                                .font(.caption)
+                                .bold()
+                            Spacer()
+                            Text("Spendable Available: \(String(format: "%.8f", state.walletSnapshot?.trustedBalance ?? 0.0)) BTCB2")
+                                .font(.caption2)
+                                .bold()
+                                .foregroundColor(.green)
+                        }
+
+                        HStack(alignment: .bottom, spacing: 12) {
+                            // BTCB2 Field
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("BTCB2")
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.secondary)
+                                TextField("0.00000000", text: Binding(
+                                    get: { sendAmountInput },
+                                    set: { updateAmountFromBTC($0) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 140)
+                            }
+
+                            // USD Field
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 4) {
+                                    Text("USD ($)")
+                                        .font(.caption2)
+                                        .bold()
+                                        .foregroundColor(.secondary)
+                                    if state.priceState.effectivePrice > 0 {
+                                        Text("($\(String(format: "%.0f", state.priceState.effectivePrice)))")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                TextField("0.00", text: Binding(
+                                    get: { sendAmountUSDInput },
+                                    set: { updateAmountFromUSD($0) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 110)
+                            }
+
+                            // Percent Field
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Share (%)")
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.secondary)
+                                TextField("0.0%", text: Binding(
+                                    get: { sendAmountPercentInput },
+                                    set: { updateAmountFromPercent($0) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 75)
+                            }
+
+                            // Quick Presets & MAX Button
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Presets")
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 4) {
+                                    Button("25%") { updateAmountFromPercent("25.0") }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    Button("50%") { updateAmountFromPercent("50.0") }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    Button("75%") { updateAmountFromPercent("75.0") }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    if isMaxSelected {
+                                        Button("MAX") { applyMaxAmount() }
+                                            .buttonStyle(.borderedProminent)
+                                            .tint(.blue)
+                                            .controlSize(.small)
+                                            .help("Fills all available spendable funds minus the estimated network fee required for transmission")
+                                    } else {
+                                        Button("MAX") { applyMaxAmount() }
+                                            .buttonStyle(.bordered)
+                                            .controlSize(.small)
+                                            .help("Fills all available spendable funds minus the estimated network fee required for transmission")
+                                    }
+                                }
+                            }
+                        }
+
+                        HStack {
+                            let parsedBTC = Double(sendAmountInput) ?? 0.0
+                            let parsedSats = SatoshiMath.toSats(btc: parsedBTC)
+                            Text("≈ \(SatoshiMath.formatSats(parsedSats)) satoshis")
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+
+                            Spacer()
+
+                            let quote = currentFeeQuote()
+                            let feeCalc = estimatedFeeCalculation(quote: quote)
+                            Text("Estimated Fee Reserved on Max: ~\(String(format: "%.8f", feeCalc.feeBTC)) BTCB2 (\(quote.satPerVB) sat/vB)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.circle.fill")
+                                    .foregroundColor(.orange)
+                                    .font(.caption2)
+                                Text("Pending incoming transfer of +\(String(format: "%.8f", state.walletSnapshot?.pendingBalance ?? 0.0)) BTCB2 is actively being received and cannot be spent yet.")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                    }
+
+                    // Fee Selection (Cheapest / Normal / Fast / Custom)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Network Fee Target (Live Mempool-Derived Quotes):")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack(spacing: 10) {
+                            feeOptionButton(title: "Cheapest", subtitle: "24 blks (~4h)", preset: .cheapest)
+                            feeOptionButton(title: "Normal", subtitle: "6 blks (~1h)", preset: .normal)
+                            feeOptionButton(title: "Fast", subtitle: "2 blks (~20m)", preset: .fast)
+                            feeOptionButton(title: "Custom", subtitle: "sat/vB", preset: .custom)
+                        }
+
+                        if let normalQuote = state.feeQuotes[.normal] {
+                            HStack(spacing: 6) {
+                                Image(systemName: "chart.bar.xaxis")
+                                    .foregroundColor(.blue)
+                                    .font(.caption)
+                                Text("Live Mempool: Median fee rate is \(normalQuote.satPerVB) sat/vB (median cost ~\(normalQuote.medianTxFeeSats) sats for ~\(normalQuote.estimatedMinutes)m confirmation).")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 2)
+                        }
+
+                        if selectedFeePreset == .custom {
+                            HStack {
+                                Text("Custom Fee Rate:")
+                                    .font(.caption)
+                                TextField("sat/vB", text: Binding(
+                                    get: { customSatPerVBInput },
+                                    set: { val in
+                                        customSatPerVBInput = val
+                                        if isMaxSelected {
+                                            applyMaxAmount()
+                                        }
+                                    }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 80)
+                                Text("sat/vB")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 4)
+                        }
+                    }
+
+                    transactionCostBreakdownCard
+
+                    // Review & Preview Button
+                    HStack {
+                        Spacer()
+                        Button(action: { generateSendPreview() }) {
+                            Label("Review Transaction Preview", systemImage: "magnifyingglass.circle.fill")
+                                .font(.headline)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 6)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
+                        .disabled(!isSendAllowed || sendAddressInput.isEmpty || (Double(sendAmountInput) ?? 0) <= 0 || isSendDisabledDueToFunds)
+                    }
+                }
+                .padding()
+                .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
     }
 
     // MARK: - Subviews & Modal Sheets
