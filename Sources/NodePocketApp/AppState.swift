@@ -472,6 +472,12 @@ public final class AppState: ObservableObject {
         return try await authCoordinator.requestHighRiskApproval(capability: session, action: action, target: target, reason: reason)
     }
 
+    /// Authenticates the user with Touch ID / Mac password, and retrieves saved operator credentials from Keychain.
+    public func retrieveOperatorCredentialsWithBiometrics(username: String) async throws -> (password: String?, totpCode: String?) {
+        let reason = "Authenticate with Touch ID or your Mac password to autofill Operator Login credentials for '\(username)'."
+        return try await authCoordinator.retrieveOperatorCredentialsWithBiometrics(username: username, reason: reason)
+    }
+
     /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
     /// and encrypted descriptor wallet onboarding in a single integrated workflow.
     public func startNode() {

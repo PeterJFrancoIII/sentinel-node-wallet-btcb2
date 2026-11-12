@@ -1382,6 +1382,55 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let remainingItems = try FileManager.default.contentsOfDirectory(atPath: stagingDir.path)
         XCTAssertTrue(remainingItems.isEmpty, "purgeStaleStagingDirectories must purge all abandoned session directories")
     }
+
+    func testBiometricAutofillRequiresDeviceOwnerAuthentication() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_bio_autofill_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Enroll test operator
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "bio_operator")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        _ = try await coordinator.enroll(
+            username: "bio_operator",
+            password: "BioSecurePassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // 1. When device-owner authentication is canceled/denied, autofill throws deviceOwnerAuthCanceled
+        await coordinator.setMockDeviceOwnerHook({ false })
+        do {
+            _ = try await coordinator.retrieveOperatorCredentialsWithBiometrics(
+                username: "bio_operator",
+                reason: "Test autofill"
+            )
+            XCTFail("Must fail closed when device owner authentication is canceled")
+        } catch let err as WalletAuthError {
+            guard case .deviceOwnerAuthCanceled = err else {
+                XCTFail("Expected deviceOwnerAuthCanceled, got \(err)")
+                return
+            }
+        }
+
+        // 2. When device-owner authentication succeeds (e.g. fingerprint scan passed), credentials are returned
+        await coordinator.setMockDeviceOwnerHook(nil)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+        let creds = try await coordinator.retrieveOperatorCredentialsWithBiometrics(
+            username: "bio_operator",
+            reason: "Test autofill"
+        )
+        XCTAssertEqual(creds.password, "BioSecurePassword123!@#", "Operator password must be retrieved from Keychain upon successful biometric auth")
+        XCTAssertNotNil(creds.totpCode, "2FA TOTP code must be generated from Keychain upon successful biometric auth")
+        XCTAssertEqual(creds.totpCode?.count, 6)
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

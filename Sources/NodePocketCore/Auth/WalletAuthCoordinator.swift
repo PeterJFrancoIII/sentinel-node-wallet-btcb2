@@ -840,20 +840,14 @@ public actor WalletAuthCoordinator {
 
     // MARK: - High-Risk Device-Owner Challenge & Bound Approvals (P0-3)
 
-    public func requestHighRiskApproval(
-        capability: WalletAuthCapability,
-        action: String,
-        target: String,
-        reason: String
-    ) async throws -> HighRiskApproval {
-        try verifyCapability(capability)
-
+    public func challengeDeviceOwner(reason: String) async throws {
         #if DEBUG
         if let hook = mockDeviceOwnerHook {
             let success = try await hook()
             guard success else {
                 throw WalletAuthError.deviceOwnerAuthCanceled
             }
+            return
         } else if !mockDeviceOwnerSuccessForTesting {
             let context = LAContext()
             var authError: NSError?
@@ -900,6 +894,32 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
         }
         #endif
+    }
+
+    /// Prompts the user with Touch ID / Mac password, and only upon verified authentication,
+    /// retrieves the operator's saved password and generates the current 2FA TOTP code from Keychain.
+    public func retrieveOperatorCredentialsWithBiometrics(
+        username: String,
+        reason: String
+    ) async throws -> (password: String?, totpCode: String?) {
+        try await challengeDeviceOwner(reason: reason)
+        let pass = try? Self.loadOperatorPasswordFromKeychain(username: username)
+        var code: String? = nil
+        if let secret = try? Self.loadTOTPSecretFromKeychain(username: username) {
+            code = Self.generateTOTP(secret: secret)
+        }
+        return (pass, code)
+    }
+
+    public func requestHighRiskApproval(
+        capability: WalletAuthCapability,
+        action: String,
+        target: String,
+        reason: String
+    ) async throws -> HighRiskApproval {
+        try verifyCapability(capability)
+
+        try await challengeDeviceOwner(reason: reason)
 
         // Audit 039: Re-verify capability and active session post-suspension to prevent approvals during lock/logout
         try verifyCapability(capability)

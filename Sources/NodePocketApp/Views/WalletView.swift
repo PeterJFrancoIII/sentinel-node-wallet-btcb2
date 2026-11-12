@@ -126,9 +126,6 @@ public struct WalletView: View {
         .onAppear {
             state.refreshAuthState()
             if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? "" }
-            if !state.isWalletTabUnlocked {
-                autoPullSavedLoginCredentials(for: loginUsername, isInteractive: false)
-            }
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
@@ -139,14 +136,11 @@ public struct WalletView: View {
         }
         .onChange(of: state.enrolledUsername) { newName in
             if loginUsername.isEmpty { loginUsername = newName ?? "" }
-            if !state.isWalletTabUnlocked {
-                autoPullSavedLoginCredentials(for: loginUsername, isInteractive: false)
-            }
         }
-        .onChange(of: loginUsername) { newName in
-            if !state.isWalletTabUnlocked {
-                autoPullSavedLoginCredentials(for: newName, isInteractive: false)
-            }
+        .onChange(of: loginUsername) { _ in
+            loginPassword = ""
+            loginTotpCode = ""
+            isApplePasswordSaved = false
         }
         .onChange(of: state.isWalletTabUnlocked) { unlocked in
             if !unlocked {
@@ -446,14 +440,14 @@ public struct WalletView: View {
 
             // Apple Passwords & macOS Keychain Status Callout
             HStack(spacing: 10) {
-                Image(systemName: "key.horizontal.fill")
+                Image(systemName: "touchid")
                     .font(.title3)
                     .foregroundColor(.blue)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Apple Passwords & Keychain Active")
+                    Text("Biometric Security & Keychain Active")
                         .font(.caption)
                         .bold()
-                    Text("Operator login credentials and 2FA secrets are secured in macOS Keychain and Apple Passwords. Saved logins are automatically pulled when opening Wallet Manager.")
+                    Text("Operator login credentials and 2FA secrets are secured in macOS Keychain. Touch ID or Mac password authentication is required to autofill.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
@@ -704,29 +698,30 @@ public struct WalletView: View {
                 .controlSize(.small)
             }
 
-            // Apple Password Manager Auto-Populate Prompt Banner
+            // Apple Password Manager Biometric Auto-Populate Prompt Banner
             HStack(spacing: 12) {
-                Image(systemName: "key.fill")
+                Image(systemName: "touchid")
                     .font(.title2)
                     .foregroundColor(.blue)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Populate login from Apple Password Manager?")
+                    Text("Autofill with Touch ID or Password?")
                         .font(.subheadline)
                         .bold()
-                    Text("Automatically fill Username, Password, and 2FA Code from Apple Passwords & macOS Keychain for rapid sign-in.")
+                    Text("Scan your fingerprint or enter your Mac password to autofill Operator Login credentials.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
                 Spacer()
                 Button(action: {
-                    autoPullSavedLoginCredentials(for: loginUsername, isInteractive: true)
+                    requestAutofillWithBiometrics(for: loginUsername, andLogin: false)
                 }) {
-                    Label("Auto-Populate", systemImage: "arrow.down.circle.fill")
+                    Label("Autofill with Touch ID", systemImage: "touchid")
                         .bold()
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
                 .controlSize(.small)
+                .disabled(isAuthActionInProgress)
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.1)))
@@ -782,11 +777,11 @@ public struct WalletView: View {
                 }
 
                 Button(action: {
-                    autoPullSavedLoginCredentials(for: loginUsername, isInteractive: true)
+                    requestAutofillWithBiometrics(for: loginUsername, andLogin: false)
                 }) {
                     HStack(spacing: 6) {
-                        Image(systemName: "key.horizontal.fill")
-                        Text("Pull from Apple Passwords…")
+                        Image(systemName: "touchid")
+                        Text("Autofill with Touch ID or Password…")
                     }
                 }
                 .buttonStyle(.bordered)
@@ -798,13 +793,13 @@ public struct WalletView: View {
                         Image(systemName: "checkmark.shield.fill")
                             .foregroundColor(.green)
                             .font(.caption)
-                        Text("Login credentials automatically pulled from Apple Password Manager / Keychain")
+                        Text("Credentials authenticated and loaded from Keychain")
                             .font(.caption2)
                             .foregroundColor(.green)
                     }
                 }
 
-                Text("Saved logins and 2FA credentials are automatically pulled from Apple Password Manager and macOS Keychain upon opening Wallet Manager. macOS controls user consent and Touch ID authentication.")
+                Text("Saved logins and 2FA credentials in macOS Keychain are protected by biometric authentication. Touch ID or your Mac password is required to autofill.")
                     .font(.caption2)
                     .foregroundColor(.secondary)
 
@@ -843,28 +838,11 @@ public struct WalletView: View {
                     .disabled(loginUsername.isEmpty || loginPassword.isEmpty || loginTotpCode.count != 6 || isAuthActionInProgress)
 
                     Button(action: {
-                        autoPullSavedLoginCredentials(for: loginUsername, isInteractive: true)
-                        if !loginUsername.isEmpty && !loginPassword.isEmpty && loginTotpCode.count == 6 {
-                            Task {
-                                isAuthActionInProgress = true
-                                authLocalError = nil
-                                defer { isAuthActionInProgress = false }
-                                do {
-                                    let u = loginUsername
-                                    let p = loginPassword
-                                    try await state.loginUser(username: u, password: p, totpCode: loginTotpCode)
-                                    try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: u, password: p)
-                                    loginPassword = ""
-                                    loginTotpCode = ""
-                                } catch {
-                                    authLocalError = error.localizedDescription
-                                }
-                            }
-                        }
+                        requestAutofillWithBiometrics(for: loginUsername, andLogin: true)
                     }) {
                         HStack(spacing: 4) {
-                            Image(systemName: "key.horizontal.fill")
-                            Text("1-Click Apple Sign-In")
+                            Image(systemName: "touchid")
+                            Text("1-Click Touch ID Sign-In")
                         }
                     }
                     .buttonStyle(.bordered)
@@ -939,57 +917,95 @@ public struct WalletView: View {
         .frame(maxWidth: 480)
     }
 
-    // MARK: - Apple Passwords & macOS Keychain Auto-Pull
+    // MARK: - Apple Passwords & macOS Keychain Biometric Autofill
 
-    private func autoPullSavedLoginCredentials(for username: String? = nil, isInteractive: Bool = false) {
+    private func requestAutofillWithBiometrics(for username: String? = nil, andLogin: Bool = false) {
         let target = (username?.isEmpty ?? true)
             ? (state.enrolledUsername ?? state.enrolledUsernames.first ?? "")
             : (username ?? "")
-        guard !target.isEmpty else { return }
+        guard !target.isEmpty else {
+            authLocalError = "Please select or enter an operator username first."
+            return
+        }
 
         if loginUsername.isEmpty {
             loginUsername = target
         }
 
-        // 1. Pull saved password from Apple Keychain / Password Store
-        if let saved = try? WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: target), !saved.isEmpty {
-            loginPassword = saved
-            isApplePasswordSaved = true
-            if isInteractive {
-                authLocalError = nil
-            }
-        } else {
-            isApplePasswordSaved = false
-        }
+        isAuthActionInProgress = true
+        authLocalError = nil
 
-        // 2. Automatically generate current valid 2FA TOTP code from Keychain if secret is stored
-        if let totpSecret = try? WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: target) {
-            loginTotpCode = WalletAuthCoordinator.generateTOTP(secret: totpSecret)
-        }
+        Task { @MainActor in
+            defer { isAuthActionInProgress = false }
+            do {
+                // Prompt user for fingerprint (Touch ID) or Mac password
+                let creds = try await state.retrieveOperatorCredentialsWithBiometrics(username: target)
+                var credentialsFound = false
 
-        // 3. If password wasn't in Keychain or interactive requested, try system Apple Passwords coordinator
-        if loginPassword.isEmpty || isInteractive {
-            let picker = AppleSavedPasswordCoordinator()
-            picker.onCredential = { user, pass in
-                loginUsername = user
-                loginPassword = pass
-                isApplePasswordSaved = true
-                authLocalError = nil
-                appleSavedPasswordCoordinator = nil
-                // Automatically save to Apple Keychain for future instant auto-pull
-                try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: pass)
-                if let secret = try? WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: user) {
-                    loginTotpCode = WalletAuthCoordinator.generateTOTP(secret: secret)
+                if let pass = creds.password, !pass.isEmpty {
+                    loginPassword = pass
+                    isApplePasswordSaved = true
+                    credentialsFound = true
+                }
+                if let code = creds.totpCode, !code.isEmpty {
+                    loginTotpCode = code
+                    credentialsFound = true
+                }
+
+                // If not found in Keychain, try system Apple Passwords coordinator
+                if !credentialsFound || loginPassword.isEmpty {
+                    let picker = AppleSavedPasswordCoordinator()
+                    picker.onCredential = { user, pass in
+                        loginUsername = user
+                        loginPassword = pass
+                        isApplePasswordSaved = true
+                        authLocalError = nil
+                        appleSavedPasswordCoordinator = nil
+                        try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: pass)
+                        Task { @MainActor in
+                            if let refreshed = try? await state.retrieveOperatorCredentialsWithBiometrics(username: user),
+                               let c = refreshed.totpCode {
+                                loginTotpCode = c
+                            }
+                            if andLogin && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                                do {
+                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                    loginPassword = ""
+                                    loginTotpCode = ""
+                                } catch {
+                                    authLocalError = error.localizedDescription
+                                }
+                            }
+                        }
+                    }
+                    picker.onFailure = { err in
+                        if loginPassword.isEmpty {
+                            authLocalError = err
+                        }
+                        appleSavedPasswordCoordinator = nil
+                    }
+                    appleSavedPasswordCoordinator = picker
+                    picker.requestSavedLogin(isInteractive: true)
+                    return
+                }
+
+                if andLogin {
+                    if !loginUsername.isEmpty && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                        let userToLogin = loginUsername
+                        let passToLogin = loginPassword
+                        let codeToLogin = loginTotpCode
+                        try await state.loginUser(username: userToLogin, password: passToLogin, totpCode: codeToLogin)
+                        loginPassword = ""
+                        loginTotpCode = ""
+                    }
+                }
+            } catch {
+                if case WalletAuthError.deviceOwnerAuthCanceled = error {
+                    authLocalError = "Autofill canceled: Fingerprint (Touch ID) or Mac password required."
+                } else {
+                    authLocalError = error.localizedDescription
                 }
             }
-            picker.onFailure = { err in
-                if isInteractive && loginPassword.isEmpty {
-                    authLocalError = err
-                }
-                appleSavedPasswordCoordinator = nil
-            }
-            appleSavedPasswordCoordinator = picker
-            picker.requestSavedLogin(isInteractive: isInteractive)
         }
     }
 
