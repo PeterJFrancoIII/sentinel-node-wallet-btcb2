@@ -20,6 +20,7 @@ public struct WalletView: View {
     @State private var sendAmountPercentInput = ""
     @State private var isSyncingAmountInputs = false
     @State private var isMaxSelected = false
+    @State private var amountCorrectionNotice: String? = nil
     @State private var selectedFeePreset: FeePresetType = .normal
     @State private var customSatPerVBInput = "2"
     @State private var activePreview: FundedTxPreview?
@@ -159,19 +160,13 @@ public struct WalletView: View {
             }
         }
         .onChange(of: selectedFeePreset) { _ in
-            if isMaxSelected {
-                applyMaxAmount()
-            }
+            recheckAndClampSendAmount()
         }
         .onChange(of: customSatPerVBInput) { _ in
-            if isMaxSelected {
-                applyMaxAmount()
-            }
+            recheckAndClampSendAmount()
         }
         .onChange(of: state.walletSnapshot?.trustedBalance) { _ in
-            if isMaxSelected {
-                applyMaxAmount()
-            }
+            recheckAndClampSendAmount()
         }
         .sheet(isPresented: $showPreviewSheet) {
             sendPreviewSheet
@@ -1577,9 +1572,7 @@ public struct WalletView: View {
 
         return Button(action: {
             selectedFeePreset = preset
-            if isMaxSelected {
-                applyMaxAmount()
-            }
+            recheckAndClampSendAmount()
         }) {
             VStack(spacing: 3) {
                 Text(title)
@@ -1820,63 +1813,192 @@ public struct WalletView: View {
     private func updateAmountFromBTC(_ newBTC: String) {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
-        isMaxSelected = false
         defer { isSyncingAmountInputs = false }
 
-        sendAmountInput = newBTC
-        let btc = Double(newBTC) ?? 0.0
-        let price = state.priceState.effectivePrice
-        if price > 0 && btc > 0 {
-            sendAmountUSDInput = String(format: "%.2f", btc * price)
-        } else {
+        let trimmed = newBTC.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            sendAmountInput = ""
             sendAmountUSDInput = ""
+            sendAmountPercentInput = ""
+            isMaxSelected = false
+            amountCorrectionNotice = nil
+            return
         }
 
         let avail = state.walletSnapshot?.trustedBalance ?? 0.0
-        if avail > 0 && btc > 0 {
-            let pct = min(100.0, (btc / avail) * 100.0)
-            sendAmountPercentInput = String(format: "%.1f", pct)
+        let quote = currentFeeQuote()
+        let feeCalc = estimatedFeeCalculation(quote: quote)
+        let maxSpendable = max(0.0, avail - feeCalc.feeBTC)
+
+        if avail <= feeCalc.feeBTC {
+            sendAmountInput = "0.00000000"
+            sendAmountUSDInput = "0.00"
+            sendAmountPercentInput = "0.0"
+            isMaxSelected = false
+            amountCorrectionNotice = "Spendable balance (\(String(format: "%.8f", avail)) BTCB2) is insufficient to cover the network fee (\(String(format: "%.8f", feeCalc.feeBTC)) BTCB2)."
+            return
+        }
+
+        // Allow trailing decimal point during active typing (e.g. "0.")
+        if trimmed == "." || trimmed == "0." || (trimmed.hasSuffix(".") && trimmed.filter({ $0 == "." }).count == 1) {
+            sendAmountInput = trimmed
+            return
+        }
+
+        guard let btc = Double(trimmed) else {
+            amountCorrectionNotice = "Invalid numerical input."
+            return
+        }
+
+        if btc > maxSpendable {
+            // Error-correct user attempt to enter an amount they don't have and prevent entering it
+            sendAmountInput = String(format: "%.8f", maxSpendable)
+            let price = state.priceState.effectivePrice
+            if price > 0 {
+                sendAmountUSDInput = String(format: "%.2f", maxSpendable * price)
+            } else {
+                sendAmountUSDInput = ""
+            }
+            if avail > 0 {
+                sendAmountPercentInput = String(format: "%.1f", min(100.0, (maxSpendable / avail) * 100.0))
+            }
+            isMaxSelected = true
+            amountCorrectionNotice = "Auto-corrected to maximum spendable \(String(format: "%.8f", maxSpendable)) BTCB2 (reserved \(String(format: "%.8f", feeCalc.feeBTC)) BTCB2 for fee)."
         } else {
-            sendAmountPercentInput = ""
+            sendAmountInput = trimmed
+            let price = state.priceState.effectivePrice
+            if price > 0 && btc > 0 {
+                sendAmountUSDInput = String(format: "%.2f", btc * price)
+            } else {
+                sendAmountUSDInput = ""
+            }
+            if avail > 0 && btc > 0 {
+                let pct = min(100.0, (btc / avail) * 100.0)
+                sendAmountPercentInput = String(format: "%.1f", pct)
+            } else {
+                sendAmountPercentInput = ""
+            }
+            isMaxSelected = (abs(btc - maxSpendable) < 1e-8)
+            amountCorrectionNotice = nil
         }
     }
 
     private func updateAmountFromUSD(_ newUSD: String) {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
-        isMaxSelected = false
         defer { isSyncingAmountInputs = false }
 
-        sendAmountUSDInput = newUSD
-        let usd = Double(newUSD) ?? 0.0
+        let trimmed = newUSD.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            sendAmountInput = ""
+            sendAmountUSDInput = ""
+            sendAmountPercentInput = ""
+            isMaxSelected = false
+            amountCorrectionNotice = nil
+            return
+        }
+
+        let avail = state.walletSnapshot?.trustedBalance ?? 0.0
+        let quote = currentFeeQuote()
+        let feeCalc = estimatedFeeCalculation(quote: quote)
+        let maxSpendable = max(0.0, avail - feeCalc.feeBTC)
         let price = state.priceState.effectivePrice
-        if price > 0 && usd > 0 {
+
+        if avail <= feeCalc.feeBTC {
+            sendAmountInput = "0.00000000"
+            sendAmountUSDInput = "0.00"
+            sendAmountPercentInput = "0.0"
+            isMaxSelected = false
+            amountCorrectionNotice = "Spendable balance is insufficient to cover the network fee."
+            return
+        }
+
+        if trimmed == "." || trimmed == "0." || (trimmed.hasSuffix(".") && trimmed.filter({ $0 == "." }).count == 1) {
+            sendAmountUSDInput = trimmed
+            return
+        }
+
+        guard let usd = Double(trimmed), price > 0 else {
+            if price <= 0 {
+                sendAmountUSDInput = trimmed
+                amountCorrectionNotice = "Live market price unavailable for USD auto-calculation."
+            }
+            return
+        }
+
+        let maxUSD = maxSpendable * price
+        if usd > maxUSD {
+            sendAmountUSDInput = String(format: "%.2f", maxUSD)
+            sendAmountInput = String(format: "%.8f", maxSpendable)
+            if avail > 0 {
+                sendAmountPercentInput = String(format: "%.1f", min(100.0, (maxSpendable / avail) * 100.0))
+            }
+            isMaxSelected = true
+            amountCorrectionNotice = "Auto-corrected to maximum spendable $\(String(format: "%.2f", maxUSD)) (\(String(format: "%.8f", maxSpendable)) BTCB2) to preserve network fee."
+        } else {
+            sendAmountUSDInput = trimmed
             let btc = usd / price
             sendAmountInput = String(format: "%.8f", btc)
-            let avail = state.walletSnapshot?.trustedBalance ?? 0.0
             if avail > 0 {
                 let pct = min(100.0, (btc / avail) * 100.0)
                 sendAmountPercentInput = String(format: "%.1f", pct)
-            } else {
-                sendAmountPercentInput = ""
             }
-        } else {
-            sendAmountInput = ""
-            sendAmountPercentInput = ""
+            isMaxSelected = (abs(btc - maxSpendable) < 1e-8)
+            amountCorrectionNotice = nil
         }
     }
 
     private func updateAmountFromPercent(_ newPct: String) {
         guard !isSyncingAmountInputs else { return }
         isSyncingAmountInputs = true
-        isMaxSelected = false
         defer { isSyncingAmountInputs = false }
 
-        sendAmountPercentInput = newPct
-        let pct = Double(newPct) ?? 0.0
+        let trimmed = newPct.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            sendAmountInput = ""
+            sendAmountUSDInput = ""
+            sendAmountPercentInput = ""
+            isMaxSelected = false
+            amountCorrectionNotice = nil
+            return
+        }
+
         let avail = state.walletSnapshot?.trustedBalance ?? 0.0
-        if avail > 0 && pct > 0 {
-            let btc = max(0.0, min(avail, (pct / 100.0) * avail))
+        let quote = currentFeeQuote()
+        let feeCalc = estimatedFeeCalculation(quote: quote)
+        let maxSpendable = max(0.0, avail - feeCalc.feeBTC)
+
+        if avail <= feeCalc.feeBTC {
+            sendAmountInput = "0.00000000"
+            sendAmountUSDInput = "0.00"
+            sendAmountPercentInput = "0.0"
+            isMaxSelected = false
+            amountCorrectionNotice = "Spendable balance is insufficient to cover the network fee."
+            return
+        }
+
+        if trimmed == "." || trimmed == "0." || (trimmed.hasSuffix(".") && trimmed.filter({ $0 == "." }).count == 1) {
+            sendAmountPercentInput = trimmed
+            return
+        }
+
+        guard let pct = Double(trimmed) else { return }
+
+        let maxPct = avail > 0 ? min(100.0, (maxSpendable / avail) * 100.0) : 0.0
+        if pct > maxPct {
+            sendAmountPercentInput = String(format: "%.1f", maxPct)
+            sendAmountInput = String(format: "%.8f", maxSpendable)
+            let price = state.priceState.effectivePrice
+            if price > 0 {
+                sendAmountUSDInput = String(format: "%.2f", maxSpendable * price)
+            } else {
+                sendAmountUSDInput = ""
+            }
+            isMaxSelected = true
+            amountCorrectionNotice = "Auto-corrected to maximum spendable \(String(format: "%.1f", maxPct))% (\(String(format: "%.8f", maxSpendable)) BTCB2) to preserve network fee."
+        } else {
+            sendAmountPercentInput = trimmed
+            let btc = max(0.0, min(maxSpendable, (pct / 100.0) * avail))
             sendAmountInput = String(format: "%.8f", btc)
             let price = state.priceState.effectivePrice
             if price > 0 {
@@ -1884,9 +2006,8 @@ public struct WalletView: View {
             } else {
                 sendAmountUSDInput = ""
             }
-        } else {
-            sendAmountInput = ""
-            sendAmountUSDInput = ""
+            isMaxSelected = (abs(btc - maxSpendable) < 1e-8)
+            amountCorrectionNotice = nil
         }
     }
 
@@ -1897,16 +2018,17 @@ public struct WalletView: View {
         defer { isSyncingAmountInputs = false }
 
         let avail = state.walletSnapshot?.trustedBalance ?? 0.0
-        guard avail > 0 else {
-            sendAmountInput = "0.00000000"
-            sendAmountUSDInput = "0.00"
-            sendAmountPercentInput = "0.0"
-            return
-        }
-
         let quote = currentFeeQuote()
         let feeCalc = estimatedFeeCalculation(quote: quote)
         let maxSpendable = max(0.0, avail - feeCalc.feeBTC)
+
+        guard avail > feeCalc.feeBTC else {
+            sendAmountInput = "0.00000000"
+            sendAmountUSDInput = "0.00"
+            sendAmountPercentInput = "0.0"
+            amountCorrectionNotice = "Spendable balance (\(String(format: "%.8f", avail)) BTCB2) is insufficient to cover the network fee (\(String(format: "%.8f", feeCalc.feeBTC)) BTCB2)."
+            return
+        }
 
         sendAmountInput = String(format: "%.8f", maxSpendable)
         let price = state.priceState.effectivePrice
@@ -1916,6 +2038,39 @@ public struct WalletView: View {
             sendAmountUSDInput = ""
         }
         sendAmountPercentInput = String(format: "%.1f", min(100.0, (maxSpendable / avail) * 100.0))
+        amountCorrectionNotice = nil
+    }
+
+    private func recheckAndClampSendAmount() {
+        if isMaxSelected {
+            applyMaxAmount()
+            return
+        }
+
+        guard let currentBTC = Double(sendAmountInput), currentBTC > 0 else { return }
+        let avail = state.walletSnapshot?.trustedBalance ?? 0.0
+        let quote = currentFeeQuote()
+        let feeCalc = estimatedFeeCalculation(quote: quote)
+        let maxSpendable = max(0.0, avail - feeCalc.feeBTC)
+
+        if currentBTC > maxSpendable {
+            guard !isSyncingAmountInputs else { return }
+            isSyncingAmountInputs = true
+            isMaxSelected = true
+            defer { isSyncingAmountInputs = false }
+
+            sendAmountInput = String(format: "%.8f", maxSpendable)
+            let price = state.priceState.effectivePrice
+            if price > 0 {
+                sendAmountUSDInput = String(format: "%.2f", maxSpendable * price)
+            } else {
+                sendAmountUSDInput = ""
+            }
+            if avail > 0 {
+                sendAmountPercentInput = String(format: "%.1f", min(100.0, (maxSpendable / avail) * 100.0))
+            }
+            amountCorrectionNotice = "Auto-adjusted to \(String(format: "%.8f", maxSpendable)) BTCB2 to accommodate updated \(quote.satPerVB) sat/vB fee rate."
+        }
     }
 
     private func generateSendPreview() {
@@ -2745,6 +2900,28 @@ public struct WalletView: View {
                                 .foregroundColor(.green)
                         }
 
+                        if let notice = amountCorrectionNotice {
+                            HStack(spacing: 6) {
+                                Image(systemName: "shield.lefthalf.filled")
+                                    .foregroundColor(.blue)
+                                    .font(.caption)
+                                Text(notice)
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.blue)
+                                Spacer()
+                                Button(action: { amountCorrectionNotice = nil }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                        .font(.caption2)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(6)
+                            .background(RoundedRectangle(cornerRadius: 6).fill(Color.blue.opacity(0.12)))
+                            .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.blue.opacity(0.3), lineWidth: 1))
+                        }
+
                         HStack(alignment: .bottom, spacing: 12) {
                             // BTCB2 Field
                             VStack(alignment: .leading, spacing: 3) {
@@ -2888,9 +3065,7 @@ public struct WalletView: View {
                                     get: { customSatPerVBInput },
                                     set: { val in
                                         customSatPerVBInput = val
-                                        if isMaxSelected {
-                                            applyMaxAmount()
-                                        }
+                                        recheckAndClampSendAmount()
                                     }
                                 ))
                                 .textFieldStyle(.roundedBorder)
