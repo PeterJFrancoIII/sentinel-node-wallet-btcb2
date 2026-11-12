@@ -1353,7 +1353,10 @@ public struct WalletView: View {
                     authLocalError = nil
                     defer { isAuthActionInProgress = false }
                     do {
+                        let enrolledName = enrollUsername
+                        let passToSave = enrollPassword
                         try await state.enrollUser(password: enrollPassword, totpCode: enrollTotpCode)
+                        try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: enrolledName, password: passToSave)
                         enrollUsername = ""
                         enrollPassword = ""
                         enrollTotpCode = ""
@@ -1483,7 +1486,10 @@ public struct WalletView: View {
                             authLocalError = nil
                             defer { isAuthActionInProgress = false }
                             do {
+                                let userToSave = loginUsername
+                                let passToSave = loginPassword
                                 try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: userToSave, password: passToSave)
                                 loginPassword = ""
                                 loginTotpCode = ""
                             } catch {

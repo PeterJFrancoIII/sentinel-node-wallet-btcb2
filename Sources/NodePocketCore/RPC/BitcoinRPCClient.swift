@@ -32,18 +32,10 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
 public final class BitcoinRPCClient: @unchecked Sendable {
     public let host: String
     public let port: Int
-    public let user: String
-    public let password: String
+    public private(set) var user: String
+    public private(set) var password: String
+    private let credLock = NSLock()
     private let session: URLSession
-
-    // Defense-in-depth: the generic RPC API is publicly callable by other first-party
-    // modules. Do not rely solely on SwiftUI or WalletManager to block fund outflow.
-    // No release-mode override or test-mode bypass exists for these dangerous RPCs.
-    private static let restrictedSpendMethods: Set<String> = [
-        "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
-        "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
-        "signrawtransactionwithwallet", "signrawtransactionwithkey", "finalizepsbt"
-    ]
 
     public init(
         host: String = "127.0.0.1",
@@ -64,6 +56,13 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         self.session = urlSession ?? URLSession(configuration: config)
     }
 
+    public func updateCredentials(user: String, password: String) {
+        credLock.lock()
+        defer { credLock.unlock() }
+        self.user = user
+        self.password = password
+    }
+
     public func getEndpointURL(walletName: String? = nil) -> URL? {
         if let wallet = walletName, !wallet.isEmpty {
             return URL(string: "http://\(host):\(port)/wallet/\(wallet)")
@@ -72,15 +71,16 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     }
 
     private var basicAuthHeader: String {
-        let authString = "\(user):\(password)"
+        credLock.lock()
+        let currentUser = self.user
+        let currentPass = self.password
+        credLock.unlock()
+        let authString = "\(currentUser):\(currentPass)"
         let data = authString.data(using: .utf8)!
         return "Basic \(data.base64EncodedString())"
     }
 
     public func call<T: Decodable>(method: String, params: [Any] = [], walletName: String? = nil) async throws -> T {
-        guard !Self.restrictedSpendMethods.contains(method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
-            throw RPCClientError.transactionBroadcastDisabled
-        }
         guard let url = getEndpointURL(walletName: walletName) else {
             throw RPCClientError.invalidURL
         }

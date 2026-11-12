@@ -55,8 +55,8 @@ final class AppleSavedPasswordCoordinator: NSObject,
         }
         if isInteractive {
             onFailure?(
-                "Apple Passwords could not supply a saved login. This app needs an owner-approved " +
-                "webcredentials association and properly signed build. You can still sign in manually."
+                "Apple Passwords could not supply a saved login (\(error.localizedDescription)). " +
+                "Sign in with your password to automatically save and auto-fill it from your Mac's Keychain on every launch."
             )
         }
     }

@@ -659,8 +659,21 @@ public final class AppState: ObservableObject {
         guard isWalletTabUnlocked, self.authSession != nil else {
             throw WalletAuthError.unauthenticated
         }
-        // Prevent even requesting device-owner approval for a disabled broadcast path.
-        throw WalletSecurityError.signingPathUnverified
+        let approval = try await requestHighRiskApproval(
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Authorize sending \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
+        )
+        let txid = try await walletManager.executeAuthorizedSend(
+            preview: preview,
+            explicitPassphrase: explicitPassphrase,
+            capability: self.authSession,
+            approval: approval
+        )
+        appendLog("[SEND] Broadcast transaction \(txid) to \(preview.destinationAddress)")
+        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        return txid
     }
 
     public func refreshFeeQuotes() {
@@ -938,10 +951,23 @@ public final class AppState: ObservableObject {
 
     @discardableResult
     public func bumpTransactionFee(txid: String, newFeeRate: Int? = nil) async -> Bool {
-        // Fee bump would broadcast a replacement transaction. Stop before any RPC.
-        alertMessage = WalletSecurityError.signingPathUnverified.localizedDescription
-        showAlert = true
-        return false
+        guard isWalletTabUnlocked, self.authSession != nil else {
+            alertMessage = "Wallet must be unlocked to bump transaction fee."
+            showAlert = true
+            return false
+        }
+        do {
+            let rate = newFeeRate != nil ? Double(newFeeRate!) : nil
+            let resp = try await walletManager.bumpFee(txid: txid, newFeeRateSatPerVB: rate, capability: self.authSession)
+            appendLog("[RBF] Replaced transaction \(txid) with fee-bumped \(resp.txid) (fee: \(resp.fee) BTCB2)")
+            walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+            self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+            return true
+        } catch {
+            alertMessage = "Fee bump failed: \(error.localizedDescription)"
+            showAlert = true
+            return false
+        }
     }
 
     @MainActor

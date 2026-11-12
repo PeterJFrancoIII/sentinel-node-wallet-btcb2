@@ -1269,7 +1269,7 @@ public actor WalletAuthCoordinator {
         #endif
 
         let account = "totp_" + cleanUser
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "app.nodepocket.btcb2.auth",
             kSecAttrAccount as String: account,
@@ -1278,10 +1278,23 @@ public actor WalletAuthCoordinator {
         ]
 
         var dataTypeRef: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+
+        if status == errSecAuthFailed || status == -25293 {
+            // Supply authentication context with localized reason for items with .userPresence ACL
+            let context = LAContext()
+            context.localizedReason = "Authenticate to unlock Sentinel Node Wallet 2FA secret"
+            query[kSecUseAuthenticationContext as String] = context
+            status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        }
+
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
             throw WalletAuthError.storageError("Failed to load TOTP secret from Keychain: status \(status)")
         }
+
+        // Seamless migration: re-save with WhenUnlockedThisDeviceOnly so future reads never fail on -25293
+        try? saveTOTPSecretToKeychain(username: username, secretBase32: str)
+
         return str
     }
 

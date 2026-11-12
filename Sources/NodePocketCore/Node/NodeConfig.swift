@@ -2,8 +2,8 @@ import Foundation
 
 public struct NodeConfig: Sendable {
     public var rpcPort: Int
-    public let rpcUser: String
-    public let rpcPassword: String
+    public var rpcUser: String
+    public var rpcPassword: String
     public var p2pPort: Int
     public var allowInboundP2P: Bool
     public var profile: SyncProfile

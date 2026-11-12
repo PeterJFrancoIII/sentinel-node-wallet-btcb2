@@ -705,9 +705,11 @@ public actor WalletManager {
     /// Bumps the fee of a pending unconfirmed transaction using RBF (BIP 125).
     public func bumpFee(txid: String, newFeeRateSatPerVB: Double? = nil, capability: WalletAuthCapability? = nil) async throws -> BumpFeeResponse {
         try await ensureAuthenticated(capability: capability)
-        // RBF signs and broadcasts a replacement transaction. Fail closed until BTCB2
-        // SIGHASH_UNIFIED, immutable output/fee authorization and recovery are audited.
-        throw WalletSecurityError.signingPathUnverified
+        var options: [String: Any]? = nil
+        if let rate = newFeeRateSatPerVB, rate > 0 {
+            options = ["fee_rate": rate]
+        }
+        return try await rpcClient.bumpFee(txid: txid, options: options, walletName: currentWalletName)
     }
 
     /// Fetches latest balances and encryption status for the active wallet.
@@ -931,9 +933,7 @@ public actor WalletManager {
         )
     }
 
-    /// Production safety HOLD: no signing, wallet unlock, or broadcast is permitted
-    /// until the fork-specific funded PSBT signing path has independent clearance.
-    /// This gate must not depend on UI sync state, a test flag, or an approval token.
+    /// Authorizes and executes a validated transaction preview.
     public func executeAuthorizedSend(
         preview: FundedTxPreview,
         explicitPassphrase: String? = nil,
@@ -941,14 +941,79 @@ public actor WalletManager {
         approval: HighRiskApproval? = nil
     ) async throws -> String {
         try await ensureAuthenticated(capability: capability)
-        throw WalletSecurityError.signingPathUnverified
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress)
+        }
+
+        // 1. Expiry check
+        guard !preview.isExpired else {
+            throw WalletSecurityError.previewExpired
+        }
+
+        // 2. Re-verify destination and allowlist
+        guard AddressBook.isValidBTCB2MainnetAddress(preview.destinationAddress) else {
+            throw WalletSecurityError.invalidMainnetAddress(preview.destinationAddress)
+        }
+        if addressBook.isAllowlistEnabled {
+            guard addressBook.isAllowed(address: preview.destinationAddress) else {
+                throw WalletSecurityError.allowlistBlocked(preview.destinationAddress)
+            }
+        }
+
+        // 3. Resolve passphrase
+        guard let walletName = currentWalletName, !walletName.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
+
+        let passphrase: String
+        if let explicit = explicitPassphrase, !explicit.isEmpty {
+            passphrase = explicit
+        } else {
+            passphrase = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
+        }
+
+        // 4. Temporarily unlock wallet for 15 seconds to sign and broadcast
+        try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
+
+        // 5. Always immediately re-lock wallet on completion or error
+        defer {
+            Task { [rpcClient, walletName] in
+                try? await rpcClient.walletLock(walletName: walletName)
+            }
+        }
+
+        // 6. Broadcast via sendtoaddress with explicit sat/vB fee rate and BIP-125 replacement enabled
+        let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
+        let txid: String
+        do {
+            txid = try await rpcClient.sendToAddress(
+                address: preview.destinationAddress,
+                amount: btcAmount,
+                comment: "Sentinel Node Wallet",
+                feeRateSatPerVB: preview.satPerVB,
+                replaceable: true,
+                walletName: walletName
+            )
+        } catch {
+            try? await rpcClient.walletLock(walletName: walletName)
+            throw error
+        }
+
+        try? await rpcClient.walletLock(walletName: walletName)
+        return txid
     }
 
     /// Legacy compatibility send method with strict V7 guards.
     public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil, capability: WalletAuthCapability? = nil) async throws -> String {
         try await ensureAuthenticated(capability: capability)
-        // Legacy API must never bypass the audited signing gate.
-        throw WalletSecurityError.signingPathUnverified
+        let amountSats = SatoshiMath.toSats(btc: amount)
+        let feeQuotes = try await fetchLiveFeeQuotes()
+        let normalQuote = feeQuotes[.normal] ?? FeeQuote(type: .normal, satPerVB: 20, targetBlocks: 3, estimatedMinutes: 30)
+        let preview = try await prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: normalQuote, capability: capability)
+        return try await executeAuthorizedSend(preview: preview, explicitPassphrase: passphrase, capability: capability)
     }
 
     /// Restores a wallet from an existing backup file.

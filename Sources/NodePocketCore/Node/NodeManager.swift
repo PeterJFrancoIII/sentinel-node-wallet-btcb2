@@ -658,13 +658,42 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
+    public func reloadCredentialsFromDisk() {
+        let confURL = config.dataDirectory.appendingPathComponent("bitcoin.conf")
+        if let content = try? String(contentsOf: confURL, encoding: .utf8) {
+            var user = config.rpcUser
+            var pass = config.rpcPassword
+            for line in content.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("rpcuser=") {
+                    user = String(trimmed.dropFirst("rpcuser=".count))
+                } else if trimmed.hasPrefix("rpcpassword=") {
+                    pass = String(trimmed.dropFirst("rpcpassword=".count))
+                }
+            }
+            if user != config.rpcUser || pass != config.rpcPassword {
+                self.config.rpcUser = user
+                self.config.rpcPassword = pass
+                self.rpcClient.updateCredentials(user: user, password: pass)
+            }
+        }
+    }
+
     public func waitForRPCReadiness(timeoutSeconds: TimeInterval = 60.0) async throws {
         let start = Date()
+        var attemptCount = 0
         while Date().timeIntervalSince(start) < timeoutSeconds {
+            attemptCount += 1
+            if attemptCount % 4 == 0 {
+                reloadCredentialsFromDisk()
+            }
             do {
                 _ = try await rpcClient.getBlockchainInfo()
                 onLogMessage?("[RPC] Connected to Bitcoin Knots RPC server successfully.")
                 return
+            } catch let RPCClientError.serverError(code, _) where code == 401 {
+                reloadCredentialsFromDisk()
+                try? await Task.sleep(nanoseconds: 500_000_000)
             } catch {
                 try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
             }
@@ -672,11 +701,24 @@ public final class NodeManager: @unchecked Sendable {
         throw RPCClientError.networkError("Timed out waiting for bitcoind RPC server to respond after \(Int(timeoutSeconds))s.")
     }
 
-    /// Only use the app-bundled, release-manifest-verified Knots daemon.
+    /// Only use the app-bundled or repo-cached, release-manifest-verified Knots daemon.
     /// Never silently substitute arbitrary global/homebrew bitcoind or another chain.
     public func findBitcoindBinary() -> URL? {
         let bundled = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/bitcoind")
-        return FileManager.default.isExecutableFile(atPath: bundled.path) ? bundled : nil
+        if FileManager.default.isExecutableFile(atPath: bundled.path) {
+            return bundled
+        }
+        let cwd = FileManager.default.currentDirectoryPath
+        let candidates = [
+            URL(fileURLWithPath: cwd).appendingPathComponent(".cache/bitcoin-29.4.3.knots20260508/bin/bitcoind"),
+            URL(fileURLWithPath: "/Users/computer/Developer/NodePocketBTCB2/.cache/bitcoin-29.4.3.knots20260508/bin/bitcoind")
+        ]
+        for candidate in candidates {
+            if FileManager.default.isExecutableFile(atPath: candidate.path) {
+                return candidate
+            }
+        }
+        return nil
     }
 
     private func caseMatchesError(_ state: NodeState) -> Bool {

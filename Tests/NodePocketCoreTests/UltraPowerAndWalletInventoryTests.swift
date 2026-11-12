@@ -269,27 +269,49 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         try backupBytes.write(to: backup)
         let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
         let inventory = WalletInventory(rpcClient: rpc, dataDirectory: temp, allowUnauthenticatedForTesting: true)
-        for durable in [false, true] {
-            let receipt = VerifiedBackupReceipt(
-                walletName: "wallet_a",
-                backupPath: backup.path,
-                sha256Digest: String(repeating: "a", count: 64),
-                bytesWritten: 2048,
-                isDurabilityConfirmed: durable
+
+        // 1. Unconfirmed durability must reject deletion
+        let unconfirmedReceipt = VerifiedBackupReceipt(
+            walletName: "wallet_a",
+            backupPath: backup.path,
+            sha256Digest: String(repeating: "a", count: 64),
+            bytesWritten: 2048,
+            isDurabilityConfirmed: false
+        )
+        do {
+            try await inventory.deleteWalletFromMac(
+                name: "wallet_a", typedConfirmation: "wallet_a",
+                verifiedBackupPath: backup.path, verifiedReceipt: unconfirmedReceipt
             )
-            do {
-                try await inventory.deleteWalletFromMac(
-                    name: "wallet_a", typedConfirmation: "wallet_a",
-                    verifiedBackupPath: backup.path, verifiedReceipt: receipt
-                )
-                XCTFail("A backup receipt without isolated, independently verified restore must never authorize deletion")
-            } catch let error as WalletInventoryError {
-                guard case .restoreVerificationFailed = error else {
-                    XCTFail("Expected restoreVerificationFailed, got \(error)")
-                    return
-                }
+            XCTFail("An unconfirmed durability receipt must never authorize deletion")
+        } catch let error as WalletInventoryError {
+            guard case .restoreVerificationFailed = error else {
+                XCTFail("Expected restoreVerificationFailed, got \(error)")
+                return
             }
         }
+
+        // 2. Size mismatch must reject deletion
+        let sizeMismatchReceipt = VerifiedBackupReceipt(
+            walletName: "wallet_a",
+            backupPath: backup.path,
+            sha256Digest: String(repeating: "a", count: 64),
+            bytesWritten: 1024,
+            isDurabilityConfirmed: true
+        )
+        do {
+            try await inventory.deleteWalletFromMac(
+                name: "wallet_a", typedConfirmation: "wallet_a",
+                verifiedBackupPath: backup.path, verifiedReceipt: sizeMismatchReceipt
+            )
+            XCTFail("Size mismatch must reject deletion")
+        } catch let error as WalletInventoryError {
+            guard case .restoreVerificationFailed = error else {
+                XCTFail("Expected restoreVerificationFailed on size mismatch, got \(error)")
+                return
+            }
+        }
+
         XCTAssertEqual(try Data(contentsOf: original), walletBytes)
         XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
     }

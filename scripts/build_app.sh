@@ -65,7 +65,7 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundleExecutable</key>
     <string>SentinelNodeWallet</string>
     <key>CFBundleIdentifier</key>
-    <string>app.nodepocket.btcb2</string>
+    <string>pool.sentineldefensetechnologies.co.za</string>
     <key>CFBundleName</key>
     <string>Sentinel Node Wallet</string>
     <key>CFBundleDisplayName</key>
@@ -75,7 +75,7 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
+    <string>1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
@@ -88,8 +88,20 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 </plist>
 EOF
 
-# Code sign with ad-hoc signature for local arm64 execution
-codesign --force --deep --sign - "${APP_BUNDLE}"
+# Code sign with Apple Development identity or ad-hoc fallback
+DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
+ENTITLEMENTS="${ROOT_DIR}/dist/AppStore.entitlements.plist"
+if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then
+    echo "Signing with Developer Identity: ${DEV_IDENTITY}"
+    if [ -f "${ENTITLEMENTS}" ]; then
+        codesign --force --deep --sign "${DEV_IDENTITY}" --entitlements "${ENTITLEMENTS}" --options runtime "${APP_BUNDLE}"
+    else
+        codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
+    fi
+else
+    echo "Signing with ad-hoc identity"
+    codesign --force --deep --sign - "${APP_BUNDLE}"
+fi
 
 # Generate reproducible Build Manifest
 GIT_COMMIT="$(git rev-parse HEAD 2>/dev/null || echo "unknown")"
