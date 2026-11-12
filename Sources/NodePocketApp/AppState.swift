@@ -83,8 +83,9 @@ public final class AppState: ObservableObject {
         self.nodeManager = NodeManager(config: config)
         let authCoord = WalletAuthCoordinator(dataDirectory: config.dataDirectory)
         self.authCoordinator = authCoord
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord)
-        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        self.walletInventory = inv
+        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
         self.userPreferredProfile = config.profile.type
@@ -343,6 +344,7 @@ public final class AppState: ObservableObject {
             totpCode: totpCode,
             recoveryCodes: data.recoveryCodes
         )
+        await walletManager.resetActiveWallet()
         self.authSession = session
         self.isAuthEnrolled = true
         self.enrolledUsername = session.username
@@ -353,6 +355,13 @@ public final class AppState: ObservableObject {
         // The TOTP provisioning URI and recovery codes are secret setup material.
         // Once enrollment succeeds, discard the app's transient onboarding copy.
         self.generatedEnrollmentData = nil
+        self.walletSnapshot = nil
+        self.canonicalReceiveAddress = ""
+        self.receiveAddress = ""
+        self.activeReceiveAddresses = []
+        self.archivedReceiveAddresses = []
+        self.transactions = []
+        self.walletSummaries = []
         self.appendLog("[AUTH] Operator '\(session.username)' enrolled and Wallet Manager unlocked.")
         self.refreshWallet()
         self.refreshWalletInventory()
@@ -364,12 +373,20 @@ public final class AppState: ObservableObject {
         guard await authCoordinator.currentSession?.id == session.id else {
             return
         }
+        await walletManager.resetActiveWallet()
         self.authSession = session
         self.isWalletTabUnlocked = true
         self.enrolledUsername = session.username
         self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
+        self.walletSnapshot = nil
+        self.canonicalReceiveAddress = ""
+        self.receiveAddress = ""
+        self.activeReceiveAddresses = []
+        self.archivedReceiveAddresses = []
+        self.transactions = []
+        self.walletSummaries = []
         self.appendLog("[AUTH] Operator '\(session.username)' logged in. Wallet Manager unlocked.")
         self.refreshWallet()
         self.refreshWalletInventory()
@@ -381,12 +398,20 @@ public final class AppState: ObservableObject {
         guard await authCoordinator.currentSession?.id == session.id else {
             return
         }
+        await walletManager.resetActiveWallet()
         self.authSession = session
         self.isWalletTabUnlocked = true
         self.enrolledUsername = session.username
         self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
+        self.walletSnapshot = nil
+        self.canonicalReceiveAddress = ""
+        self.receiveAddress = ""
+        self.activeReceiveAddresses = []
+        self.archivedReceiveAddresses = []
+        self.transactions = []
+        self.walletSummaries = []
         self.appendLog("[AUTH] Operator '\(session.username)' logged in via recovery code. Wallet Manager unlocked.")
         self.refreshWallet()
         self.refreshWalletInventory()
@@ -425,6 +450,7 @@ public final class AppState: ObservableObject {
     public func lockWallet() {
         Task { @MainActor in
             await authCoordinator.invalidateSession()
+            await walletManager.resetActiveWallet()
             self.authSession = nil
             self.isWalletTabUnlocked = false
             self.isMigrationPending = await authCoordinator.isMigrationPending
@@ -434,6 +460,7 @@ public final class AppState: ObservableObject {
             self.activeReceiveAddresses = []
             self.archivedReceiveAddresses = []
             self.transactions = []
+            self.walletSummaries = []
             self.appendLog("[AUTH] Wallet Manager locked.")
         }
     }
@@ -594,11 +621,14 @@ public final class AppState: ObservableObject {
         appendLog("[WALLET] Existing wallet '\(name)' loaded.")
     }
 
-    /// Enumerates loaded and on-disk wallets discovered in the node datadir.
+    /// Enumerates loaded and on-disk wallets discovered in the node datadir, strictly scoped to the authenticated operator.
     public func fetchAvailableWallets() async -> (loaded: [String], onDisk: [String]) {
-        let loaded = (try? await walletManager.rpcClient.listWallets()) ?? []
-        let dir = (try? await walletManager.rpcClient.listWalletDir())
-        let onDisk = dir?.wallets.map { $0.name } ?? []
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            return (loaded: [], onDisk: [])
+        }
+        let summaries = (try? await walletInventory.refreshInventory(capability: session)) ?? []
+        let loaded = summaries.filter { $0.isLoaded && !$0.isArchived }.map { $0.name }
+        let onDisk = summaries.filter { !$0.isArchived }.map { $0.name }
         return (loaded: loaded, onDisk: onDisk)
     }
 

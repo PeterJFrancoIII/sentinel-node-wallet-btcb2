@@ -254,4 +254,109 @@ final class MultiUserAuthAndPricingTests: XCTestCase {
         XCTAssertFalse(cleared.isOverridden)
         XCTAssertNil(cleared.customPrice)
     }
+
+    // MARK: - Multi-Operator Wallet Isolation
+
+    func testMultiOperatorWalletIsolation() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_wallet_isolation_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        // 1. Enroll Alice & Bob
+        let (aliceSecret, _, aliceRecoveryCodes) = try await coordinator.generateEnrollmentSecret(username: "alice")
+        let now = Date().timeIntervalSince1970
+        let aliceTotp = WalletAuthCoordinator.generateTOTP(secret: aliceSecret, time: now)
+        _ = try await coordinator.enroll(
+            username: "alice",
+            password: "AliceStrongPassword123!@#",
+            secretBase32: aliceSecret,
+            totpCode: aliceTotp,
+            recoveryCodes: aliceRecoveryCodes
+        )
+
+        let (bobSecret, _, bobRecoveryCodes) = try await coordinator.generateEnrollmentSecret(username: "bob")
+        let bobTotp = WalletAuthCoordinator.generateTOTP(secret: bobSecret, time: now)
+        _ = try await coordinator.enroll(
+            username: "bob",
+            password: "BobStrongPassword456!@#",
+            secretBase32: bobSecret,
+            totpCode: bobTotp,
+            recoveryCodes: bobRecoveryCodes
+        )
+
+        // 2. Setup Wallet Inventory with mock RPC
+        let rpc = BitcoinRPCClient(user: "testuser", password: "testpassword")
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        // 3. Register Alice's wallet and Bob's wallet
+        await inventory.setOwner(for: "Alice_Vault", owner: "alice")
+        await inventory.setOwner(for: "Bob_Treasury", owner: "bob")
+
+        // 4. Verify ownership queries
+        let isAliceOwnerOfAliceVault = await inventory.isWalletOwnedBy(walletName: "Alice_Vault", username: "alice")
+        let isBobOwnerOfAliceVault = await inventory.isWalletOwnedBy(walletName: "Alice_Vault", username: "bob")
+        let isBobOwnerOfBobTreasury = await inventory.isWalletOwnedBy(walletName: "Bob_Treasury", username: "bob")
+        let isAliceOwnerOfBobTreasury = await inventory.isWalletOwnedBy(walletName: "Bob_Treasury", username: "alice")
+
+        XCTAssertTrue(isAliceOwnerOfAliceVault, "Alice must be recognized as owner of Alice_Vault")
+        XCTAssertFalse(isBobOwnerOfAliceVault, "Bob must NOT be recognized as owner of Alice_Vault")
+        XCTAssertTrue(isBobOwnerOfBobTreasury, "Bob must be recognized as owner of Bob_Treasury")
+        XCTAssertFalse(isAliceOwnerOfBobTreasury, "Alice must NOT be recognized as owner of Bob_Treasury")
+
+        // 5. Verify case-insensitivity in ownership checks
+        let caseInsensitiveAlice = await inventory.isWalletOwnedBy(walletName: "alice_vault", username: "ALICE")
+        XCTAssertTrue(caseInsensitiveAlice, "Ownership check must be case-insensitive")
+
+        // 6. Verify unauthorized archive attempt by non-owner fails closed
+        let aliceLoginTime = now + 40
+        let activeAliceCap = try await coordinator.login(
+            username: "alice",
+            password: "AliceStrongPassword123!@#",
+            totpCode: WalletAuthCoordinator.generateTOTP(secret: aliceSecret, time: aliceLoginTime),
+            time: aliceLoginTime
+        )
+        do {
+            try await inventory.archiveWallet(name: "Bob_Treasury", capability: activeAliceCap)
+            XCTFail("Alice archiving Bob's wallet must throw unauthorized error")
+        } catch let err as WalletAuthError {
+            guard case .unauthorizedHighRiskAction = err else {
+                XCTFail("Expected unauthorizedHighRiskAction but got \(err)")
+                return
+            }
+        }
+
+        // 7. Verify unauthorized unarchive attempt fails closed
+        let bobLoginTime = now + 80
+        let activeBobCap = try await coordinator.login(
+            username: "bob",
+            password: "BobStrongPassword456!@#",
+            totpCode: WalletAuthCoordinator.generateTOTP(secret: bobSecret, time: bobLoginTime),
+            time: bobLoginTime
+        )
+        do {
+            try await inventory.unarchiveWallet(name: "Alice_Vault", capability: activeBobCap)
+            XCTFail("Bob unarchiving Alice's wallet must throw unauthorized error")
+        } catch let err as WalletAuthError {
+            guard case .unauthorizedHighRiskAction = err else {
+                XCTFail("Expected unauthorizedHighRiskAction but got \(err)")
+                return
+            }
+        }
+
+        // 8. Verify renaming migrates ownership cleanly
+        await inventory.renameWalletMetadata(from: "Alice_Vault", to: "Alice_ColdStorage")
+        let isAliceOwnerOfRenamed = await inventory.isWalletOwnedBy(walletName: "Alice_ColdStorage", username: "alice")
+        let isOldNameStillOwned = await inventory.isWalletOwnedBy(walletName: "Alice_Vault", username: "alice")
+        XCTAssertTrue(isAliceOwnerOfRenamed, "Alice must own renamed wallet Alice_ColdStorage")
+        XCTAssertFalse(isOldNameStillOwned, "Old wallet name must no longer be owned")
+    }
 }

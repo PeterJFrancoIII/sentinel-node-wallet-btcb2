@@ -283,10 +283,16 @@ public actor WalletManager {
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
     public let stagingDirectory: URL
+    public let walletInventory: WalletInventory
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     private var isCreatingWallet = false
     private var activeStagingSessionIDs = Set<String>()
+
+    public func resetActiveWallet() {
+        self.currentWalletName = nil
+        self.latestSnapshot = nil
+    }
 
     public func registerStagingSession(_ id: String) {
         activeStagingSessionIDs.insert(id)
@@ -310,11 +316,16 @@ public actor WalletManager {
         authCoordinator: WalletAuthCoordinator? = nil,
         allowUnauthenticatedForTesting: Bool = false,
         initialWalletName: String? = nil,
-        stagingDirectory: URL? = nil
+        stagingDirectory: URL? = nil,
+        walletInventory: WalletInventory? = nil
     ) {
         self.rpcClient = rpcClient
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        self.dataDirectory = dataDirectory ?? appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
+        let defaultDataDir = authCoordinator?.dataDirectory
+            ?? stagingDirectory?.deletingLastPathComponent()
+            ?? appSupport.appendingPathComponent("NodePocketBTCB2", isDirectory: true)
+        let datadir = dataDirectory ?? defaultDataDir
+        self.dataDirectory = datadir
         self.keychainHelper = keychainHelper
         self.passphraseCustody = passphraseCustody ?? keychainHelper
         self.addressBook = addressBook
@@ -324,6 +335,13 @@ public actor WalletManager {
         self.currentWalletName = initialWalletName
         self.stagingDirectory = stagingDirectory ?? URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Library/Application Support/NodePocketBTCB2/backups/staging")
+        self.walletInventory = walletInventory ?? WalletInventory(
+            rpcClient: rpcClient,
+            dataDirectory: datadir,
+            receiveAddressStore: receiveAddressStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: allowUnauthenticatedForTesting
+        )
     }
 
     /// Purges any abandoned staging session directories from previous unexpected terminations.
@@ -392,7 +410,29 @@ public actor WalletManager {
     /// If no wallet exists on disk or in memory, fails closed rather than creating a silently unencrypted default.
     @discardableResult
     public func ensureDefaultWalletLoaded(preferredName: String = "default_wallet", capability: WalletAuthCapability? = nil) async throws -> String {
-        // 1. Check if any wallet is already loaded in memory
+        try await ensureAuthenticated(capability: capability)
+
+        // STRICT MULTI-OPERATOR ISOLATION:
+        // When an authenticated capability is provided, load ONLY a wallet owned by this operator.
+        if let user = capability?.username, !user.isEmpty {
+            let summaries = try await walletInventory.refreshInventory(capability: capability)
+            if let firstOwned = summaries.first(where: { !$0.isArchived })?.name ?? summaries.first?.name {
+                let loaded = try await rpcClient.listWallets()
+                if !loaded.contains(firstOwned) {
+                    _ = try await rpcClient.loadWallet(name: firstOwned)
+                }
+                self.currentWalletName = firstOwned
+                _ = try? await refreshWalletInfo(capability: capability)
+                return firstOwned
+            } else {
+                // This operator owns no wallets yet. Do NOT load another operator's wallet!
+                self.currentWalletName = nil
+                self.latestSnapshot = nil
+                throw WalletSecurityError.walletOnboardingRequired
+            }
+        }
+
+        // Unauthenticated fallback path (e.g. CLI testing)
         let loaded = try await rpcClient.listWallets()
         if let first = loaded.first, !first.isEmpty {
             self.currentWalletName = first
@@ -607,6 +647,11 @@ public actor WalletManager {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
 
+        // Record operator ownership for multi-operator isolation
+        if let user = capability?.username, !user.isEmpty {
+            await walletInventory.setOwner(for: name, owner: user)
+        }
+
         // Generate and lock Canonical Receive Address for new wallet
         if let canonical = try? await rpcClient.getNewAddress(
             label: "Canonical Creation Address",
@@ -630,6 +675,12 @@ public actor WalletManager {
     public func loadWallet(name: String, capability: WalletAuthCapability? = nil) async throws {
         try await ensureAuthenticated(capability: capability)
         guard Self.isValidWalletName(name) else { throw WalletSecurityError.invalidWalletName }
+        if let user = capability?.username, !user.isEmpty {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: name, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to access wallet '\(name)'.")
+            }
+        }
         let loaded = try await rpcClient.listWallets()
         if !loaded.contains(name) {
             _ = try await rpcClient.loadWallet(name: name)
@@ -646,12 +697,20 @@ public actor WalletManager {
     /// Renames an existing wallet, moving its on-disk files, updating address store bindings, and reloading it in Bitcoin Knots.
     public func renameWallet(oldName: String, newName: String, capability: WalletAuthCapability? = nil) async throws {
         try await ensureAuthenticated(capability: capability)
-        guard Self.isValidWalletName(newName) else {
-            throw WalletCreationError.invalidWalletName("New wallet name contains invalid characters.")
-        }
         let cleanOld = oldName.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanNew = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanOld != cleanNew else { return }
+
+        if let user = capability?.username, !user.isEmpty {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: cleanOld, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to rename wallet '\(cleanOld)'.")
+            }
+        }
+
+        guard Self.isValidWalletName(cleanNew) else {
+            throw WalletCreationError.invalidWalletName("New wallet name contains invalid characters.")
+        }
 
         // Check that newName does not already exist on disk
         let diskResponse = try await rpcClient.listWalletDir()
@@ -692,6 +751,9 @@ public actor WalletManager {
         // Migrate persistent receive address store
         receiveAddressStore.migrateWallet(from: cleanOld, to: cleanNew)
 
+        // Migrate metadata registry ownership
+        await walletInventory.renameWalletMetadata(from: cleanOld, to: cleanNew)
+
         // Reload under new name
         if wasLoaded {
             _ = try await rpcClient.loadWallet(name: cleanNew)
@@ -705,6 +767,12 @@ public actor WalletManager {
     /// Bumps the fee of a pending unconfirmed transaction using RBF (BIP 125).
     public func bumpFee(txid: String, newFeeRateSatPerVB: Double? = nil, capability: WalletAuthCapability? = nil) async throws -> BumpFeeResponse {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username, let walletName = currentWalletName {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: walletName, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to bump fees for wallet '\(walletName)'.")
+            }
+        }
         if rpcClient.isBroadcastRestricted {
             throw WalletSecurityError.signingPathUnverified
         }
@@ -718,6 +786,12 @@ public actor WalletManager {
     /// Fetches latest balances and encryption status for the active wallet.
     public func refreshWalletInfo(capability: WalletAuthCapability? = nil) async throws -> WalletSnapshot {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username, let walletName = currentWalletName {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: walletName, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to access wallet '\(walletName)'.")
+            }
+        }
         let info = try await rpcClient.getWalletInfo(walletName: currentWalletName)
         let balances = try await rpcClient.getBalances(walletName: currentWalletName)
 
@@ -859,6 +933,12 @@ public actor WalletManager {
     /// Fetches recent wallet transactions (receive, send, coinbase).
     public func fetchRecentTransactions(count: Int = 30, capability: WalletAuthCapability? = nil) async throws -> [TransactionRecord] {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username, let walletName = currentWalletName {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: walletName, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to access transactions for wallet '\(walletName)'.")
+            }
+        }
         return try await rpcClient.listTransactions(walletName: currentWalletName, count: count)
     }
 
@@ -886,9 +966,15 @@ public actor WalletManager {
             }
         }
 
-        // 3. Spendable balance verification
+        // 3. Spendable balance verification & ownership check
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
+        }
+        if let user = capability?.username, !user.isEmpty {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: walletName, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to send from wallet '\(walletName)'.")
+            }
         }
         let balances = try await rpcClient.getBalances(walletName: walletName)
         let spendableSats = SatoshiMath.toSats(btc: balances.mine.trusted)
@@ -972,9 +1058,15 @@ public actor WalletManager {
             }
         }
 
-        // 3. Resolve passphrase
+        // 3. Resolve passphrase & verify ownership
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
+        }
+        if let user = capability?.username, !user.isEmpty {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: walletName, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to send from wallet '\(walletName)'.")
+            }
         }
 
         let passphrase: String
@@ -1072,6 +1164,9 @@ public actor WalletManager {
             throw WalletSecurityError.restoreTargetWalletAlreadyExists(trimmedName)
         }
         let resp = try await rpcClient.restoreWallet(name: trimmedName, backupFile: backupFile.path)
+        if let user = capability?.username, !user.isEmpty {
+            await walletInventory.setOwner(for: resp.name, owner: user)
+        }
         self.currentWalletName = resp.name
         _ = try await refreshWalletInfo(capability: capability)
         return resp.name
@@ -1089,6 +1184,12 @@ public actor WalletManager {
         let target = targetWalletName ?? currentWalletName ?? ""
         guard !target.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
+        }
+        if let user = capability?.username, !user.isEmpty {
+            let isOwned = await walletInventory.isWalletOwnedBy(walletName: target, username: user)
+            guard isOwned else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to export wallet '\(target)'.")
+            }
         }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {

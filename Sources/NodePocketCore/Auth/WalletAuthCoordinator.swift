@@ -225,7 +225,7 @@ public struct MultiAuthRegistry: Codable, Sendable {
 }
 
 public actor WalletAuthCoordinator {
-    private let dataDirectory: URL
+    public nonisolated let dataDirectory: URL
     private let registryURL: URL
     private var records: [String: AuthRegistryRecord] = [:]
     private var activeSession: WalletAuthCapability?

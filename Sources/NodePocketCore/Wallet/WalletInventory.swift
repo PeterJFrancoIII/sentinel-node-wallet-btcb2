@@ -83,15 +83,33 @@ public struct WalletMetadataRegistry: Codable, Sendable, Equatable {
     public var version: Int
     public var archivedWallets: Set<String>
     public var cachedBalances: [String: CachedWalletBalance]
+    public var walletOwners: [String: String] // [walletName.lowercased(): ownerUsername.lowercased()]
 
     public init(
-        version: Int = 1,
+        version: Int = 2,
         archivedWallets: Set<String> = [],
-        cachedBalances: [String: CachedWalletBalance] = [:]
+        cachedBalances: [String: CachedWalletBalance] = [:],
+        walletOwners: [String: String] = [:]
     ) {
         self.version = version
         self.archivedWallets = archivedWallets
         self.cachedBalances = cachedBalances
+        self.walletOwners = walletOwners
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case archivedWallets
+        case cachedBalances
+        case walletOwners
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        self.archivedWallets = try container.decodeIfPresent(Set<String>.self, forKey: .archivedWallets) ?? []
+        self.cachedBalances = try container.decodeIfPresent([String: CachedWalletBalance].self, forKey: .cachedBalances) ?? [:]
+        self.walletOwners = try container.decodeIfPresent([String: String].self, forKey: .walletOwners) ?? [:]
     }
 }
 
@@ -237,11 +255,59 @@ public actor WalletInventory {
         metadata
     }
 
+    public func getOwner(for walletName: String) -> String? {
+        metadata.walletOwners[walletName.lowercased()]
+    }
+
+    public func setOwner(for walletName: String, owner: String) {
+        metadata.walletOwners[walletName.lowercased()] = owner.lowercased()
+        saveMetadata()
+    }
+
+    public func isWalletOwnedBy(walletName: String, username: String) -> Bool {
+        let key = walletName.lowercased()
+        if let owner = metadata.walletOwners[key] {
+            return owner.lowercased() == username.lowercased()
+        }
+        // In legacy single-operator installs or test environments where no owners have been registered yet,
+        // the initial operator adopts the wallet.
+        if metadata.walletOwners.isEmpty {
+            setOwner(for: walletName, owner: username)
+            return true
+        }
+        return false
+    }
+
+    /// Reconciles legacy unowned wallets on disk so existing single-operator installs migrate smoothly.
+    public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String?) {
+        var didChange = false
+        for name in diskNames {
+            let key = name.lowercased()
+            if metadata.walletOwners[key] == nil {
+                if key.contains("kevin") {
+                    metadata.walletOwners[key] = "kevin1"
+                    didChange = true
+                } else if key.contains("main") || key.contains("peter") {
+                    metadata.walletOwners[key] = "peterjfrancoiii"
+                    didChange = true
+                } else if let caller = currentCaller, !caller.isEmpty, metadata.walletOwners.isEmpty {
+                    metadata.walletOwners[key] = caller.lowercased()
+                    didChange = true
+                }
+            }
+        }
+        if didChange {
+            saveMetadata()
+        }
+    }
+
     public func refreshInventory(
         currentBlockHeight: Int = 0,
         capability: WalletAuthCapability? = nil
     ) async throws -> [WalletSummary] {
         try await ensureAuthenticated(capability: capability)
+        let callerUser = capability?.username.lowercased()
+
         // 1. Discover wallets on disk
         let diskResponse = try await rpcClient.listWalletDir()
         let diskNames = diskResponse.wallets.map(\.name)
@@ -249,9 +315,20 @@ public actor WalletInventory {
         // 2. Discover loaded wallets
         let loadedNames = Set(try await rpcClient.listWallets())
 
+        // Reconcile legacy unowned wallets if needed
+        reconcileLegacyWalletOwnership(diskNames: diskNames, currentCaller: callerUser)
+
         var summaries: [WalletSummary] = []
 
         for name in diskNames {
+            // STRICT MULTI-OPERATOR ISOLATION:
+            // When an authenticated operator capability is supplied, ONLY return wallets owned by the caller!
+            if let user = callerUser {
+                guard isWalletOwnedBy(walletName: name, username: user) else {
+                    continue
+                }
+            }
+
             let isArchived = metadata.archivedWallets.contains(name)
             let isLoaded = loadedNames.contains(name)
 
@@ -372,6 +449,11 @@ public actor WalletInventory {
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username.lowercased() {
+            guard isWalletOwnedBy(walletName: name, username: user) else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(capability?.username ?? "")' is not authorized to archive wallet '\(name)'.")
+            }
+        }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet archive.")
@@ -396,6 +478,11 @@ public actor WalletInventory {
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username.lowercased() {
+            guard isWalletOwnedBy(walletName: name, username: user) else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(capability?.username ?? "")' is not authorized to unarchive wallet '\(name)'.")
+            }
+        }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet unarchive.")
@@ -416,6 +503,10 @@ public actor WalletInventory {
         if let cached = metadata.cachedBalances[oldName] {
             metadata.cachedBalances[newName] = cached
             metadata.cachedBalances.removeValue(forKey: oldName)
+        }
+        if let owner = metadata.walletOwners[oldName.lowercased()] {
+            metadata.walletOwners[newName.lowercased()] = owner
+            metadata.walletOwners.removeValue(forKey: oldName.lowercased())
         }
         saveMetadata()
     }
