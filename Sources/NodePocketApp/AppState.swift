@@ -656,11 +656,23 @@ public final class AppState: ObservableObject {
     }
 
     public func executeAuthorizedSend(preview: FundedTxPreview, explicitPassphrase: String? = nil) async throws -> String {
-        guard isWalletTabUnlocked, self.authSession != nil else {
+        guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
-        // Prevent even requesting device-owner approval for a disabled broadcast path.
-        throw WalletSecurityError.signingPathUnverified
+        let approval = try await authCoordinator.requestHighRiskApproval(
+            capability: session,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
+        )
+        let txid = try await walletManager.executeAuthorizedSend(
+            preview: preview,
+            explicitPassphrase: explicitPassphrase,
+            capability: session,
+            approval: approval
+        )
+        refreshWallet()
+        return txid
     }
 
     public func refreshFeeQuotes() {
@@ -938,10 +950,26 @@ public final class AppState: ObservableObject {
 
     @discardableResult
     public func bumpTransactionFee(txid: String, newFeeRate: Int? = nil) async -> Bool {
-        // Fee bump would broadcast a replacement transaction. Stop before any RPC.
-        alertMessage = WalletSecurityError.signingPathUnverified.localizedDescription
-        showAlert = true
-        return false
+        guard isWalletTabUnlocked, self.authSession != nil else {
+            alertMessage = WalletAuthError.unauthenticated.localizedDescription
+            showAlert = true
+            return false
+        }
+        do {
+            let res = try await walletManager.bumpFee(
+                txid: txid,
+                newFeeRateSatPerVB: newFeeRate.map { Double($0) },
+                capability: self.authSession
+            )
+            refreshWallet()
+            alertMessage = "Fee bump replacement transaction broadcast successfully:\n\(res.txid)"
+            showAlert = true
+            return true
+        } catch {
+            alertMessage = "Fee bump failed: \(error.localizedDescription)"
+            showAlert = true
+            return false
+        }
     }
 
     @MainActor

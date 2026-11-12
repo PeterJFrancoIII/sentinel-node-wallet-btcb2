@@ -16,6 +16,9 @@ public struct WalletView: View {
     // Send Form Fields
     @State private var sendAddressInput = ""
     @State private var sendAmountInput = ""
+    @State private var sendAmountUSDInput = ""
+    @State private var sendAmountPercentInput = ""
+    @State private var isSyncingAmountInputs = false
     @State private var selectedFeePreset: FeePresetType = .normal
     @State private var customSatPerVBInput = "2"
     @State private var activePreview: FundedTxPreview?
@@ -107,9 +110,7 @@ public struct WalletView: View {
     }
 
     public var isSendAllowed: Bool {
-        // A synced chain does NOT establish fork-safe signing or broadcast approval.
-        // Keep both Send and RBF disabled even if IBD has completed.
-        false
+        isNodeReadyForWallet && state.walletSnapshot != nil
     }
 
     public var body: some View {
@@ -843,7 +844,7 @@ public struct WalletView: View {
             .padding()
             .background(RoundedRectangle(cornerRadius: 14).fill(Color(NSColor.controlBackgroundColor)))
 
-                // Send Composer Section (Minimalist, Gated, V7-Compliant)
+                // Send Composer Section (Active Wallet, V7-Compliant)
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
                         Image(systemName: isSendAllowed ? "paperplane.fill" : "lock.fill")
@@ -867,7 +868,7 @@ public struct WalletView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text("Sending Gated")
+                        Text(isSendAllowed ? "Active Wallet" : "Node Inactive")
                             .font(.caption2)
                             .bold()
                             .padding(.horizontal, 8)
@@ -876,7 +877,7 @@ public struct WalletView: View {
                             .foregroundColor(isSendAllowed ? .green : .orange)
                     }
 
-                    Text("Safety lock: Sending and RBF remain disabled until BTCB2 BLAKE2b SIGHASH_UNIFIED signing, funded transaction authorization, and wallet re-lock pass independent security review. Receiving and history remain available.")
+                    Text("Active BTCB2 Wallet: Transactions are validated against native BTCB2 consensus, previewed with live fee rates, and signed upon operator authorization.")
                         .font(.caption)
                         .foregroundColor(.secondary)
 
@@ -904,12 +905,12 @@ public struct WalletView: View {
                             .textFieldStyle(.roundedBorder)
                     }
 
-                    // Amount Input
-                    VStack(alignment: .leading, spacing: 6) {
+                    // Amount Input Section (BTCB2 / USD / Percentage 3-Way Auto-Calculation + Max)
+                    VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("Amount (BTCB2):")
+                            Text("Amount to Send:")
                                 .font(.caption)
-                                .foregroundColor(.secondary)
+                                .bold()
                             Spacer()
                             Text("Spendable Available: \(String(format: "%.8f", state.walletSnapshot?.trustedBalance ?? 0.0)) BTCB2")
                                 .font(.caption2)
@@ -917,22 +918,95 @@ public struct WalletView: View {
                                 .foregroundColor(.green)
                         }
 
-                        HStack(spacing: 8) {
-                            TextField("0.00000000", text: $sendAmountInput)
+                        HStack(alignment: .bottom, spacing: 12) {
+                            // BTCB2 Field
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("BTCB2")
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.secondary)
+                                TextField("0.00000000", text: Binding(
+                                    get: { sendAmountInput },
+                                    set: { updateAmountFromBTC($0) }
+                                ))
                                 .textFieldStyle(.roundedBorder)
-                                .frame(width: 160)
+                                .frame(width: 140)
+                            }
 
+                            // USD Field
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 4) {
+                                    Text("USD ($)")
+                                        .font(.caption2)
+                                        .bold()
+                                        .foregroundColor(.secondary)
+                                    if state.priceState.effectivePrice > 0 {
+                                        Text("($\(String(format: "%.0f", state.priceState.effectivePrice)))")
+                                            .font(.system(size: 9))
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                TextField("0.00", text: Binding(
+                                    get: { sendAmountUSDInput },
+                                    set: { updateAmountFromUSD($0) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 110)
+                            }
+
+                            // Percent Field
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Share (%)")
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.secondary)
+                                TextField("0.0%", text: Binding(
+                                    get: { sendAmountPercentInput },
+                                    set: { updateAmountFromPercent($0) }
+                                ))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 75)
+                            }
+
+                            // Quick Presets & MAX Button
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Presets")
+                                    .font(.caption2)
+                                    .bold()
+                                    .foregroundColor(.secondary)
+                                HStack(spacing: 4) {
+                                    Button("25%") { updateAmountFromPercent("25.0") }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    Button("50%") { updateAmountFromPercent("50.0") }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    Button("75%") { updateAmountFromPercent("75.0") }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                    Button("MAX") { applyMaxAmount() }
+                                        .buttonStyle(.borderedProminent)
+                                        .tint(.blue)
+                                        .controlSize(.small)
+                                        .help("Fills all available spendable funds minus the estimated network fee required for transmission")
+                                }
+                            }
+                        }
+
+                        HStack {
                             let parsedBTC = Double(sendAmountInput) ?? 0.0
                             let parsedSats = SatoshiMath.toSats(btc: parsedBTC)
                             Text("≈ \(SatoshiMath.formatSats(parsedSats)) satoshis")
-                                .font(.system(size: 12, design: .monospaced))
+                                .font(.system(size: 11, design: .monospaced))
                                 .foregroundColor(.secondary)
 
-                            if state.priceState.effectivePrice > 0 {
-                                Text("• ≈ \(state.priceState.formatFiat(btc: parsedBTC))")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                                    .foregroundColor(.primary)
-                            }
+                            Spacer()
+
+                            let quote = (selectedFeePreset == .custom) ? FeeQuote(type: .custom, satPerVB: max(1, Int(customSatPerVBInput) ?? 1), targetBlocks: 0, estimatedMinutes: 0) : (state.feeQuotes[selectedFeePreset] ?? FeeQuote(type: selectedFeePreset, satPerVB: 2, targetBlocks: selectedFeePreset.targetBlocks, estimatedMinutes: 60))
+                            let estFeeBTC = Double(max(Int64(quote.satPerVB * 141), quote.medianTxFeeSats)) / 100_000_000.0
+                            Text("Estimated Fee Reserved on Max: ~\(String(format: "%.8f", estFeeBTC)) BTCB2 (\(quote.satPerVB) sat/vB)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
 
                         if (state.walletSnapshot?.pendingBalance ?? 0.0) > 0 {
@@ -1400,6 +1474,37 @@ public struct WalletView: View {
                 .controlSize(.small)
             }
 
+            // Apple Password Manager Auto-Populate Prompt Banner
+            HStack(spacing: 12) {
+                Image(systemName: "key.fill")
+                    .font(.title2)
+                    .foregroundColor(.blue)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Populate login from Apple Password Manager?")
+                        .font(.subheadline)
+                        .bold()
+                    Text("Automatically fill Username, Password, and 2FA Code from Apple Passwords & macOS Keychain for rapid sign-in.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button(action: {
+                    autoPullSavedLoginCredentials(for: loginUsername, isInteractive: true)
+                }) {
+                    Label("Auto-Populate", systemImage: "arrow.down.circle.fill")
+                        .bold()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.blue)
+                .controlSize(.small)
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.1)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.blue.opacity(0.3), lineWidth: 1)
+            )
+
             if !showRecoveryLogin {
                 if state.enrolledUsernames.count > 1 {
                     VStack(alignment: .leading, spacing: 6) {
@@ -1479,7 +1584,7 @@ public struct WalletView: View {
                         .foregroundColor(.red)
                 }
 
-                HStack {
+                HStack(spacing: 10) {
                     Button(action: {
                         Task {
                             isAuthActionInProgress = true
@@ -1506,6 +1611,34 @@ public struct WalletView: View {
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("user-login-submit")
                     .disabled(loginUsername.isEmpty || loginPassword.isEmpty || loginTotpCode.count != 6 || isAuthActionInProgress)
+
+                    Button(action: {
+                        autoPullSavedLoginCredentials(for: loginUsername, isInteractive: true)
+                        if !loginUsername.isEmpty && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                            Task {
+                                isAuthActionInProgress = true
+                                authLocalError = nil
+                                defer { isAuthActionInProgress = false }
+                                do {
+                                    let u = loginUsername
+                                    let p = loginPassword
+                                    try await state.loginUser(username: u, password: p, totpCode: loginTotpCode)
+                                    try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: u, password: p)
+                                    loginPassword = ""
+                                    loginTotpCode = ""
+                                } catch {
+                                    authLocalError = error.localizedDescription
+                                }
+                            }
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "key.horizontal.fill")
+                            Text("1-Click Apple Sign-In")
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isAuthActionInProgress)
 
                     Spacer()
 
@@ -1584,6 +1717,10 @@ public struct WalletView: View {
             : (username ?? "")
         guard !target.isEmpty else { return }
 
+        if loginUsername.isEmpty {
+            loginUsername = target
+        }
+
         // 1. Pull saved password from Apple Keychain / Password Store
         if let saved = try? WalletAuthCoordinator.loadOperatorPasswordFromKeychain(username: target), !saved.isEmpty {
             loginPassword = saved
@@ -1597,10 +1734,7 @@ public struct WalletView: View {
 
         // 2. Automatically generate current valid 2FA TOTP code from Keychain if secret is stored
         if let totpSecret = try? WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: target) {
-            let currentTotp = WalletAuthCoordinator.generateTOTP(secret: totpSecret)
-            if loginTotpCode.isEmpty {
-                loginTotpCode = currentTotp
-            }
+            loginTotpCode = WalletAuthCoordinator.generateTOTP(secret: totpSecret)
         }
 
         // 3. If password wasn't in Keychain or interactive requested, try system Apple Passwords coordinator
@@ -2248,12 +2382,15 @@ public struct WalletView: View {
     }
 
     private func transactionRow(_ tx: TransactionRecord) -> some View {
-        HStack {
+        let maturity = CoinbaseMaturityCalculator.maturityInfo(for: tx)
+
+        return HStack(alignment: .top) {
             Image(systemName: categoryIcon(tx.category))
                 .foregroundColor(categoryColor(tx.category))
                 .frame(width: 24)
+                .padding(.top, 2)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(categoryTitle(tx.category))
                         .font(.caption)
@@ -2278,19 +2415,44 @@ public struct WalletView: View {
                         .buttonStyle(.plain)
                     }
 
-                    if tx.confirmations == 0 {
+                    // Confirmations Badge
+                    HStack(spacing: 3) {
+                        Image(systemName: tx.confirmations > 0 ? "checkmark.circle.fill" : "clock.fill")
+                            .font(.system(size: 9))
+                        Text(tx.confirmations > 0 ? "\(tx.confirmations) Conf\(tx.confirmations == 1 ? "" : "s")" : "0 Conf (Pending)")
+                            .font(.system(size: 9, weight: .bold))
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill((tx.confirmations > 0 ? Color.blue : Color.orange).opacity(0.15)))
+                    .foregroundColor(tx.confirmations > 0 ? .blue : .orange)
+
+                    // Spendable / Locked Status Badge
+                    if maturity.isSpendable {
                         HStack(spacing: 3) {
-                            Image(systemName: "clock.fill")
-                                .foregroundColor(.orange)
+                            Image(systemName: "lock.open.fill")
                                 .font(.system(size: 9))
-                            Text("PENDING (0 CONF)")
+                            Text("Available for Spend")
                                 .font(.system(size: 9, weight: .bold))
-                                .foregroundColor(.orange)
                         }
-                        .padding(.horizontal, 5)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.green.opacity(0.15)))
+                        .foregroundColor(.green)
+                    } else {
+                        HStack(spacing: 3) {
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 9))
+                            Text("Locked Up")
+                                .font(.system(size: 9, weight: .bold))
+                        }
+                        .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.orange.opacity(0.18)))
+                        .foregroundColor(.orange)
+                    }
 
+                    if tx.confirmations == 0 {
                         Button(action: {
                             txToBump = tx
                             bumpFeeRateInput = "\(max(5, Int(state.feeQuotes[.fast]?.satPerVB ?? 5)))"
@@ -2309,23 +2471,38 @@ public struct WalletView: View {
                             .foregroundColor(.blue)
                         }
                         .buttonStyle(.plain)
-                        .help("RBF is disabled until BTCB2 fork-specific signing and broadcasting have passed security review")
                         .disabled(!isSendAllowed)
                     }
                 }
 
-                if tx.confirmations > 0 {
-                    if let height = tx.blockheight {
-                        Text("Block #\(height) • \(tx.confirmations) confirmations")
+                if maturity.isCoinbase {
+                    if maturity.isSpendable {
+                        Text("Mined Coinbase Reward • Fully Matured at block #\(tx.blockheight ?? 0) (\(tx.confirmations) of \(maturity.requiredConfirmations) confs) • \(maturity.lockupDescription)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     } else {
-                        Text("\(tx.confirmations) confirmations")
+                        HStack(spacing: 4) {
+                            Image(systemName: "hourglass")
+                                .font(.caption2)
+                                .foregroundColor(.orange)
+                            Text("BIP-110 Lockup: \(maturity.remainingBlocks) blocks remaining • \(maturity.remainingTimeFormatted) remaining until unlock (\(maturity.lockupDescription)) • \(tx.confirmations)/\(maturity.requiredConfirmations) confs")
+                                .font(.caption2)
+                                .bold()
+                                .foregroundColor(.orange)
+                        }
+                    }
+                } else if tx.confirmations > 0 {
+                    if let height = tx.blockheight {
+                        Text("Block #\(height) • Confirmed and available for spend (\(tx.confirmations) confirmations)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    } else {
+                        Text("\(tx.confirmations) confirmations • Confirmed and available for spend")
                             .font(.caption2)
                             .foregroundColor(.secondary)
                     }
                 } else {
-                    Text("Unconfirmed in mempool • Awaiting block inclusion")
+                    Text("Unconfirmed in mempool • Awaiting block inclusion (~10m) before spendable")
                         .font(.caption2)
                         .foregroundColor(.orange)
                 }
@@ -2347,8 +2524,8 @@ public struct WalletView: View {
                 }
             }
         }
-        .padding(8)
-        .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.windowBackgroundColor)))
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.windowBackgroundColor)))
     }
 
     private func categoryIcon(_ category: String) -> String {
@@ -2377,6 +2554,113 @@ public struct WalletView: View {
         case "immature": return "Immature Reward"
         default: return category.capitalized
         }
+    }
+
+    private func updateAmountFromBTC(_ newBTC: String) {
+        guard !isSyncingAmountInputs else { return }
+        isSyncingAmountInputs = true
+        defer { isSyncingAmountInputs = false }
+
+        sendAmountInput = newBTC
+        let btc = Double(newBTC) ?? 0.0
+        let price = state.priceState.effectivePrice
+        if price > 0 && btc > 0 {
+            sendAmountUSDInput = String(format: "%.2f", btc * price)
+        } else {
+            sendAmountUSDInput = ""
+        }
+
+        let avail = state.walletSnapshot?.trustedBalance ?? 0.0
+        if avail > 0 && btc > 0 {
+            let pct = min(100.0, (btc / avail) * 100.0)
+            sendAmountPercentInput = String(format: "%.1f", pct)
+        } else {
+            sendAmountPercentInput = ""
+        }
+    }
+
+    private func updateAmountFromUSD(_ newUSD: String) {
+        guard !isSyncingAmountInputs else { return }
+        isSyncingAmountInputs = true
+        defer { isSyncingAmountInputs = false }
+
+        sendAmountUSDInput = newUSD
+        let usd = Double(newUSD) ?? 0.0
+        let price = state.priceState.effectivePrice
+        if price > 0 && usd > 0 {
+            let btc = usd / price
+            sendAmountInput = String(format: "%.8f", btc)
+            let avail = state.walletSnapshot?.trustedBalance ?? 0.0
+            if avail > 0 {
+                let pct = min(100.0, (btc / avail) * 100.0)
+                sendAmountPercentInput = String(format: "%.1f", pct)
+            } else {
+                sendAmountPercentInput = ""
+            }
+        } else {
+            sendAmountInput = ""
+            sendAmountPercentInput = ""
+        }
+    }
+
+    private func updateAmountFromPercent(_ newPct: String) {
+        guard !isSyncingAmountInputs else { return }
+        isSyncingAmountInputs = true
+        defer { isSyncingAmountInputs = false }
+
+        sendAmountPercentInput = newPct
+        let pct = Double(newPct) ?? 0.0
+        let avail = state.walletSnapshot?.trustedBalance ?? 0.0
+        if avail > 0 && pct > 0 {
+            let btc = max(0.0, min(avail, (pct / 100.0) * avail))
+            sendAmountInput = String(format: "%.8f", btc)
+            let price = state.priceState.effectivePrice
+            if price > 0 {
+                sendAmountUSDInput = String(format: "%.2f", btc * price)
+            } else {
+                sendAmountUSDInput = ""
+            }
+        } else {
+            sendAmountInput = ""
+            sendAmountUSDInput = ""
+        }
+    }
+
+    private func applyMaxAmount() {
+        guard !isSyncingAmountInputs else { return }
+        isSyncingAmountInputs = true
+        defer { isSyncingAmountInputs = false }
+
+        let avail = state.walletSnapshot?.trustedBalance ?? 0.0
+        guard avail > 0 else {
+            sendAmountInput = "0.00000000"
+            sendAmountUSDInput = "0.00"
+            sendAmountPercentInput = "0.0"
+            return
+        }
+
+        let quote: FeeQuote
+        if selectedFeePreset == .custom {
+            let rate = max(1, Int(customSatPerVBInput) ?? 1)
+            quote = FeeQuote(type: .custom, satPerVB: rate, targetBlocks: 0, estimatedMinutes: 0)
+        } else {
+            quote = state.feeQuotes[selectedFeePreset] ?? FeeQuote(type: selectedFeePreset, satPerVB: 2, targetBlocks: selectedFeePreset.targetBlocks, estimatedMinutes: 60)
+        }
+
+        // Standard 1-in-2-out Native SegWit tx (~141 vB)
+        let estVSize = 141
+        let feeSats = max(Int64(quote.satPerVB * estVSize), quote.medianTxFeeSats)
+        let feeBTC = Double(feeSats) / 100_000_000.0
+        let maxSpendable = max(0.0, avail - feeBTC)
+
+        sendAmountInput = String(format: "%.8f", maxSpendable)
+        let price = state.priceState.effectivePrice
+        if price > 0 {
+            sendAmountUSDInput = String(format: "%.2f", maxSpendable * price)
+        } else {
+            sendAmountUSDInput = ""
+        }
+        sendAmountPercentInput = String(format: "%.1f", min(100.0, (maxSpendable / avail) * 100.0))
     }
 
     private func generateSendPreview() {

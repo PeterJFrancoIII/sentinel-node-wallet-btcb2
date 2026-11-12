@@ -108,3 +108,102 @@ public struct CoinbaseMaturityCalculator: Sendable {
         }
     }
 }
+
+public struct TransactionMaturityInfo: Sendable {
+    public let isCoinbase: Bool
+    public let isSpendable: Bool
+    public let currentConfirmations: Int
+    public let requiredConfirmations: Int
+    public let remainingBlocks: Int
+    public let remainingTimeFormatted: String
+    public let lockupDescription: String
+
+    public init(
+        isCoinbase: Bool,
+        isSpendable: Bool,
+        currentConfirmations: Int,
+        requiredConfirmations: Int,
+        remainingBlocks: Int,
+        remainingTimeFormatted: String,
+        lockupDescription: String
+    ) {
+        self.isCoinbase = isCoinbase
+        self.isSpendable = isSpendable
+        self.currentConfirmations = currentConfirmations
+        self.requiredConfirmations = requiredConfirmations
+        self.remainingBlocks = remainingBlocks
+        self.remainingTimeFormatted = remainingTimeFormatted
+        self.lockupDescription = lockupDescription
+    }
+}
+
+extension CoinbaseMaturityCalculator {
+    public static func maturityInfo(for tx: TransactionRecord) -> TransactionMaturityInfo {
+        let isCoinbase = tx.category == "generate" || tx.category == "immature"
+        if isCoinbase {
+            let originHeight = tx.blockheight ?? 0
+            let reqConfs = requiredConfirmations(forOriginHeight: originHeight)
+            let isSpendable = tx.confirmations >= reqConfs
+            let remBlocks = max(0, reqConfs - tx.confirmations)
+
+            let epochDesc: String
+            if originHeight < intermediateEpochStartHeight {
+                epochDesc = "BIP-110 Standard (100 blocks)"
+            } else if originHeight < deepEpochStartHeight {
+                epochDesc = "BIP-110 Stage 1 (6,480 blocks / ~45d)"
+            } else {
+                epochDesc = "BIP-110 Stage 2 (25,920 blocks / ~180d)"
+            }
+
+            let timeStr: String
+            if isSpendable {
+                timeStr = "Unlocked & Spendable"
+            } else {
+                let totalMinutes = remBlocks * 10
+                let days = totalMinutes / (24 * 60)
+                let hours = (totalMinutes % (24 * 60)) / 60
+                let minutes = totalMinutes % 60
+                if days > 0 {
+                    timeStr = "\(days)d \(hours)h \(minutes)m"
+                } else if hours > 0 {
+                    timeStr = "\(hours)h \(minutes)m"
+                } else {
+                    timeStr = "\(minutes)m"
+                }
+            }
+
+            return TransactionMaturityInfo(
+                isCoinbase: true,
+                isSpendable: isSpendable,
+                currentConfirmations: tx.confirmations,
+                requiredConfirmations: reqConfs,
+                remainingBlocks: remBlocks,
+                remainingTimeFormatted: timeStr,
+                lockupDescription: epochDesc
+            )
+        } else if tx.category == "receive" {
+            let isSpendable = tx.confirmations >= 1
+            let remBlocks = isSpendable ? 0 : 1
+            let timeStr = isSpendable ? "Available for Spend" : "~10m until 1st confirmation"
+            return TransactionMaturityInfo(
+                isCoinbase: false,
+                isSpendable: isSpendable,
+                currentConfirmations: tx.confirmations,
+                requiredConfirmations: 1,
+                remainingBlocks: remBlocks,
+                remainingTimeFormatted: timeStr,
+                lockupDescription: "Standard Receive"
+            )
+        } else {
+            return TransactionMaturityInfo(
+                isCoinbase: false,
+                isSpendable: true,
+                currentConfirmations: tx.confirmations,
+                requiredConfirmations: 1,
+                remainingBlocks: 0,
+                remainingTimeFormatted: "Confirmed",
+                lockupDescription: "Outgoing Send"
+            )
+        }
+    }
+}
