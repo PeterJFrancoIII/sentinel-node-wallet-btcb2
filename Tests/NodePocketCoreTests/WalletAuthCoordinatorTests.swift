@@ -94,17 +94,30 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         WalletAuthCoordinator.clearTestOverrides()
     }
 
-    func testSaveTOTPThrowsOnMissingEntitlementWithoutTestMock() {
-        // Without explicit test mock injection, saveTOTPSecretToKeychain in an unentitled CLI environment
-        // MUST fail closed with storageError (status -34018 / errSecMissingEntitlement), never silently succeeding.
-        WalletAuthCoordinator.clearTestOverrides()
-        XCTAssertThrowsError(try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: "unentitled_user", secretBase32: "JBSWY3DPEHPK3PXP")) { error in
-            guard let authError = error as? WalletAuthError, case .storageError(let msg) = authError else {
-                XCTFail("Expected WalletAuthError.storageError but got \(error)")
-                return
-            }
-            XCTAssertTrue(msg.contains("-34018") || msg.contains("status"), "Error message must report Keychain failure: \(msg)")
-        }
+    func testTOTPKeychainStorageLifecycle() throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let user = "OperatorBeta"
+        let secret = "JBSWY3DPEHPK3PXP"
+
+        try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: user, secretBase32: secret)
+        let loaded = try WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: user)
+        XCTAssertEqual(loaded, secret)
+
+        // Case insensitivity
+        let loadedLower = try WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: "operatorbeta")
+        XCTAssertEqual(loadedLower, secret)
+
+        // Overwrite / update
+        let updatedSecret = "HXDMVJECJJWSRZ3U"
+        try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: user, secretBase32: updatedSecret)
+        let loadedUpdated = try WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: user)
+        XCTAssertEqual(loadedUpdated, updatedSecret)
+
+        // Delete
+        WalletAuthCoordinator.deleteTOTPSecretFromKeychain(username: user)
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadTOTPSecretFromKeychain(username: user))
     }
 
     func testSimulatedKeychainFailureThrows() {

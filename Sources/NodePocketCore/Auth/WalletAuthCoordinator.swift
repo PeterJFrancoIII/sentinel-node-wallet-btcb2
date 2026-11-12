@@ -1204,23 +1204,13 @@ public actor WalletAuthCoordinator {
         }
         #endif
 
-        var accessError: Unmanaged<CFError>?
-        guard let control = SecAccessControlCreateWithFlags(
-            kCFAllocatorDefault,
-            kSecAttrAccessibleWhenUnlockedThisDeviceOnly,
-            .userPresence,
-            &accessError
-        ) else {
-            throw WalletAuthError.storageError("Failed to create Keychain access control for TOTP.")
-        }
-
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "app.nodepocket.btcb2.auth",
             kSecAttrAccount as String: account,
             kSecAttrLabel as String: "Sentinel Node Wallet - BTCB2 TOTP: " + username,
             kSecValueData as String: data,
-            kSecAttrAccessControl as String: control
+            kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
 
         // Atomic write: attempt SecItemAdd first; if item exists, update it.
@@ -1234,9 +1224,14 @@ public actor WalletAuthCoordinator {
             ]
             let updateAttrs: [String: Any] = [
                 kSecValueData as String: data,
-                kSecAttrAccessControl as String: control
+                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
             status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+            if status != errSecSuccess {
+                // If update failed (e.g. migrating away from an item with legacy SecAccessControl), delete and re-add
+                SecItemDelete(updateQuery as CFDictionary)
+                status = SecItemAdd(query as CFDictionary, nil)
+            }
         }
 
         #if DEBUG
@@ -1246,7 +1241,7 @@ public actor WalletAuthCoordinator {
         }
         #endif
 
-        // Strictly fail closed on any OSStatus failure (including -34018 / errSecMissingEntitlement)
+        // Strictly fail closed on any OSStatus failure
         guard status == errSecSuccess else {
             throw WalletAuthError.storageError("Failed to save TOTP secret to Keychain: status \(status)")
         }
