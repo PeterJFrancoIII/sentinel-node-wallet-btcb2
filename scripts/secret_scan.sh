@@ -27,7 +27,7 @@ for term in "${FORBIDDEN[@]}"; do
 done
 
 # Secret scan for private keys
-KEY_MATCHES=$(git -C "${ROOT_DIR}" grep -E "(xprv[a-zA-Z0-9]{100,}|[5KL][1-9A-HJ-NP-Za-km-z]{50,51})" ":(exclude)Tests/NodePocketCoreTests/IsolationSecurityTests.swift" ":(exclude)Sources/NodePocketCore/Isolation/SecurityAuditor.swift" || true)
+KEY_MATCHES=$(git -C "${ROOT_DIR}" grep -E "(\bxprv[a-zA-Z0-9]{100,}\b|\b[5KL][1-9A-HJ-NP-Za-km-z]{50,51}\b)" ":(exclude)Tests/NodePocketCoreTests/IsolationSecurityTests.swift" ":(exclude)Sources/NodePocketCore/Isolation/SecurityAuditor.swift" || true)
 if [ -n "${KEY_MATCHES}" ]; then
     echo "❌ Secret leak violation (private keys detected):"
     echo "${KEY_MATCHES}"

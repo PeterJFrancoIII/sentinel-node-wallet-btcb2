@@ -1,38 +1,30 @@
-# Agent instructions — Sentinel Node Wallet - BTCB2
+# Agent Instructions — Sentinel Node Wallet BTCB2
 
-**Canonical current wallet contract:** [docs/POWER_WALLET_INVENTORY_V12.md](docs/POWER_WALLET_INVENTORY_V12.md) · [docs/WALLET_MANAGER_V7.md](docs/WALLET_MANAGER_V7.md)  
-**Primary project:** Native SwiftUI macOS Bitcoin Knots **BTCB2 BLAKE2b/BIP-110 MainNet-only** validating node and non-custodial wallet.
+**Read first:** [Current project status](docs/PROJECT_STATUS.md) → [Governance](GOVERNANCE.md) → [Security](SECURITY.md) → [Test/release matrix](TEST_AND_RELEASE_MATRIX.md). Older implementation receipts are historical, not current instructions.
 
-## What is in scope
+**Scope:** NODEPOCKET_BTCB2_ONLY. Standalone macOS SwiftUI BTCB2/BLAKE2b/BIP-110 MainNet-only Knots app: Node, Wallet, Network + Advanced sheet. No changes to unrelated repositories, operators' other systems, wallets, credentials or processes. No remote RPC or additional consumer chains. Preserve the real datadir, Keychain service, app identity, sync/IBD and all wallet files.
 
-Maintain exactly three main surfaces: **Node, Wallet, Network**, plus one small Advanced sheet opened by a single header gear button. The Wallet surface must support All-Wallet Inventory, per-wallet isolation, reversible Archive, and fail-closed reversible Delete to macOS Trash. Automatic Ultra Power Policy monitors `IOKit.ps` for battery/charging and preserves preferred profiles. Python is permitted as a test/mocking and automation tool; **no Python runtime or web backend** is shipped to consumers.
+## At entry
 
-**No DATUM gateway in this release.** Future one-click DATUM support is roadmap-only. No Stratum, pool, rental, miner or remote-wallet integration now.
+1. Query canonical SCM **Session_Gemini_NodePocketBTCB2_20261106-1741** via search_nodes then open_nodes; search **InterAgent_Dialogue_Channel** for latest exact-session peer receipts. Apply [SCM rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md).
+2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **7bdfd0e**; 133 executed / 132 passed / zero failed / one interactive Keychain test skipped on [CI #42940525641](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42940525641). Optimized SwiftUI Release, pinned-Knots ad-hoc bundle and REAL isolated regtest CLI backup→restore PASS. Source-only spending lock remains active; signing is UNVERIFIED. This does not establish native Keychain PASS. Branch is **unmerged**.
+3. Confirm status evidence in [Project Status](docs/PROJECT_STATUS.md). Distinguish **BUILT source**, **PEER-REPORTED native**, and **independently verified**. Do not recast stale V12/v13 planning as undone code.
 
-## Read-only references and isolation
+## Current work order (priority)
 
-Original private Admin Node Console Wallet Manager (`src/status_server.py` and `src/wallet_registry.py`) may be read for behavioral parity; NEVER copy its live code, database, real wallet data/addresses, credentials or integration services. No writes to external mining pools, corporate parent repos, Admin Console, ASIC firmware, or other project repos/runtimes. Retain historical app bundle ID, Keychain service and datadir until a reversible migration is proved. Existing running node and wallet are not disposable test fixtures.
+- **P0** Keychain failure/mismatched-secret creation path is now source/CI remediated (5e7a597); independently verify actual Keychain hardware accept/deny/cancel and offline-custody acknowledgment, then prove encrypted wallet RPC creation and immediate inventory on an installed Mac using only isolated zero-funds test data.
+- **P0** Prove positive bitcoin.conf and cookie-only daemon adoption; bind RPC endpoint to PID/executable/datadir; validate credentials and safe file types/permissions.
+- **P1** Correct window recreation/force unwrap/targeted zoom; independently exercise Dock/Cmd+Tab/closed window.
+- **P0 destructive operation HOLD** 2aa0e15 disables ALL wallet Delete/Trash operations until a genuine isolated encrypted-wallet restore proof is recorded. A matching backup header/receipt is not a recovery proof. Archive remains available. No tests are permitted to use the operator MainNet datadir, even when an environment flag is set.
+- **CI-only recovery proof** 7bdfd0e demonstrated actual Knots regtest encrypted-wallet backup→restore with separate name, locked wallet, descriptors and address ownership on ephemeral Mac CI. This is NOT the signed SwiftUI user flow or a recovery verification tied to a wallet-deletion receipt. Delete remains blocked.
+- **P0 release gates** Native Keychain/2FA/Apple Passwords, recoverable backups, daemon PID/RPC binding, Ultra profile transitions, fork/signing and distribution audit. Check current pinned Knots 29.4.3 against independently authenticated 29.5 on isolated test environment. Keep send disabled; see [guarded owner-run release checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md).
 
-## Immediate P0 items
+## Safety and receipts
 
-1. Remove empty-passphrase wallet creation, unencrypted default wallet, `tb1`/`bcrt1` acceptance and insecure auto-Keychain unlocking.
-2. Validate actual BLAKE2b fork, new chain anchor/fresh tip, encrypted wallet, BTCB2 replay-safe `SIGHASH_UNIFIED` signing and allowlist **inside core send pipeline**; UI badges or local height are insufficient.
-3. Use satoshi integers, local-node fee quotes/relay floor and PSBT funded preview; bind user presence + exact destination, amount, fee/inputs/change to one-time broadcast authorization; immediately lock wallet afterward.
-4. Add coinbase creation-height maturity schedule (100/6480/25920 blocks plus 2027-09-01 MTP rule), maturation countdown, transaction details, verified BTCB2 `mempool.guide` external links and named trusted recipients with secure edit controls.
-5. Add Swift/Python mock tests and real Security.framework consent/chain read-only tests; never spend real funds to test. Mark all v7 gates NOT RUN until evidenced.
+- No production daemon stop/restart, app deployment, wallet delete/restore, funded test, file/chainstate reset, unreviewed PR merge or spend. Operator authorization is a separate gate.
+- Isolated regtest is **test-only**; never expose an alternate network in the product. Preserve immutable wallet/passphrase identity; passphrase alone is not a wallet backup.
+- **Priority P0 completed at SOURCE+CI only:** c19332b re-established signingPathUnverified in WalletManager and generic RPC denying send, RBF and signing calls, and disabled SwiftUI Send/RBF. Never re-arm based on IBD/height or a Python reference test; only future separately approved independent BTCB2 SIGHASH_UNIFIED security qualification may change the hold.
+- Do not bypass signingPathUnverified, Keychain OSStatus errors, daemon-verification rejection or backup durability uncertainty.
+- Handoff with exact SHA, CI URL/counts, native environment + redacted reproduction, PASS/FAIL/SKIPPED/NOT RUN, superseded receipt IDs, open blockers and next safe action. No secrets or personal data.
 
-## LAST feature change before production test — Wallet Auth v13
-
-**Authority:** [Final Wallet Auth](docs/FINAL_WALLET_AUTH_V13.md), followed by [Production Security Audit](docs/FINAL_PRODUCTION_SECURITY_AUDIT_V13.md).
-
-Implement LOCAL username + strong password + RFC6238 TOTP, with Apple Passwords save/autofill only when properly signed/associated and owner-approved. No external identity server, default credentials, broad Keychain fallback, new UI tab or wallet-data migration. Node/Network continue while Wallet locked. Secure core `WalletAuthCoordinator` must guard every wallet RPC/action; fresh device-owner authentication for sending, export, recovery, recipient changes, archive and delete. Loss of login must not erase a self-custodial wallet or bypass its separate encryption.
-
-Reconcile v12 PR #5 before cutting v13 source. Owner Ultra correction requires **4 peers maximum** on battery/charging with `listen=0` and low process CPU/disk I/O priority; the prior Gemini receipt used 12 and must not be treated as current specification. Wallet creation Keychain -34018, binary signature provenance, funding/signing safety, full wallet restore and notarization are P0 gates.
-
-After v13 is implemented, **FREEZE new features**, inventory every source/binary dependency/process/endpoint and complete the independent review. Remove only code-evidenced unnecessary/malicious or unsafe shipped behavior with regression tests; do not bulk-delete runtime files or wallet/chain data. Report each test PASS/FAIL/NOT RUN with exact SHA, actual Mac/Apple Passwords proof, and signed release evidence. No production-ready declaration while any P0 remains.
-
-## Release and reporting
-
-No public or real-funds-safe release before P0s, clean wallet restore, Apple Developer ID signing and notarization, Gatekeeper, secure updates and independent audit. Read [GOVERNANCE.md](GOVERNANCE.md), [SECURITY.md](SECURITY.md), [TEST_AND_RELEASE_MATRIX.md](TEST_AND_RELEASE_MATRIX.md) and [GEMINI_COMPLETION_HANDOFF.md](GEMINI_COMPLETION_HANDOFF.md).
-
-Follow existing Shared Cognitive Memory rules. Post one redacted evidence receipt with exact commit, test results and PASS/FAIL/NOT RUN, not unverified 'complete' claims. Do not leak addresses, keys or user-specific transaction data into Shared Memory or GitHub.
+See detailed legacy contracts in docs/; they do not override these current release controls.

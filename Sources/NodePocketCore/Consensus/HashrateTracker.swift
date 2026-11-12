@@ -64,6 +64,7 @@ public struct HashrateReport: Sendable {
     public let telemetryAgeSeconds: TimeInterval
     public let isStale: Bool
     public let hasTimestampAnomalies: Bool
+    public let isSyncing: Bool
     public let history: [HashrateHistoryPoint]
 
     public init(
@@ -79,6 +80,7 @@ public struct HashrateReport: Sendable {
         telemetryAgeSeconds: TimeInterval,
         isStale: Bool,
         hasTimestampAnomalies: Bool,
+        isSyncing: Bool = false,
         history: [HashrateHistoryPoint] = []
     ) {
         self.networkHashrateHps = networkHashrateHps
@@ -93,6 +95,7 @@ public struct HashrateReport: Sendable {
         self.telemetryAgeSeconds = telemetryAgeSeconds
         self.isStale = isStale
         self.hasTimestampAnomalies = hasTimestampAnomalies
+        self.isSyncing = isSyncing
         self.history = history
     }
 
@@ -133,7 +136,19 @@ public final class HashrateTracker: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let previousTimestamp = samples.last?.timestamp
+        // Deduplicate unchanged tip polling (exact same block identity)
+        if let last = samples.last, last.hash == hash && last.height == height {
+            return
+        }
+
+        // Handle reorgs: prune invalid branches when a block at height <= current tip arrives with a different hash
+        if let last = samples.last, height <= last.height {
+            samples.removeAll(where: { $0.height >= height })
+        }
+
+        let isContiguous = (samples.last == nil) || (height == (samples.last!.height + 1))
+        let previousTimestamp = isContiguous ? samples.last?.timestamp : nil
+
         let sample = BlockSample(
             height: height,
             hash: hash,
@@ -148,6 +163,18 @@ public final class HashrateTracker: @unchecked Sendable {
         }
     }
 
+    public var sampleCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples.count
+    }
+
+    public var latestHeight: Int? {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples.last?.height
+    }
+
     public func clear() {
         lock.lock()
         defer { lock.unlock() }
@@ -155,11 +182,16 @@ public final class HashrateTracker: @unchecked Sendable {
         historyPoints.removeAll()
     }
 
-    public func generateReport(now: TimeInterval = Date().timeIntervalSince1970) -> HashrateReport {
+    public func generateReport(
+        now: TimeInterval = Date().timeIntervalSince1970,
+        override30Hps: Double? = nil,
+        override120Hps: Double? = nil,
+        isSyncing: Bool = false
+    ) -> HashrateReport {
         lock.lock()
         defer { lock.unlock() }
 
-        guard let latest = samples.last else {
+        guard !isSyncing, let latest = samples.last else {
             return HashrateReport(
                 networkHashrateHps: 0.0,
                 networkHashratePH: 0.0,
@@ -173,6 +205,7 @@ public final class HashrateTracker: @unchecked Sendable {
                 telemetryAgeSeconds: 0.0,
                 isStale: true,
                 hasTimestampAnomalies: false,
+                isSyncing: isSyncing,
                 history: []
             )
         }
@@ -200,8 +233,11 @@ public final class HashrateTracker: @unchecked Sendable {
             }
         }
 
+        // Canonical calculation: Work / Time-to-Block over the 30-block window
         let calculatedHps: Double
-        if validIntervals > 0 && totalValidSeconds > 0 {
+        if let override30 = override30Hps, override30 > 0 {
+            calculatedHps = override30
+        } else if validIntervals > 0 && totalValidSeconds > 0 {
             calculatedHps = totalExpectedHashes / totalValidSeconds
         } else {
             calculatedHps = latest.expectedHashes / 600.0
@@ -223,10 +259,24 @@ public final class HashrateTracker: @unchecked Sendable {
             }
         }
 
-        let smoothedHps = (longIntervals > 0 && longValidSeconds > 0) ? (longExpectedHashes / longValidSeconds) : calculatedHps
+        let smoothedHps: Double
+        if let override120 = override120Hps, override120 > 0 {
+            smoothedHps = override120
+        } else if longIntervals > 0 && longValidSeconds > 0 {
+            smoothedHps = longExpectedHashes / longValidSeconds
+        } else {
+            smoothedHps = calculatedHps
+        }
         let smoothedPH = smoothedHps / 1e15
 
-        let avgInterval = validIntervals > 0 ? (totalValidSeconds / Double(validIntervals)) : 600.0
+        let avgInterval: Double
+        if validIntervals > 0 {
+            avgInterval = totalValidSeconds / Double(validIntervals)
+        } else if calculatedHps > 0 && latest.expectedHashes > 0 {
+            avgInterval = latest.expectedHashes / calculatedHps
+        } else {
+            avgInterval = 600.0
+        }
 
         // Append to history points (max 30 points)
         if historyPoints.last?.height != latest.height {
@@ -254,6 +304,7 @@ public final class HashrateTracker: @unchecked Sendable {
             telemetryAgeSeconds: age,
             isStale: isStale,
             hasTimestampAnomalies: anomaliesDetected,
+            isSyncing: false,
             history: historyPoints
         )
     }

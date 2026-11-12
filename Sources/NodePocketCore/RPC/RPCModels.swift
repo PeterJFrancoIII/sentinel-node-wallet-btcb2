@@ -29,6 +29,7 @@ public struct NetworkInfo: Codable, Sendable {
     public let connections: Int
     public let connections_in: Int?
     public let connections_out: Int?
+    public let localservicesnames: [String]?
 }
 
 public struct MempoolInfo: Codable, Sendable {
@@ -44,6 +45,7 @@ public struct BlockHeader: Codable, Sendable {
     public let confirmations: Int
     public let height: Int
     public let time: Int
+    public let mediantime: Int?
     public let bits: String
     public let difficulty: Double?
     public let chainwork: String
@@ -85,6 +87,23 @@ public struct TransactionRecord: Codable, Identifiable, Sendable {
     public let txid: String
     public let time: Int
     public let timereceived: Int?
+    public let bip125Replaceable: String?
+
+    enum CodingKeys: String, CodingKey {
+        case address
+        case category
+        case amount
+        case label
+        case vout
+        case confirmations
+        case blockhash
+        case blockheight
+        case blocktime
+        case txid
+        case time
+        case timereceived
+        case bip125Replaceable = "bip125-replaceable"
+    }
 
     public init(
         address: String?,
@@ -98,7 +117,8 @@ public struct TransactionRecord: Codable, Identifiable, Sendable {
         blocktime: Int? = nil,
         txid: String,
         time: Int,
-        timereceived: Int? = nil
+        timereceived: Int? = nil,
+        bip125Replaceable: String? = nil
     ) {
         self.address = address
         self.category = category
@@ -112,6 +132,54 @@ public struct TransactionRecord: Codable, Identifiable, Sendable {
         self.txid = txid
         self.time = time
         self.timereceived = timereceived
+        self.bip125Replaceable = bip125Replaceable
+    }
+}
+
+public struct BumpFeeResponse: Codable, Sendable {
+    public let txid: String
+    public let origfee: Double
+    public let fee: Double
+    public let errors: [String]?
+
+    public init(txid: String, origfee: Double, fee: Double, errors: [String]? = nil) {
+        self.txid = txid
+        self.origfee = origfee
+        self.fee = fee
+        self.errors = errors
+    }
+}
+
+public struct FundedPsbtResponse: Codable, Sendable {
+    public let psbt: String
+    public let fee: Double
+    public let changepos: Int
+
+    public init(psbt: String, fee: Double, changepos: Int) {
+        self.psbt = psbt
+        self.fee = fee
+        self.changepos = changepos
+    }
+}
+
+public struct MempoolTxSummary: Codable, Sendable {
+    public let vsize: Int?
+    public let weight: Int?
+    public let fee: Double?
+    public struct Fees: Codable, Sendable {
+        public let base: Double?
+    }
+    public let fees: Fees?
+
+    public var effectiveFeeBTC: Double {
+        fees?.base ?? fee ?? 0.0
+    }
+
+    public init(vsize: Int? = nil, weight: Int? = nil, fee: Double? = nil, fees: Fees? = nil) {
+        self.vsize = vsize
+        self.weight = weight
+        self.fee = fee
+        self.fees = fees
     }
 }
 

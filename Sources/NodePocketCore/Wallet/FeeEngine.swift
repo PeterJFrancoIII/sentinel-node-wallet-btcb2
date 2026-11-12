@@ -14,6 +14,15 @@ public struct SatoshiMath {
         Double(sats) / Double(satsPerBTC)
     }
 
+    public static func toBTCString(sats: Int64) -> String {
+        let btc = toBTC(sats: sats)
+        return String(format: "%.8f", btc)
+    }
+
+    public static func toBTCString(btc: Double) -> String {
+        return String(format: "%.8f", btc)
+    }
+
     public static func formatSats(_ sats: Int64) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
@@ -46,6 +55,7 @@ public struct FeeQuote: Sendable, Equatable {
     public let isRelayFloor: Bool
     public let fetchedAt: Date
     public let expirySeconds: TimeInterval
+    public let medianTxFeeSats: Int64
 
     public init(
         type: FeePresetType,
@@ -54,7 +64,8 @@ public struct FeeQuote: Sendable, Equatable {
         estimatedMinutes: Int,
         isRelayFloor: Bool = false,
         fetchedAt: Date = Date(),
-        expirySeconds: TimeInterval = 60.0
+        expirySeconds: TimeInterval = 60.0,
+        medianTxFeeSats: Int64? = nil
     ) {
         self.type = type
         self.satPerVB = max(1, satPerVB)
@@ -63,6 +74,7 @@ public struct FeeQuote: Sendable, Equatable {
         self.isRelayFloor = isRelayFloor
         self.fetchedAt = fetchedAt
         self.expirySeconds = expirySeconds
+        self.medianTxFeeSats = medianTxFeeSats ?? Int64(max(1, satPerVB) * 140)
     }
 
     public var isStale: Bool {
@@ -134,5 +146,27 @@ public struct FeeEngine: Sendable {
         let norm = max(ch, normal)
         let fst = max(norm, fast)
         return (ch, norm, fst)
+    }
+
+    /// Evaluates live mempool transactions to determine fee percentiles (min, 25th, median, 75th).
+    public static func computeMempoolRateDistribution(from mempool: [String: MempoolTxSummary]) -> (min: Int, p25: Int, median: Int, p75: Int)? {
+        var rates: [Double] = []
+        for (_, entry) in mempool {
+            guard let vsize = entry.vsize, vsize > 0 else { continue }
+            let feeBTC = entry.effectiveFeeBTC
+            let feeSats = round(feeBTC * 100_000_000.0)
+            let satPerVB = feeSats / Double(vsize)
+            if satPerVB > 0 {
+                rates.append(satPerVB)
+            }
+        }
+        guard !rates.isEmpty else { return nil }
+        rates.sort()
+        let count = rates.count
+        let minRate = max(1, Int(ceil(rates[0])))
+        let p25Rate = max(minRate, Int(ceil(rates[count / 4])))
+        let medianRate = max(p25Rate, Int(ceil(rates[count / 2])))
+        let p75Rate = max(medianRate, Int(ceil(rates[(3 * count) / 4])))
+        return (minRate, p25Rate, medianRate, p75Rate)
     }
 }

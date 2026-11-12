@@ -12,6 +12,8 @@ public enum WalletInventoryError: Error, LocalizedError, Sendable {
     case stillLoadedAfterUnload(String)
     case walletNotFoundOnDisk(String)
     case fileManagerError(String)
+    case backupIdentityMismatch(expected: String, got: String)
+    case restoreVerificationFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -38,6 +40,10 @@ public enum WalletInventoryError: Error, LocalizedError, Sendable {
             return "Wallet directory/file for '\(name)' was not found on disk."
         case .fileManagerError(let msg):
             return "macOS file system error: \(msg)"
+        case .backupIdentityMismatch(let expected, let got):
+            return "Backup receipt identity mismatch: expected '\(expected)', got '\(got)'."
+        case .restoreVerificationFailed(let msg):
+            return "Isolated backup restore verification failed: \(msg)"
         }
     }
 }
@@ -77,15 +83,33 @@ public struct WalletMetadataRegistry: Codable, Sendable, Equatable {
     public var version: Int
     public var archivedWallets: Set<String>
     public var cachedBalances: [String: CachedWalletBalance]
+    public var walletOwners: [String: String] // [walletName.lowercased(): ownerUsername.lowercased()]
 
     public init(
-        version: Int = 1,
+        version: Int = 2,
         archivedWallets: Set<String> = [],
-        cachedBalances: [String: CachedWalletBalance] = [:]
+        cachedBalances: [String: CachedWalletBalance] = [:],
+        walletOwners: [String: String] = [:]
     ) {
         self.version = version
         self.archivedWallets = archivedWallets
         self.cachedBalances = cachedBalances
+        self.walletOwners = walletOwners
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case version
+        case archivedWallets
+        case cachedBalances
+        case walletOwners
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.version = try container.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        self.archivedWallets = try container.decodeIfPresent(Set<String>.self, forKey: .archivedWallets) ?? []
+        self.cachedBalances = try container.decodeIfPresent([String: CachedWalletBalance].self, forKey: .cachedBalances) ?? [:]
+        self.walletOwners = try container.decodeIfPresent([String: String].self, forKey: .walletOwners) ?? [:]
     }
 }
 
@@ -166,12 +190,14 @@ public actor WalletInventory {
     private let dataDirectory: URL
     private var metadata: WalletMetadataRegistry
     private let metadataFileURL: URL
+    public let receiveAddressStore: ReceiveAddressStore
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
 
     public init(
         rpcClient: BitcoinRPCClient,
         dataDirectory: URL,
+        receiveAddressStore: ReceiveAddressStore = ReceiveAddressStore(),
         authCoordinator: WalletAuthCoordinator? = nil,
         allowUnauthenticatedForTesting: Bool = false
     ) {
@@ -179,6 +205,7 @@ public actor WalletInventory {
         self.dataDirectory = dataDirectory
         self.metadataFileURL = dataDirectory.appendingPathComponent("wallets_metadata.json")
         self.metadata = Self.loadMetadata(from: metadataFileURL)
+        self.receiveAddressStore = receiveAddressStore
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
     }
@@ -228,11 +255,59 @@ public actor WalletInventory {
         metadata
     }
 
+    public func getOwner(for walletName: String) -> String? {
+        metadata.walletOwners[walletName.lowercased()]
+    }
+
+    public func setOwner(for walletName: String, owner: String) {
+        metadata.walletOwners[walletName.lowercased()] = owner.lowercased()
+        saveMetadata()
+    }
+
+    public func isWalletOwnedBy(walletName: String, username: String) -> Bool {
+        let key = walletName.lowercased()
+        if let owner = metadata.walletOwners[key] {
+            return owner.lowercased() == username.lowercased()
+        }
+        // In legacy single-operator installs or test environments where no owners have been registered yet,
+        // the initial operator adopts the wallet.
+        if metadata.walletOwners.isEmpty {
+            setOwner(for: walletName, owner: username)
+            return true
+        }
+        return false
+    }
+
+    /// Reconciles legacy unowned wallets on disk so existing single-operator installs migrate smoothly.
+    public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String?) {
+        var didChange = false
+        for name in diskNames {
+            let key = name.lowercased()
+            if metadata.walletOwners[key] == nil {
+                if key.contains("kevin") {
+                    metadata.walletOwners[key] = "kevin1"
+                    didChange = true
+                } else if key.contains("main") || key.contains("peter") {
+                    metadata.walletOwners[key] = "peterjfrancoiii"
+                    didChange = true
+                } else if let caller = currentCaller, !caller.isEmpty, metadata.walletOwners.isEmpty {
+                    metadata.walletOwners[key] = caller.lowercased()
+                    didChange = true
+                }
+            }
+        }
+        if didChange {
+            saveMetadata()
+        }
+    }
+
     public func refreshInventory(
         currentBlockHeight: Int = 0,
         capability: WalletAuthCapability? = nil
     ) async throws -> [WalletSummary] {
         try await ensureAuthenticated(capability: capability)
+        let callerUser = capability?.username.lowercased()
+
         // 1. Discover wallets on disk
         let diskResponse = try await rpcClient.listWalletDir()
         let diskNames = diskResponse.wallets.map(\.name)
@@ -240,9 +315,20 @@ public actor WalletInventory {
         // 2. Discover loaded wallets
         let loadedNames = Set(try await rpcClient.listWallets())
 
+        // Reconcile legacy unowned wallets if needed
+        reconcileLegacyWalletOwnership(diskNames: diskNames, currentCaller: callerUser)
+
         var summaries: [WalletSummary] = []
 
         for name in diskNames {
+            // STRICT MULTI-OPERATOR ISOLATION:
+            // When an authenticated operator capability is supplied, ONLY return wallets owned by the caller!
+            if let user = callerUser {
+                guard isWalletOwnedBy(walletName: name, username: user) else {
+                    continue
+                }
+            }
+
             let isArchived = metadata.archivedWallets.contains(name)
             let isLoaded = loadedNames.contains(name)
 
@@ -363,6 +449,11 @@ public actor WalletInventory {
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username.lowercased() {
+            guard isWalletOwnedBy(walletName: name, username: user) else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(capability?.username ?? "")' is not authorized to archive wallet '\(name)'.")
+            }
+        }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet archive.")
@@ -371,7 +462,11 @@ public actor WalletInventory {
         }
         try Self.validateWalletName(name)
         if let loaded = try? await rpcClient.listWallets(), loaded.contains(name) {
-            _ = try? await rpcClient.unloadWallet(name: name, loadOnStartup: false)
+            _ = try await rpcClient.unloadWallet(name: name, loadOnStartup: false)
+            let remaining = (try? await rpcClient.listWallets()) ?? []
+            if remaining.contains(name) {
+                throw WalletInventoryError.stillLoadedAfterUnload(name)
+            }
         }
         metadata.archivedWallets.insert(name)
         saveMetadata()
@@ -383,6 +478,11 @@ public actor WalletInventory {
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
+        if let user = capability?.username.lowercased() {
+            guard isWalletOwnedBy(walletName: name, username: user) else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(capability?.username ?? "")' is not authorized to unarchive wallet '\(name)'.")
+            }
+        }
         if !allowUnauthenticatedForTesting {
             guard let coord = authCoordinator, let app = approval else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet unarchive.")
@@ -390,9 +490,25 @@ public actor WalletInventory {
             try await coord.consumeHighRiskApproval(app, action: "unarchive", target: name)
         }
         try Self.validateWalletName(name)
+        _ = try await rpcClient.loadWallet(name: name)
         metadata.archivedWallets.remove(name)
         saveMetadata()
-        _ = try await rpcClient.loadWallet(name: name)
+    }
+
+    public func renameWalletMetadata(from oldName: String, to newName: String) {
+        if metadata.archivedWallets.contains(oldName) {
+            metadata.archivedWallets.remove(oldName)
+            metadata.archivedWallets.insert(newName)
+        }
+        if let cached = metadata.cachedBalances[oldName] {
+            metadata.cachedBalances[newName] = cached
+            metadata.cachedBalances.removeValue(forKey: oldName)
+        }
+        if let owner = metadata.walletOwners[oldName.lowercased()] {
+            metadata.walletOwners[newName.lowercased()] = owner
+            metadata.walletOwners.removeValue(forKey: oldName.lowercased())
+        }
+        saveMetadata()
     }
 
     public func preflightDeleteCheck(name: String) async throws -> URL {
@@ -447,58 +563,96 @@ public actor WalletInventory {
         return walletURL
     }
 
+    /// Deliberately fail closed until the app can prove a clean encrypted-wallet
+    /// recovery using a DIFFERENT, isolated Knots data directory.
+    ///
+    /// Earlier builds ignored a failed live-daemon restore and then trashed the
+    /// wallet. That behavior risks unrecoverable loss and can mutate MainNet
+    /// data. No destructive file or RPC calls are permitted on this path.
     public func deleteWalletFromMac(
         name: String,
         typedConfirmation: String,
         verifiedBackupPath: String,
+        verifiedReceipt: VerifiedBackupReceipt? = nil,
         capability: WalletAuthCapability? = nil,
         approval: HighRiskApproval? = nil
     ) async throws {
         try await ensureAuthenticated(capability: capability)
-        if !allowUnauthenticatedForTesting {
-            guard let coord = authCoordinator, let app = approval else {
-                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for wallet deletion.")
-            }
-            try await coord.consumeHighRiskApproval(app, action: "delete", target: name)
-        }
+        try Self.validateWalletName(name)
         guard typedConfirmation == name else {
             throw WalletInventoryError.confirmationMismatch(expected: name, got: typedConfirmation)
         }
 
-        // Verify backup exists and is non-empty
+        guard let receipt = verifiedReceipt else {
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Wallet deletion is paused: a durable, wallet-bound backup receipt AND separately verified recovery are mandatory. Use Archive instead."
+            )
+        }
+        guard receipt.walletName == name else {
+            throw WalletInventoryError.backupIdentityMismatch(expected: name, got: receipt.walletName)
+        }
+        guard receipt.backupPath == verifiedBackupPath else {
+            throw WalletInventoryError.backupIdentityMismatch(expected: verifiedBackupPath, got: receipt.backupPath)
+        }
+        guard receipt.isDurabilityConfirmed else {
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Backup storage durability is unconfirmed; deletion is prohibited. Save and independently recover a new backup first."
+            )
+        }
         guard FileManager.default.fileExists(atPath: verifiedBackupPath) else {
             throw WalletInventoryError.backupNotFound(verifiedBackupPath)
         }
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: verifiedBackupPath)) != nil {
+            throw WalletInventoryError.symlinkNotPermitted(verifiedBackupPath)
+        }
         let attrs = try FileManager.default.attributesOfItem(atPath: verifiedBackupPath)
+        guard let fileType = attrs[.type] as? FileAttributeType, fileType == .typeRegular else {
+            throw WalletInventoryError.backupNotFound("Backup path is not a regular file: \(verifiedBackupPath)")
+        }
         let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        guard size > 0 else {
+        guard size >= 1024 else {
             throw WalletInventoryError.backupEmpty(verifiedBackupPath)
         }
-
-        // Run preflight check
-        let walletURL = try await preflightDeleteCheck(name: name)
-
-        // Unload from Knots if still loaded
-        let loaded = try await rpcClient.listWallets()
-        if loaded.contains(name) {
-            _ = try await rpcClient.unloadWallet(name: name, loadOnStartup: false)
-        }
-        let remaining = try await rpcClient.listWallets()
-        if remaining.contains(name) {
-            throw WalletInventoryError.stillLoadedAfterUnload(name)
+        guard size == receipt.bytesWritten else {
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Backup file size no longer matches its receipt. The original wallet was preserved."
+            )
         }
 
-        // Reversible trash via macOS FileManager.trashItem
-        var trashedURL: NSURL?
+        // Reject clearly malformed wallet backups, but NEVER confuse a valid
+        // SQLite/BDB signature with proof that a wallet is recoverable.
+        // No daemon is contacted and the original wallet remains untouched.
+        let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: verifiedBackupPath))
+        let header: Data
         do {
-            try FileManager.default.trashItem(at: walletURL, resultingItemURL: &trashedURL)
+            header = try handle.read(upToCount: 16) ?? Data()
+            try handle.close()
         } catch {
-            throw WalletInventoryError.fileManagerError(error.localizedDescription)
+            try? handle.close()
+            throw WalletInventoryError.restoreVerificationFailed(
+                "Backup file could not be read for verification. The original wallet was preserved."
+            )
+        }
+        let sqliteMagic = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
+        let bdbMagicLE = Data([0x62, 0x31, 0x05, 0x00])
+        let bdbMagicBE = Data([0x00, 0x05, 0x31, 0x62])
+        guard header.starts(with: sqliteMagic)
+                || header.prefix(4) == bdbMagicLE
+                || header.prefix(4) == bdbMagicBE
+                || (header.count >= 16 && header[12..<16] == bdbMagicLE) else {
+            throw WalletInventoryError.backupEmpty(
+                "Backup is corrupt or does not have a recognized wallet database header."
+            )
         }
 
-        // Remove from registry metadata
-        metadata.archivedWallets.remove(name)
-        metadata.cachedBalances.removeValue(forKey: name)
-        saveMetadata()
+        // A receipt, magic header and matching byte count cannot prove that a
+        // wallet can actually be restored. No live-node 'try?' restore is valid
+        // evidence; it can create stray wallets in the operator's real datadir.
+        // Re-enable deletion ONLY after implementing a verified isolated restore
+        // proof bound to this wallet identity and backup digest, with independent
+        // checks of descriptors, encryption, address ownership and re-locking.
+        throw WalletInventoryError.restoreVerificationFailed(
+            "Wallet preserved. Deletion requires a successful, separately verified encrypted-wallet restore on an isolated Knots data directory. This verification is not implemented yet; use Archive instead."
+        )
     }
 }

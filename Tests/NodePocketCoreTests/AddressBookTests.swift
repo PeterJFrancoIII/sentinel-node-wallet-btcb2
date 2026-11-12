@@ -6,7 +6,7 @@ final class AddressBookTests: XCTestCase {
         // Valid Bech32 MainNet addresses (bc1...)
         XCTAssertTrue(AddressBook.isValidBTCB2MainnetAddress("bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"))
         XCTAssertTrue(AddressBook.isValidBTCB2MainnetAddress("bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"))
-        XCTAssertTrue(AddressBook.isValidBTCB2MainnetAddress("bc1p5d7rjq7g6rdk2yhzks9s2uma66mvxsampfdw6n"))
+        XCTAssertTrue(AddressBook.isValidBTCB2MainnetAddress("bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"))
 
         // Reject RegTest addresses (bcrt1...)
         XCTAssertFalse(AddressBook.isValidBTCB2MainnetAddress("bcrt1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"))
@@ -32,7 +32,7 @@ final class AddressBookTests: XCTestCase {
 
         let addr1 = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
         let addr2 = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"
-        let unapprovedAddr = "bc1p5d7rjq7g6rdk2yhzks9s2uma66mvxsampfdw6n"
+        let unapprovedAddr = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
 
         // 1. Add valid recipient
         let r1 = try book.addRecipient(name: "Cold Storage", address: addr1)

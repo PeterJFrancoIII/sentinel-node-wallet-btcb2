@@ -1,5 +1,7 @@
 # Sentinel Node Wallet Architecture & Consensus Model
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 ## 1. System Architecture
 
 Sentinel Node Wallet is structured into two cleanly separated layers:

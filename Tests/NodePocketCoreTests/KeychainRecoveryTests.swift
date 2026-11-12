@@ -4,8 +4,28 @@ import XCTest
 final class KeychainRecoveryTests: XCTestCase {
     let serviceName = "app.nodepocket.btcb2.wallet.recovery_test"
 
+    func testKeychainSaveWithoutEntitlementFailsClosed() throws {
+        // Under default production configuration (allowFallbackForTesting: false),
+        // attempting to save passphrase in unentitled CLI environment strictly fails closed
+        // with status -34018 / errSecMissingEntitlement, never silently creating weaker items.
+        let helper = KeychainHelper(serviceName: serviceName, allowFallbackForTesting: false)
+        let testAccount = "strict_test_\(UUID().uuidString.prefix(8))"
+        let testPassphrase = "StrictFailClosedPassphrase2026!#"
+
+        defer { try? helper.deletePassphrase(account: testAccount) }
+
+        XCTAssertThrowsError(try helper.savePassphrase(testPassphrase, account: testAccount)) { error in
+            guard let kError = error as? KeychainError, case .unexpectedStatus(let status) = kError else {
+                XCTFail("Expected KeychainError.unexpectedStatus but got \(error)")
+                return
+            }
+            XCTAssertTrue(status == errSecMissingEntitlement || status == -34018 || status == errSecParam || status == -50,
+                          "Status must be missing entitlement/param error: got \(status)")
+        }
+    }
+
     func testKeychainSaveAndRetrieveFallbackSucceeds() throws {
-        let helper = KeychainHelper(serviceName: serviceName)
+        let helper = KeychainHelper(serviceName: serviceName, allowFallbackForTesting: true)
         let testAccount = "recovery_test_\(UUID().uuidString.prefix(8))"
         let testPassphrase = "SampleRecoveryPassphrase2026!#"
 

@@ -2,9 +2,10 @@ import Foundation
 
 public struct NodeConfig: Sendable {
     public var rpcPort: Int
-    public let rpcUser: String
-    public let rpcPassword: String
+    public var rpcUser: String
+    public var rpcPassword: String
     public var p2pPort: Int
+    public var allowInboundP2P: Bool
     public var profile: SyncProfile
     public var storageMode: StorageMode
     public let dataDirectory: URL
@@ -18,6 +19,7 @@ public struct NodeConfig: Sendable {
         rpcUser: String? = nil,
         rpcPassword: String? = nil,
         p2pPort: Int = 8333,
+        allowInboundP2P: Bool = false,
         profile: SyncProfile = .preset(for: .balanced),
         storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB),
         dataDirectory: URL? = nil
@@ -58,6 +60,9 @@ public struct NodeConfig: Sendable {
         self.rpcUser = user
         self.rpcPassword = pass
         self.p2pPort = p2pPort
+        ProfileSettingsStore.shared.configure(dataDirectory: dir)
+        // Preserve explicit existing P2P listening policy when migrating older installations.
+        self.allowInboundP2P = Self.persistedInboundP2P(at: dir.appendingPathComponent("bitcoin.conf"), fallback: allowInboundP2P)
         // Use the last effective on-disk settings, not a new Quiet/Balance default
         // that would silently overwrite the profile selected in a prior session.
         self.profile = Self.persistedProfile(at: dir.appendingPathComponent("bitcoin.conf"), fallback: profile)
@@ -93,6 +98,19 @@ public struct NodeConfig: Sendable {
         return fallback
     }
 
+    /// Preserve the operator's on-disk inbound P2P selection. New installs default OFF;
+    /// existing configs with listen=1 remain enabled until explicitly changed.
+    private static func persistedInboundP2P(at url: URL, fallback: Bool) -> Bool {
+        guard let contents = try? String(contentsOf: url, encoding: .utf8) else { return fallback }
+        var enabled = fallback
+        for raw in contents.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line == "listen=1" { enabled = true }
+            if line == "listen=0" { enabled = false }
+        }
+        return enabled
+    }
+
     /// Recover the persisted profile selection and operational resource limits.
     /// This is deliberately restricted to known numeric options; the node does
     /// not execute arbitrary settings from this parser.
@@ -113,11 +131,20 @@ public struct NodeConfig: Sendable {
                 }
             }
         }
-        var output = SyncProfile.preset(for: type)
-        output.parThreads = (1...8).contains(found["par"] ?? -1) ? found["par"]! : fallback.parThreads
-        output.dbCacheMB = (128...4096).contains(found["dbcache"] ?? -1) ? found["dbcache"]! : fallback.dbCacheMB
-        output.maxConnections = (1...64).contains(found["maxconnections"] ?? -1) ? found["maxconnections"]! : fallback.maxConnections
-        output.maxUploadTargetMB = (1...20_000).contains(found["maxuploadtarget"] ?? -1) ? found["maxuploadtarget"]! : fallback.maxUploadTargetMB
+        var output = ProfileSettingsStore.shared.getProfile(for: type, pruneMB: fallback.pruneMB)
+        if !ProfileSettingsStore.shared.isCustomized(type: type) {
+            let isOldDefaultQuiet = (type == .quiet && found["maxconnections"] == 16 && (found["dbcache"] == 256 || found["dbcache"] == nil))
+            let isOldDefaultBalanced = (type == .balanced && found["maxconnections"] == 24 && (found["dbcache"] == 512 || found["dbcache"] == nil))
+            let isOldDefaultFast = (type == .fast && found["maxconnections"] == 32 && (found["dbcache"] == 1024 || found["dbcache"] == nil))
+            let isOldDefault = isOldDefaultQuiet || isOldDefaultBalanced || isOldDefaultFast
+
+            if !isOldDefault {
+                if let par = found["par"], (1...8).contains(par) { output.parThreads = par }
+                if let cache = found["dbcache"], (128...4096).contains(cache) { output.dbCacheMB = cache }
+                if let maxC = found["maxconnections"], (1...64).contains(maxC) { output.maxConnections = maxC }
+                if let upload = found["maxuploadtarget"], (1...20_000).contains(upload) { output.maxUploadTargetMB = upload }
+            }
+        }
         output.pruneMB = fallback.pruneMB
         return output
     }
@@ -129,7 +156,7 @@ public struct NodeConfig: Sendable {
         lines.append("# Sentinel Node Wallet - BTCB2 Autonomous Configuration")
         lines.append("# Strict Localhost RPC Enforcement - Zero Public Ingress")
         lines.append("server=1")
-        lines.append("listen=1")
+        lines.append("listen=\(allowInboundP2P ? 1 : 0)")
         // Never map a port on the user's router without their informed consent.
         lines.append("natpmp=0")
         lines.append("upnp=0")
@@ -177,5 +204,16 @@ public struct NodeConfig: Sendable {
         let content = renderBitcoinConf()
         try content.write(to: configFileURL, atomically: true, encoding: .utf8)
         try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configFileURL.path)
+
+        ProfileSettingsStore.shared.saveParameters(
+            for: profile.type,
+            parameters: ProfileParameters(
+                parThreads: profile.parThreads,
+                dbCacheMB: profile.dbCacheMB,
+                maxConnections: profile.maxConnections,
+                maxUploadTargetMB: profile.maxUploadTargetMB
+            )
+        )
+        ProfileSettingsStore.shared.setSelectedProfileType(profile.type)
     }
 }

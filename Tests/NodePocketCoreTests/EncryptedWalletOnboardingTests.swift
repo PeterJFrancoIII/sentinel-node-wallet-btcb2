@@ -9,11 +9,19 @@ private final class WalletCreateRPCStub: URLProtocol {
     static let lock = NSLock()
     static var existingWallets: Set<String> = []
     static var createCalls: Int = 0
+    static var simulatedNetworkError: String? = nil
+    static var simulatedServerError: (code: Int, message: String)? = nil
+    static var simulatedHTTPStatus: Int? = nil
+    static var failMethod: String? = nil
 
     static func reset(existing: Set<String> = []) {
         lock.lock()
         existingWallets = existing
         createCalls = 0
+        simulatedNetworkError = nil
+        simulatedServerError = nil
+        simulatedHTTPStatus = nil
+        failMethod = nil
         lock.unlock()
     }
 
@@ -38,6 +46,29 @@ private final class WalletCreateRPCStub: URLProtocol {
 
     override func startLoading() {
         do {
+            WalletCreateRPCStub.lock.lock()
+            if let netErr = WalletCreateRPCStub.simulatedNetworkError {
+                WalletCreateRPCStub.lock.unlock()
+                client?.urlProtocol(self, didFailWithError: NSError(
+                    domain: NSURLErrorDomain,
+                    code: NSURLErrorCannotConnectToHost,
+                    userInfo: [NSLocalizedDescriptionKey: netErr]
+                ))
+                return
+            }
+            if let httpCode = WalletCreateRPCStub.simulatedHTTPStatus {
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: httpCode,
+                    httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "text/plain"]
+                )!
+                WalletCreateRPCStub.lock.unlock()
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: Data("Unauthorized".utf8))
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+            WalletCreateRPCStub.lock.unlock()
+
             guard let body = readRequestBody(),
                   let payload = try JSONSerialization.jsonObject(with: body) as? [String: Any],
                   let method = payload["method"] as? String else {
@@ -47,8 +78,33 @@ private final class WalletCreateRPCStub: URLProtocol {
             }
             let params = payload["params"] as? [Any] ?? []
             WalletCreateRPCStub.lock.lock()
+
+            if let serverErr = WalletCreateRPCStub.simulatedServerError,
+               (WalletCreateRPCStub.failMethod == nil || WalletCreateRPCStub.failMethod == method) {
+                WalletCreateRPCStub.lock.unlock()
+                let errorObj: [String: Any] = ["code": serverErr.code, "message": serverErr.message]
+                let json = try JSONSerialization.data(withJSONObject: [
+                    "result": NSNull(), "error": errorObj, "id": "test"
+                ])
+                let response = HTTPURLResponse(
+                    url: request.url!, statusCode: 500,
+                    httpVersion: "HTTP/1.1", headerFields: ["Content-Type": "application/json"]
+                )!
+                client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+                client?.urlProtocol(self, didLoad: json)
+                client?.urlProtocolDidFinishLoading(self)
+                return
+            }
+
             var result: Any
             switch method {
+            case "getnetworkinfo":
+                result = [
+                    "version": 250100,
+                    "subversion": "/Bitcoin Knots:25.1.knots20231115/",
+                    "protocolversion": 70016,
+                    "connections": 8
+                ]
             case "listwallets":
                 result = Array(WalletCreateRPCStub.existingWallets).sorted()
             case "listwalletdir":
@@ -103,8 +159,44 @@ private final class WalletCreateRPCStub: URLProtocol {
     override func stopLoading() {}
 }
 
+/// The test fixture never contacts the user's macOS Keychain or a live node.
+private struct StubPassphraseCustody: WalletPassphraseCustody {
+    enum Behavior: Sendable {
+        case accept
+        case unavailable
+        case duplicateMatching
+        case duplicateMismatched
+        case duplicateUnreadable
+    }
+    let behavior: Behavior
+
+    func saveNewPassphrase(_ pass: String, account: String) throws {
+        switch behavior {
+        case .accept:
+            return
+        case .unavailable:
+            throw KeychainError.unexpectedStatus(-34018)
+        case .duplicateMatching, .duplicateMismatched, .duplicateUnreadable:
+            throw KeychainError.duplicateItem
+        }
+    }
+
+    func retrievePassphraseInteractively(account: String) async throws -> String {
+        switch behavior {
+        case .duplicateMatching:
+            return "this-is-only-an-offline-test"
+        case .duplicateMismatched:
+            return "another-credential"
+        case .duplicateUnreadable:
+            throw KeychainError.userPresenceCanceled
+        default:
+            throw KeychainError.itemNotFound
+        }
+    }
+}
+
 final class EncryptedWalletOnboardingTests: XCTestCase {
-    private func makeManager() -> WalletManager {
+    private func makeManager(custody: (any WalletPassphraseCustody)? = nil) -> WalletManager {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [WalletCreateRPCStub.self]
         let client = BitcoinRPCClient(
@@ -114,6 +206,7 @@ final class EncryptedWalletOnboardingTests: XCTestCase {
         return WalletManager(
             rpcClient: client,
             keychainHelper: KeychainHelper(serviceName: "app.nodepocket.btcb2.wallet.onboarding-test"),
+            passphraseCustody: custody,
             allowUnauthenticatedForTesting: true
         )
     }
@@ -168,5 +261,162 @@ final class EncryptedWalletOnboardingTests: XCTestCase {
             XCTAssertEqual(name, "main_wallet")
         }
         XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testCreateWalletPreflightCatchesNetworkUnreachable() async throws {
+        WalletCreateRPCStub.reset()
+        WalletCreateRPCStub.simulatedNetworkError = "Could not connect to the server"
+        let manager = makeManager()
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "new_wallet", passphrase: "passphrase-for-test",
+                storeInKeychain: false
+            )
+            XCTFail("Must fail when node RPC is unreachable")
+        } catch let err as WalletCreationError {
+            switch err {
+            case .nodeUnreachable(let detail):
+                XCTAssertTrue(detail.contains("Could not connect to the server"))
+            default:
+                XCTFail("Expected nodeUnreachable, got \(err)")
+            }
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testCreateWalletPreflightCatchesWarmingUp() async throws {
+        WalletCreateRPCStub.reset()
+        WalletCreateRPCStub.failMethod = "getnetworkinfo"
+        WalletCreateRPCStub.simulatedServerError = (code: -28, message: "Loading block index...")
+        let manager = makeManager()
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "new_wallet", passphrase: "passphrase-for-test",
+                storeInKeychain: false
+            )
+            XCTFail("Must fail when node RPC is warming up")
+        } catch let err as WalletCreationError {
+            switch err {
+            case .daemonWarmingUp(let detail):
+                XCTAssertTrue(detail.contains("Loading block index"))
+            default:
+                XCTFail("Expected daemonWarmingUp, got \(err)")
+            }
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testCreateWalletPreflightCatchesUnauthorized() async throws {
+        WalletCreateRPCStub.reset()
+        WalletCreateRPCStub.simulatedHTTPStatus = 401
+        let manager = makeManager()
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "new_wallet", passphrase: "passphrase-for-test",
+                storeInKeychain: false
+            )
+            XCTFail("Must fail when node RPC is unauthorized")
+        } catch let err as WalletCreationError {
+            switch err {
+            case .unauthorized:
+                break
+            default:
+                XCTFail("Expected unauthorized, got \(err)")
+            }
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testCreateWalletRPCFailureThrowsCreationRPCFailed() async throws {
+        WalletCreateRPCStub.reset()
+        WalletCreateRPCStub.failMethod = "createwallet"
+        WalletCreateRPCStub.simulatedServerError = (code: -4, message: "Database already exists")
+        let manager = makeManager()
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "new_wallet", passphrase: "passphrase-for-test",
+                storeInKeychain: false
+            )
+            XCTFail("Must fail when createwallet RPC returns server error")
+        } catch let err as WalletCreationError {
+            switch err {
+            case .creationRPCFailed(let code, let msg):
+                XCTAssertEqual(code, -4)
+                XCTAssertEqual(msg, "Database already exists")
+            default:
+                XCTFail("Expected creationRPCFailed, got \(err)")
+            }
+        }
+    }
+
+    func testKeychainStorageFailureStopsWalletCreationBeforeRPC() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .unavailable))
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+                storeInKeychain: true
+            )
+            XCTFail("Requested storage failure must block createwallet.")
+        } catch WalletCreationError.keychainPreSaveFailed(let detail) {
+            XCTAssertTrue(detail.contains("No createwallet RPC was issued"))
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+        XCTAssertFalse(WalletCreateRPCStub.existingWallets.contains("sandboxed_wallet"))
+    }
+
+    func testDuplicateMismatchedKeychainCredentialStopsWalletCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .duplicateMismatched))
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+                storeInKeychain: true
+            )
+            XCTFail("A mismatched existing Keychain item must fail closed.")
+        } catch WalletCreationError.keychainPreSaveFailed(let detail) {
+            XCTAssertTrue(detail.contains("Existing Keychain data was not modified"))
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testCanceledKeychainCredentialComparisonStopsWalletCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .duplicateUnreadable))
+        do {
+            _ = try await manager.createEncryptedDescriptorWallet(
+                name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+                storeInKeychain: true
+            )
+            XCTFail("Canceled device-owner challenge must abort wallet creation.")
+        } catch WalletCreationError.keychainPreSaveFailed {
+            // Expected
+        }
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 0)
+    }
+
+    func testMatchingPreexistingKeychainCredentialPermitsIdempotentCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .duplicateMatching))
+        let result = try await manager.createEncryptedDescriptorWallet(
+            name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+            storeInKeychain: true
+        )
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 1)
+        XCTAssertTrue(result.isStoredInKeychain)
+        XCTAssertNil(result.keychainWarning)
+    }
+
+    func testSuccessfulNewKeychainCustodyPermitsEncryptedWalletCreation() async throws {
+        WalletCreateRPCStub.reset()
+        let manager = makeManager(custody: StubPassphraseCustody(behavior: .accept))
+        let result = try await manager.createEncryptedDescriptorWallet(
+            name: "sandboxed_wallet", passphrase: "this-is-only-an-offline-test",
+            storeInKeychain: true
+        )
+        XCTAssertEqual(WalletCreateRPCStub.createCalls, 1)
+        XCTAssertTrue(result.isStoredInKeychain)
+        XCTAssertTrue(result.isEncrypted)
+        XCTAssertTrue(result.descriptors)
     }
 }

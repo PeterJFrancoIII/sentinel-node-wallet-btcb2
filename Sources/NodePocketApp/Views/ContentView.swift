@@ -19,7 +19,6 @@ public enum AppViewTab: String, CaseIterable, Identifiable {
 
 public struct ContentView: View {
     @EnvironmentObject var state: AppState
-    @State private var selectedTab: AppViewTab = .node
     @State private var showAdvancedSheet: Bool = false
 
     public var body: some View {
@@ -40,7 +39,7 @@ public struct ContentView: View {
                 .padding(.trailing, 4)
 
                 // View Switcher (Node, Wallet, Network)
-                Picker("View", selection: $selectedTab) {
+                Picker("View", selection: $state.selectedTab) {
                     ForEach(AppViewTab.allCases) { tab in
                         Label(tab.rawValue, systemImage: tab.icon).tag(tab)
                     }
@@ -117,7 +116,7 @@ public struct ContentView: View {
 
             // Active Tab View
             Group {
-                switch selectedTab {
+                switch state.selectedTab {
                 case .node:
                     NodeView(showAdvancedSheet: $showAdvancedSheet)
                 case .wallet:
@@ -129,9 +128,9 @@ public struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(
                 Group {
-                    Button("") { selectedTab = .node }.keyboardShortcut("1", modifiers: .command)
-                    Button("") { selectedTab = .wallet }.keyboardShortcut("2", modifiers: .command)
-                    Button("") { selectedTab = .network }.keyboardShortcut("3", modifiers: .command)
+                    Button("") { state.selectedTab = .node }.keyboardShortcut("1", modifiers: .command)
+                    Button("") { state.selectedTab = .wallet }.keyboardShortcut("2", modifiers: .command)
+                    Button("") { state.selectedTab = .network }.keyboardShortcut("3", modifiers: .command)
                 }
                 .opacity(0)
                 .frame(width: 0, height: 0)

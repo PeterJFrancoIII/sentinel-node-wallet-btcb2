@@ -1,5 +1,7 @@
 # Minimal Consensus Security — Default Node Policy (v10)
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Project:** Sentinel Node Wallet - BTCB2  
 **Product:** One native macOS app, one managed verified Knots BTCB2 BLAKE2b MainNet daemon, three tabs, no DATUM, no archival default.  
 **Status:** Proposed source changes for Mac testing; not a production-approved release.

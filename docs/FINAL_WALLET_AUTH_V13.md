@@ -1,5 +1,7 @@
 # Wallet Manager v13 — Final Local Login + Apple Passwords Contract
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Product:** Sentinel Node Wallet - BTCB2 (native macOS, BTCB2 BLAKE2b/BIP-110 MainNet only)  
 **Status:** Final **implementation specification**, not an already implemented or deployed feature.  
 **Owner request:** One local username, strong password, and two-factor login, working with Apple's Passwords app where OS support and verified signing/associated domains permit. No new cloud login service.  

@@ -1,5 +1,7 @@
 # Wallet Manager v7 — BTCB2 MainNet (Canonical)
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Project:** Sentinel Node Wallet - BTCB2  
 **Status:** implementation specification; NOT a declaration of wallet safety or public-release readiness  
 **Scope:** one existing **Wallet** tab within the native SwiftUI app; no extra daemon, web server, external wallet API, mining/pool integration or shipped Python service.

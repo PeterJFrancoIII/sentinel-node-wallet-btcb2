@@ -6,6 +6,8 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     case serverError(code: Int, message: String)
     case invalidResponse
     case serializationError(String)
+    case unverifiedDaemon(String)
+    case transactionBroadcastDisabled
 
     public var errorDescription: String? {
         switch self {
@@ -19,6 +21,10 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
             return "Invalid response from RPC server."
         case .serializationError(let msg):
             return "JSON Serialization error: \(msg)"
+        case .unverifiedDaemon(let msg):
+            return "Daemon verification rejected: \(msg)"
+        case .transactionBroadcastDisabled:
+            return "Wallet signing, broadcasting and fee replacement are disabled pending independent BTCB2 SIGHASH_UNIFIED security approval."
         }
     }
 }
@@ -26,9 +32,21 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
 public final class BitcoinRPCClient: @unchecked Sendable {
     public let host: String
     public let port: Int
-    public let user: String
-    public let password: String
+    public private(set) var user: String
+    public private(set) var password: String
+    public var isBroadcastRestricted: Bool
+    private let credLock = NSLock()
     private let session: URLSession
+
+    // Defense-in-depth: the generic RPC API is publicly callable by other first-party
+    // modules. Do not rely solely on SwiftUI or WalletManager to block fund outflow.
+    // When isBroadcastRestricted is true (default for tests/isolated safety mode),
+    // these methods fail closed unconditionally.
+    private static let restrictedSpendMethods: Set<String> = [
+        "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
+        "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
+        "signrawtransactionwithwallet", "signrawtransactionwithkey", "finalizepsbt"
+    ]
 
     public init(
         host: String = "127.0.0.1",
@@ -36,17 +54,26 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         user: String,
         password: String,
         timeoutInterval: TimeInterval = 10.0,
-        urlSession: URLSession? = nil
+        urlSession: URLSession? = nil,
+        isBroadcastRestricted: Bool = true
     ) {
         self.host = host
         self.port = port
         self.user = user
         self.password = password
+        self.isBroadcastRestricted = isBroadcastRestricted
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeoutInterval
         config.timeoutIntervalForResource = timeoutInterval
         self.session = urlSession ?? URLSession(configuration: config)
+    }
+
+    public func updateCredentials(user: String, password: String) {
+        credLock.lock()
+        defer { credLock.unlock() }
+        self.user = user
+        self.password = password
     }
 
     public func getEndpointURL(walletName: String? = nil) -> URL? {
@@ -57,12 +84,21 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     }
 
     private var basicAuthHeader: String {
-        let authString = "\(user):\(password)"
+        credLock.lock()
+        let currentUser = self.user
+        let currentPass = self.password
+        credLock.unlock()
+        let authString = "\(currentUser):\(currentPass)"
         let data = authString.data(using: .utf8)!
         return "Basic \(data.base64EncodedString())"
     }
 
     public func call<T: Decodable>(method: String, params: [Any] = [], walletName: String? = nil) async throws -> T {
+        if isBroadcastRestricted {
+            guard !Self.restrictedSpendMethods.contains(method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+        }
         guard let url = getEndpointURL(walletName: walletName) else {
             throw RPCClientError.invalidURL
         }
@@ -219,8 +255,55 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "listtransactions", params: ["*", count, 0, true], walletName: walletName)
     }
 
-    public func sendToAddress(address: String, amount: Double, comment: String = "", walletName: String? = nil) async throws -> String {
-        try await call(method: "sendtoaddress", params: [address, amount, comment], walletName: walletName)
+    public func bumpFee(txid: String, options: [String: Any]? = nil, walletName: String? = nil) async throws -> BumpFeeResponse {
+        if let options = options {
+            return try await call(method: "bumpfee", params: [txid, options], walletName: walletName)
+        } else {
+            return try await call(method: "bumpfee", params: [txid], walletName: walletName)
+        }
+    }
+
+    public func getRawMempoolVerbose() async throws -> [String: MempoolTxSummary] {
+        try await call(method: "getrawmempool", params: [true])
+    }
+
+    public func sendToAddress(
+        address: String,
+        amount: Double,
+        comment: String = "",
+        feeRateSatPerVB: Int? = nil,
+        replaceable: Bool = true,
+        walletName: String? = nil
+    ) async throws -> String {
+        // Enforce 8-decimal fixed-point string representation for Bitcoin Core RPC compatibility
+        // Prevents floating-point scientific notation (e.g. 9.718e-05) which causes "RPC Server Error (-3): Invalid amount"
+        let amountStr = SatoshiMath.toBTCString(btc: amount)
+        var params: [Any] = [address, amountStr, comment, "", false, replaceable]
+        if let feeRate = feeRateSatPerVB, feeRate > 0 {
+            params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
+        }
+        return try await call(method: "sendtoaddress", params: params, walletName: walletName)
+    }
+
+    public func walletCreateFundedPsbt(
+        outputs: [String: Double],
+        feeRateSatPerVB: Int? = nil,
+        walletName: String? = nil
+    ) async throws -> FundedPsbtResponse {
+        var options: [String: Any] = [
+            "add_inputs": true,
+            "replaceable": true
+        ]
+        if let rate = feeRateSatPerVB, rate > 0 {
+            options["fee_rate"] = rate
+        }
+        // Output amounts must be 8-decimal fixed-point strings to avoid scientific notation serialization
+        let formattedOutputs: [[String: String]] = outputs.map { [$0.key: SatoshiMath.toBTCString(btc: $0.value)] }
+        return try await call(
+            method: "walletcreatefundedpsbt",
+            params: [[], formattedOutputs, 0, options],
+            walletName: walletName
+        )
     }
 
     public func walletPassphrase(passphrase: String, timeout: Int = 60, walletName: String? = nil) async throws {

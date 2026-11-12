@@ -217,130 +217,112 @@ final class UltraPowerAndWalletInventoryTests: XCTestCase {
         XCTAssertEqual(perms & 0o777, 0o600, "wallets_metadata.json must have 0600 permissions")
     }
 
-    func testWalletDeletionRequiresExactNameAndNonEmptyBackup() async throws {
-        let tempDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("sentinel_del_test_\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
-
-        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: "test", password: "pwd")
-        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, allowUnauthenticatedForTesting: true)
-
-        // 1. Confirmation name mismatch
+    func testDeletionRejectsConfirmationMismatchBeforeAnyNodeOrFileMutation() async throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("btcb2_delete_hold_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: temp, allowUnauthenticatedForTesting: true)
         do {
-            try await inventory.deleteWalletFromMac(
-                name: "wallet_a",
-                typedConfirmation: "wallet_b",
-                verifiedBackupPath: "/tmp/nonexistent.dat"
-            )
-            XCTFail("Must fail when typed confirmation does not match")
-        } catch let err as WalletInventoryError {
-            if case .confirmationMismatch = err {
-                // Expected
-            } else {
-                XCTFail("Unexpected error: \(err)")
-            }
-        }
-
-        // 2. Missing backup file
-        do {
-            try await inventory.deleteWalletFromMac(
-                name: "wallet_a",
-                typedConfirmation: "wallet_a",
-                verifiedBackupPath: "/tmp/definitely_does_not_exist_\(UUID().uuidString).dat"
-            )
-            XCTFail("Must fail when backup file does not exist")
-        } catch let err as WalletInventoryError {
-            if case .backupNotFound = err {
-                // Expected
-            } else {
-                XCTFail("Unexpected error: \(err)")
-            }
-        }
-
-        // 3. Empty backup file (0 bytes)
-        let emptyBackup = tempDir.appendingPathComponent("empty_backup.dat")
-        try Data().write(to: emptyBackup)
-
-        do {
-            try await inventory.deleteWalletFromMac(
-                name: "wallet_a",
-                typedConfirmation: "wallet_a",
-                verifiedBackupPath: emptyBackup.path
-            )
-            XCTFail("Must fail when backup file is 0 bytes")
-        } catch let err as WalletInventoryError {
-            if case .backupEmpty = err {
-                // Expected
-            } else {
-                XCTFail("Unexpected error: \(err)")
+            try await inventory.deleteWalletFromMac(name: "wallet_a", typedConfirmation: "wallet_b", verifiedBackupPath: "/tmp/nonexistent.dat")
+            XCTFail("Wallet deletion must refuse mismatched confirmation")
+        } catch let error as WalletInventoryError {
+            guard case .confirmationMismatch = error else {
+                XCTFail("Expected confirmationMismatch, got \(error)")
+                return
             }
         }
     }
 
-    func testLiveWalletBackupAndSafeTrashDeletion() async throws {
-        guard ProcessInfo.processInfo.environment["RUN_LIVE_KNOTS_TESTS"] == "1" else {
-            return
+    func testDeletionRejectsMissingReceiptAndDoesNotTouchWalletFiles() async throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("btcb2_delete_hold_\(UUID().uuidString)")
+        let wallet = temp.appendingPathComponent("wallets").appendingPathComponent("wallet_a")
+        try FileManager.default.createDirectory(at: wallet, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let original = wallet.appendingPathComponent("wallet.dat")
+        try Data("preserve-wallet-descriptors".utf8).write(to: original)
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: temp, allowUnauthenticatedForTesting: true)
+        do {
+            try await inventory.deleteWalletFromMac(name: "wallet_a", typedConfirmation: "wallet_a", verifiedBackupPath: "/tmp/nonexistent.dat")
+            XCTFail("Wallet deletion must require independently verifiable recovery proof")
+        } catch let error as WalletInventoryError {
+            guard case .restoreVerificationFailed = error else {
+                XCTFail("Expected mandatory recovery proof failure, got \(error)")
+                return
+            }
         }
+        XCTAssertEqual(try Data(contentsOf: original), Data("preserve-wallet-descriptors".utf8))
+    }
 
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let datadir = appSupport.appendingPathComponent("NodePocketBTCB2")
-        let confURL = datadir.appendingPathComponent("bitcoin.conf")
-        guard FileManager.default.fileExists(atPath: confURL.path) else {
-            XCTFail("bitcoin.conf not found at \(confURL.path)")
-            return
-        }
+    func testDeletionRejectsUnconfirmedDurabilityAndVerifiedSizeWithoutRestoreProof() async throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("btcb2_delete_hold_\(UUID().uuidString)")
+        let wallet = temp.appendingPathComponent("wallets").appendingPathComponent("wallet_a")
+        try FileManager.default.createDirectory(at: wallet, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let original = wallet.appendingPathComponent("wallet.dat")
+        let walletBytes = Data("never-trash-or-modify".utf8)
+        try walletBytes.write(to: original)
+        let backup = temp.appendingPathComponent("encrypted_backup.dat")
+        var backupBytes = Data([0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00])
+        backupBytes.append(Data(repeating: 0, count: 2032))
+        try backupBytes.write(to: backup)
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: temp, allowUnauthenticatedForTesting: true)
 
-        let confContent = try String(contentsOf: confURL, encoding: .utf8)
-        var rpcUser = "nodepocket_user"
-        var rpcPass = ""
-        for line in confContent.components(separatedBy: .newlines) {
-            if line.starts(with: "rpcuser=") {
-                rpcUser = String(line.dropFirst("rpcuser=".count))
-            } else if line.starts(with: "rpcpassword=") {
-                rpcPass = String(line.dropFirst("rpcpassword=".count))
+        for durable in [false, true] {
+            let receipt = VerifiedBackupReceipt(
+                walletName: "wallet_a",
+                backupPath: backup.path,
+                sha256Digest: String(repeating: "a", count: 64),
+                bytesWritten: 2048,
+                isDurabilityConfirmed: durable
+            )
+            do {
+                try await inventory.deleteWalletFromMac(
+                    name: "wallet_a", typedConfirmation: "wallet_a",
+                    verifiedBackupPath: backup.path, verifiedReceipt: receipt
+                )
+                XCTFail("A backup receipt without isolated, independently verified restore must never authorize deletion")
+            } catch let error as WalletInventoryError {
+                guard case .restoreVerificationFailed = error else {
+                    XCTFail("Expected restoreVerificationFailed, got \(error)")
+                    return
+                }
             }
         }
 
-        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 8332, user: rpcUser, password: rpcPass)
-        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: datadir, allowUnauthenticatedForTesting: true)
+        XCTAssertEqual(try Data(contentsOf: original), walletBytes)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: backup.path))
+    }
 
-        let ephemeralWalletName = "test_del_wallet_\(Int(Date().timeIntervalSince1970))"
-
-        // 1. Create empty wallet
-        let createResp = try await rpc.createWallet(name: ephemeralWalletName, passphrase: "TestPassphrase123!#$")
-        XCTAssertEqual(createResp.name, ephemeralWalletName)
-
-        // 2. Perform verified backup
-        let tempBackup = FileManager.default.temporaryDirectory.appendingPathComponent("\(ephemeralWalletName).dat")
-        try await rpc.backupWallet(destinationPath: tempBackup.path, walletName: ephemeralWalletName)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: tempBackup.path))
-        let attrs = try FileManager.default.attributesOfItem(atPath: tempBackup.path)
-        let size = (attrs[.size] as? NSNumber)?.int64Value ?? 0
-        XCTAssertGreaterThan(size, 0, "Backup file must be non-empty")
-
-        // 3. Delete from Mac to Trash
-        try await inventory.deleteWalletFromMac(
-            name: ephemeralWalletName,
-            typedConfirmation: ephemeralWalletName,
-            verifiedBackupPath: tempBackup.path
+    func testDeletionRejectsBackupReceiptWalletMismatch() async throws {
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent("btcb2_delete_hold_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        let receipt = VerifiedBackupReceipt(
+            walletName: "different_wallet", backupPath: "/tmp/never_used.dat",
+            sha256Digest: "not-consumed", bytesWritten: 2048, isDurabilityConfirmed: true
         )
-
-        // 4. Verify wallet directory is no longer in datadir
-        let walletDir = datadir.appendingPathComponent(ephemeralWalletName)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: walletDir.path), "Wallet dir must be removed from datadir")
-
-        // 5. Verify Knots no longer has it loaded
-        let loaded = try await rpc.listWallets()
-        XCTAssertFalse(loaded.contains(ephemeralWalletName), "Wallet must be unloaded")
-
-        // 6. Verify item was moved to macOS Trash
-        let trashDir = FileManager.default.urls(for: .trashDirectory, in: .userDomainMask).first!
-        let trashedWallet = trashDir.appendingPathComponent(ephemeralWalletName)
-        XCTAssertTrue(FileManager.default.fileExists(atPath: trashedWallet.path), "Wallet must be in macOS Trash")
-
-        // Clean up backup and trash for ephemeral test wallet
-        try? FileManager.default.removeItem(at: tempBackup)
-        try? FileManager.default.removeItem(at: trashedWallet)
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 65534, user: "test", password: "test", timeoutInterval: 0.1)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: temp, allowUnauthenticatedForTesting: true)
+        do {
+            try await inventory.deleteWalletFromMac(
+                name: "wallet_a", typedConfirmation: "wallet_a",
+                verifiedBackupPath: "/tmp/never_used.dat", verifiedReceipt: receipt
+            )
+            XCTFail("Must reject backup proof from another wallet")
+        } catch let error as WalletInventoryError {
+            guard case .backupIdentityMismatch = error else {
+                XCTFail("Expected backupIdentityMismatch, got \(error)")
+                return
+            }
+        }
     }
+
+    /// Previous version contacted the REAL application-support MainNet datadir,
+    /// created a wallet, then attempted destructive Trash cleanup. That test has
+    /// been removed. Any future end-to-end test must create its own isolated
+    /// daemon/process and temporary data directory with no operator wallet access.
+
 }

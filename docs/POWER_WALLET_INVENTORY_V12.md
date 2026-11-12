@@ -1,5 +1,7 @@
 # Sentinel Node Wallet - BTCB2: Ultra Power Policy, All-Wallet Inventory & Single Settings UI (V12)
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Canonical Document Authority:** `PeterJFrancoIII/sentinel-node-wallet-btcb2`  
 **Shared Memory Entity:** `SentinelNodeWallet_BTCB2_PowerWalletInventory_MinimalUI_v12_20261106`  
 **Governing Authority:** [Shared Cognitive Memory Agent Rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md)
@@ -10,7 +12,7 @@
 
 Sentinel Node Wallet - BTCB2 Release Specification V12 introduces three fundamental architectural improvements while strictly maintaining the minimal 3-tab native macOS architecture, BTCB2 BLAKE2b MainNet-only consensus, and fail-closed security invariants:
 
-1. **Automatic Ultra Power Policy:** Continuous macOS `IOKit.ps` monitoring detecting battery power, active charging, and macOS Low Power Mode. Automatically applies ephemeral lightweight resource bounds (`par=1`, `dbcache=128MiB`, `maxconnections=12`, `maxuploadtarget=128MiB`) without altering saved user preferences, restoring preferred Quiet/Balanced/Fast settings upon return to stable AC power.
+1. **Automatic Ultra Power Policy:** Continuous macOS `IOKit.ps` monitoring detecting battery power, active charging, and macOS Low Power Mode. Automatically applies ephemeral lightweight resource bounds (`par=1`, `dbcache=128MiB`, `maxconnections=4`, `maxuploadtarget=128MiB`, `-listen=0`, low CPU/disk I/O priority) without altering saved user preferences, restoring preferred Quiet/Balanced/Fast settings upon return to stable AC power. (Note: Authoritative override `SENTINEL-ULTRA-CORRECTION-20261106-024` permanently enforces `maxconnections=4` and `listen=0`, superseding draft 12-peer limits).
 2. **All-Wallet Inventory:** Complete visibility into all created and on-disk wallets via `listwalletdir` and `listwallets`. Strict per-wallet balance queries (`/wallet/<name>`), integer satoshi math, stale/unavailable labeling for unloaded wallets, reversible in-memory **Archive**, and fail-closed reversible **Delete from this Mac** via macOS Trash with mandatory pre-deletion backup verification.
 3. **Single Settings Button:** Removal of redundant settings entry points from `NodeView.swift`. Storage Footprint is rendered as an inert, read-only rolling history metric card, leaving exactly one top-header Settings gear button (`node-settings-button`) accessible across all node lifecycle states.
 

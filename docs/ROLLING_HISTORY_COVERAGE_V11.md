@@ -1,5 +1,7 @@
 # Rolling Historical Ledger Coverage — v11
 
+> **Current status:** [Built / In progress / Left](PROJECT_STATUS.md) (2026-11-09). This document is a detailed historical specification or agent receipt, **not** independent production acceptance. Public distribution and real funds: **NO-GO**.
+
 **Product:** Sentinel Node Wallet - BTCB2 (MainNet only)  
 **Surface:** Node → **Storage Footprint** → existing Advanced Storage picker. No additional tab, service, daemon, index or archive required.  
 **Status:** Draft Swift implementation and tests. Live Mac/Knots verification is still required.

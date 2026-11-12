@@ -28,16 +28,31 @@ public enum KeychainError: Error, LocalizedError, Sendable {
     }
 }
 
+/// Narrow custody contract for deterministic fail-closed onboarding tests.
+/// The real implementation is KeychainHelper; no in-memory fallback is shipped.
+public protocol WalletPassphraseCustody: Sendable {
+    func saveNewPassphrase(_ pass: String, account: String) throws
+    func retrievePassphraseInteractively(account: String) async throws -> String
+}
+
 /// Secure macOS Keychain integration for user-consented wallet passphrase storage.
 /// Strictly Keychain-exclusive: never writes passwords, keys, or seeds to files on disk.
 /// Enforces per-send and per-security-policy user-presence authentication challenges.
 public final class KeychainHelper: Sendable {
     public static let shared = KeychainHelper()
     public let serviceName: String
+#if DEBUG
+    public let allowFallbackForTesting: Bool
 
+    public init(serviceName: String = "app.nodepocket.btcb2.wallet", allowFallbackForTesting: Bool = false) {
+        self.serviceName = serviceName
+        self.allowFallbackForTesting = allowFallbackForTesting
+    }
+#else
     public init(serviceName: String = "app.nodepocket.btcb2.wallet") {
         self.serviceName = serviceName
     }
+#endif
 
     /// Evaluates macOS device owner authentication (Touch ID / Local Password) before authorization.
     public func authenticateUserPresence(reason: String) async throws -> Bool {
@@ -66,8 +81,20 @@ public final class KeychainHelper: Sendable {
         }
     }
 
-    /// Stores a wallet passphrase in macOS Keychain with user-level protection.
+    /// General explicit rotation flow. Retains the existing non-destructive update behavior.
+    /// Never use this method when creating a NEW wallet: an existing credential must not
+    /// be silently replaced by an unrelated new wallet's passphrase.
     public func savePassphrase(_ pass: String, account: String) throws {
+        try storePassphrase(pass, account: account, allowExistingUpdate: true)
+    }
+
+    /// Creation-only save. A duplicate is reported to the caller, which must verify
+    /// an exact match with device-owner approval or abort BEFORE createwallet RPC.
+    public func saveNewPassphrase(_ pass: String, account: String) throws {
+        try storePassphrase(pass, account: account, allowExistingUpdate: false)
+    }
+
+    private func storePassphrase(_ pass: String, account: String, allowExistingUpdate: Bool) throws {
         guard !pass.isEmpty, !account.isEmpty, let data = pass.data(using: .utf8) else {
             throw KeychainError.invalidData
         }
@@ -94,10 +121,24 @@ public final class KeychainHelper: Sendable {
         ]
 
         var status = SecItemAdd(query as CFDictionary, nil)
-        if status == errSecParam || status == errSecMissingEntitlement || status == -34018 {
-            // On macOS without data-protection keychain entitlements (e.g. local ad-hoc binary builds),
-            // SecAccessControl fails with errSecParam (-50) or errSecMissingEntitlement (-34018).
-            // Fall back cleanly to kSecAttrAccessibleWhenUnlockedThisDeviceOnly.
+        if status == errSecDuplicateItem && allowExistingUpdate {
+            // Explicit rotation only: update the existing item without deleting first!
+            let updateQuery: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: serviceName,
+                kSecAttrAccount as String: account
+            ]
+            let updateAttrs: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessControl as String: control
+            ]
+            status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+        }
+
+#if DEBUG
+        if (status == errSecParam || status == errSecMissingEntitlement || status == -34018) && allowFallbackForTesting {
+            // Under explicit opt-in in debug unit testing only, allow fallback test coverage.
+            // Release builds strictly fail closed on -34018 / errSecMissingEntitlement.
             let fallbackQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,
@@ -108,6 +149,8 @@ public final class KeychainHelper: Sendable {
             ]
             status = SecItemAdd(fallbackQuery as CFDictionary, nil)
         }
+#endif
+
         if status == errSecDuplicateItem {
             throw KeychainError.duplicateItem
         }
@@ -231,3 +274,5 @@ public final class KeychainHelper: Sendable {
         }
     }
 }
+
+extension KeychainHelper: WalletPassphraseCustody {}

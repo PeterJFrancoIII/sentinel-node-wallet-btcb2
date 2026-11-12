@@ -23,7 +23,11 @@ public final class AppState: ObservableObject {
     @Published public var isApplyingNodeSettings = false
     @Published public var appliedSettingsStatus: String = "Not yet verified"
     @Published public var storageMode: StorageMode = .compact(pruneMB: StorageMode.defaultPruneMB)
+    @Published public var canonicalReceiveAddress: String = ""
     @Published public var receiveAddress: String = ""
+    @Published public var activeReceiveAddresses: [ReceiveAddressRecord] = []
+    @Published public var archivedReceiveAddresses: [ReceiveAddressRecord] = []
+    public let receiveAddressStore: ReceiveAddressStore
     @Published public var logs: [String] = []
     @Published public var alertMessage: String?
     @Published public var showAlert: Bool = false
@@ -37,6 +41,14 @@ public final class AppState: ObservableObject {
     private var lastPowerTransitionTime: Date = Date()
     private var isEvaluatingPower: Bool = false
 
+    // Navigation Tab
+    @Published public var selectedTab: AppViewTab = .node
+
+    // Live BTCB2 Exchange Pricing (Neoxa & NonKYC)
+    public let priceService: BTCB2PriceService = BTCB2PriceService.shared
+    @Published public var priceState: BTCB2PriceState = BTCB2PriceState()
+    @Published public var isFetchingPrice: Bool = false
+
     // Multi-Wallet Inventory
     public let walletInventory: WalletInventory
     @Published public var walletSummaries: [WalletSummary] = []
@@ -48,7 +60,9 @@ public final class AppState: ObservableObject {
     @Published public var authSession: WalletAuthCapability? = nil
     @Published public var isAuthEnrolled: Bool = false
     @Published public var enrolledUsername: String? = nil
+    @Published public var enrolledUsernames: [String] = []
     @Published public var isWalletTabUnlocked: Bool = false
+    @Published public var isMigrationPending: Bool = false
     @Published public var authErrorMessage: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
 
@@ -61,20 +75,22 @@ public final class AppState: ObservableObject {
     private let timeFormatter: DateFormatter
 
     public init() {
-        let config = NodeConfig(
-            profile: .preset(for: .balanced),
-            storageMode: .compact(pruneMB: StorageMode.defaultPruneMB)
-        )
+        let config = NodeConfig()
         let book = AddressBook()
+        let addrStore = ReceiveAddressStore()
         self.addressBook = book
+        self.receiveAddressStore = addrStore
         self.nodeManager = NodeManager(config: config)
         let authCoord = WalletAuthCoordinator(dataDirectory: config.dataDirectory)
         self.authCoordinator = authCoord
-        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, addressBook: book, authCoordinator: authCoord)
-        self.walletInventory = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, authCoordinator: authCoord)
+        let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        self.walletInventory = inv
+        self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
         self.userPreferredProfile = config.profile.type
+        self.ultraStatusTitle = "\(config.profile.type.rawValue) Profile Active"
+        self.ultraStatusSubtitle = "\(config.profile.parThreads) threads, \(config.profile.dbCacheMB) MiB dbcache, max \(config.profile.maxConnections) peers"
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
@@ -83,6 +99,14 @@ public final class AppState: ObservableObject {
         setupBindings()
         startHealthMonitoring()
         refreshAuthState()
+
+        Task {
+            await self.refreshPrice()
+        }
+
+        Task { [walletManager] in
+            await walletManager.purgeStaleStagingDirectories()
+        }
     }
 
     private func setupBindings() {
@@ -234,7 +258,7 @@ public final class AppState: ObservableObject {
                 ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
                 ultraStatusSubtitle = "Active (\(snapshot.powerState.displayLabel)): 1 thread, 128 MiB dbcache, max 4 peers, listen=0 • Preferred \(userPreferredProfile.rawValue) resumes on AC"
             }
-        } else {
+        } else if snapshot.powerState == .acNotCharging {
             // Stable AC
             if isUltraActive {
                 ultraStatusTitle = "\(userPreferredProfile.rawValue) Profile Resuming"
@@ -248,8 +272,8 @@ public final class AppState: ObservableObject {
                         let applied = try await self.nodeManager.applyUltraMode(active: false)
                         if applied {
                             self.isUltraActive = false
-                            let pref = SyncProfile.preset(for: self.userPreferredProfile)
-                            self.ultraStatusTitle = "\(self.userPreferredProfile.rawValue) Profile Active"
+                            let pref = self.nodeManager.config.profile
+                            self.ultraStatusTitle = "\(pref.type.rawValue) Profile Active"
                             self.ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
                             self.appendLog("[POWER] Restored preferred profile \(self.userPreferredProfile.rawValue) on stable AC power.")
                         }
@@ -258,10 +282,14 @@ public final class AppState: ObservableObject {
                     }
                 }
             } else {
-                let pref = SyncProfile.preset(for: userPreferredProfile)
-                ultraStatusTitle = "\(userPreferredProfile.rawValue) Profile Active"
+                let pref = nodeManager.config.profile
+                ultraStatusTitle = "\(pref.type.rawValue) Profile Active"
                 ultraStatusSubtitle = "\(pref.parThreads) threads, \(pref.dbCacheMB) MiB dbcache, max \(pref.maxConnections) peers"
             }
+        } else {
+            // Unknown or unconfirmed power state: operating conservatively without claiming an unverified profile
+            ultraStatusTitle = "Power State Unknown"
+            ultraStatusSubtitle = "Operating conservatively; profile changes held until power state is confirmed."
         }
     }
 
@@ -279,6 +307,8 @@ public final class AppState: ObservableObject {
         Task { @MainActor in
             self.isAuthEnrolled = await authCoordinator.isEnrolled
             self.enrolledUsername = await authCoordinator.enrolledUsername
+            self.enrolledUsernames = await authCoordinator.enrolledUsernames
+            self.isMigrationPending = await authCoordinator.isMigrationPending
             if let cur = await authCoordinator.currentSession {
                 self.authSession = cur
                 self.isWalletTabUnlocked = true
@@ -298,6 +328,10 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public func cancelEnrollment() {
+        self.generatedEnrollmentData = nil
+    }
+
     public func enrollUser(password: String, totpCode: String) async throws {
         guard let data = generatedEnrollmentData else {
             throw WalletAuthError.invalidCredentials
@@ -310,41 +344,123 @@ public final class AppState: ObservableObject {
             totpCode: totpCode,
             recoveryCodes: data.recoveryCodes
         )
+        await walletManager.resetActiveWallet()
         self.authSession = session
         self.isAuthEnrolled = true
         self.enrolledUsername = session.username
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isWalletTabUnlocked = true
+        self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
-        self.appendLog("[AUTH] Operator enrolled and Wallet Manager unlocked.")
+        // The TOTP provisioning URI and recovery codes are secret setup material.
+        // Once enrollment succeeds, discard the app's transient onboarding copy.
+        self.generatedEnrollmentData = nil
+        self.walletSnapshot = nil
+        self.canonicalReceiveAddress = ""
+        self.receiveAddress = ""
+        self.activeReceiveAddresses = []
+        self.archivedReceiveAddresses = []
+        self.transactions = []
+        self.walletSummaries = []
+        self.appendLog("[AUTH] Operator '\(session.username)' enrolled and Wallet Manager unlocked.")
         self.refreshWallet()
+        self.refreshWalletInventory()
+        Task { await self.refreshPrice() }
     }
 
     public func loginUser(username: String, password: String, totpCode: String) async throws {
         let session = try await authCoordinator.login(username: username, password: password, totpCode: totpCode)
+        guard await authCoordinator.currentSession?.id == session.id else {
+            return
+        }
+        await walletManager.resetActiveWallet()
         self.authSession = session
         self.isWalletTabUnlocked = true
+        self.enrolledUsername = session.username
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
+        self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
-        self.appendLog("[AUTH] Operator logged in. Wallet Manager unlocked.")
+        self.walletSnapshot = nil
+        self.canonicalReceiveAddress = ""
+        self.receiveAddress = ""
+        self.activeReceiveAddresses = []
+        self.archivedReceiveAddresses = []
+        self.transactions = []
+        self.walletSummaries = []
+        self.appendLog("[AUTH] Operator '\(session.username)' logged in. Wallet Manager unlocked.")
         self.refreshWallet()
+        self.refreshWalletInventory()
+        Task { await self.refreshPrice() }
     }
 
     public func loginWithRecoveryCode(username: String, code: String) async throws {
         let session = try await authCoordinator.loginWithRecoveryCode(username: username, code: code)
+        guard await authCoordinator.currentSession?.id == session.id else {
+            return
+        }
+        await walletManager.resetActiveWallet()
         self.authSession = session
         self.isWalletTabUnlocked = true
+        self.enrolledUsername = session.username
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
+        self.isMigrationPending = await authCoordinator.isMigrationPending
         self.authErrorMessage = nil
-        self.appendLog("[AUTH] Operator logged in via recovery code. Wallet Manager unlocked.")
+        self.walletSnapshot = nil
+        self.canonicalReceiveAddress = ""
+        self.receiveAddress = ""
+        self.activeReceiveAddresses = []
+        self.archivedReceiveAddresses = []
+        self.transactions = []
+        self.walletSummaries = []
+        self.appendLog("[AUTH] Operator '\(session.username)' logged in via recovery code. Wallet Manager unlocked.")
         self.refreshWallet()
+        self.refreshWalletInventory()
+        Task { await self.refreshPrice() }
+    }
+
+    // MARK: - BTCB2 Exchange Pricing (Neoxa & NonKYC)
+
+    public func refreshPrice() async {
+        isFetchingPrice = true
+        let updated = await priceService.refreshPrice()
+        await MainActor.run {
+            self.priceState = updated
+            self.isFetchingPrice = false
+        }
+    }
+
+    public func setPriceOverride(price: Double) {
+        Task {
+            let updated = await priceService.setCustomOverride(price: price)
+            await MainActor.run {
+                self.priceState = updated
+            }
+        }
+    }
+
+    public func clearPriceOverride() {
+        Task {
+            let updated = await priceService.clearCustomOverride()
+            await MainActor.run {
+                self.priceState = updated
+            }
+        }
     }
 
     public func lockWallet() {
         Task { @MainActor in
             await authCoordinator.invalidateSession()
+            await walletManager.resetActiveWallet()
             self.authSession = nil
             self.isWalletTabUnlocked = false
+            self.isMigrationPending = await authCoordinator.isMigrationPending
             self.walletSnapshot = nil
+            self.canonicalReceiveAddress = ""
             self.receiveAddress = ""
+            self.activeReceiveAddresses = []
+            self.archivedReceiveAddresses = []
             self.transactions = []
+            self.walletSummaries = []
             self.appendLog("[AUTH] Wallet Manager locked.")
         }
     }
@@ -354,6 +470,12 @@ public final class AppState: ObservableObject {
             throw WalletAuthError.unauthenticated
         }
         return try await authCoordinator.requestHighRiskApproval(capability: session, action: action, target: target, reason: reason)
+    }
+
+    /// Authenticates the user with Touch ID / Mac password, and retrieves saved operator credentials from Keychain.
+    public func retrieveOperatorCredentialsWithBiometrics(username: String) async throws -> (password: String?, totpCode: String?) {
+        let reason = "Authenticate with Touch ID or your Mac password to autofill Operator Login credentials for '\(username)'."
+        return try await authCoordinator.retrieveOperatorCredentialsWithBiometrics(username: username, reason: reason)
     }
 
     /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
@@ -369,10 +491,18 @@ public final class AppState: ObservableObject {
                 // Check if background daemon is already responding
                 let isAlreadyRunning = (try? await nodeManager.rpcClient.getBlockchainInfo()) != nil
                 if isAlreadyRunning {
-                    nodeManager.adoptRunningDaemon()
-                    appendLog("[BOOTSTRAP] Connected to active bitcoind daemon.")
+                    let isVerified = await nodeManager.verifyAdoptedDaemon()
+                    if isVerified {
+                        nodeManager.adoptRunningDaemon()
+                        appendLog("[BOOTSTRAP] Verified and connected to active Knots BTCB2 daemon.")
+                    } else {
+                        throw RPCClientError.unverifiedDaemon(
+                            "An unverified process is responding on port \(nodeManager.config.rpcPort). " +
+                            "Refusing to adopt an unverified daemon. Stop the external process before launching Sentinel Node Wallet."
+                        )
+                    }
                 } else {
-                    try nodeManager.start()
+                    try nodeManager.start(ultraOverride: self.isUltraActive)
                     startupStatus = "Awaiting loopback RPC connection..."
                     try await nodeManager.waitForRPCReadiness(timeoutSeconds: 60)
                 }
@@ -380,11 +510,21 @@ public final class AppState: ObservableObject {
                 startupStatus = "Checking for an existing wallet..."
                 var needsWalletSetup = false
                 do {
-                    let walletName = try await walletManager.ensureDefaultWalletLoaded()
-                    appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded.")
-                    receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-                    walletSnapshot = try await walletManager.refreshWalletInfo()
-                    transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                    let walletName = try await walletManager.ensureDefaultWalletLoaded(capability: self.authSession)
+                    if self.isWalletTabUnlocked && self.authSession != nil {
+                        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+                        await self.loadOrEstablishReceiveAddresses(for: walletName)
+                        transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                        appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded and ready.")
+                    } else {
+                        walletSnapshot = nil
+                        canonicalReceiveAddress = ""
+                        receiveAddress = ""
+                        activeReceiveAddresses = []
+                        archivedReceiveAddresses = []
+                        transactions = []
+                        appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' discovered. Locked.")
+                    }
                 } catch WalletSecurityError.walletOnboardingRequired {
                     // No wallet exists yet. This is normal, NOT a failed node startup.
                     needsWalletSetup = true
@@ -392,6 +532,12 @@ public final class AppState: ObservableObject {
                     receiveAddress = ""
                     transactions = []
                     appendLog("[WALLET] Node is running. Create or load an encrypted wallet.")
+                } catch is WalletAuthError {
+                    walletSnapshot = nil
+                    receiveAddress = ""
+                    transactions = []
+                    appendLog("[AUTH] Wallet Manager is locked. Directing operator to Wallet sign-in.")
+                    selectedTab = .wallet
                 }
 
                 if let binfo = try? await nodeManager.rpcClient.getBlockchainInfo() {
@@ -406,6 +552,11 @@ public final class AppState: ObservableObject {
                 appendLog(needsWalletSetup
                     ? "[BOOTSTRAP] Node online; wallet setup required."
                     : "[BOOTSTRAP] Node and existing wallet ready.")
+            } catch let authError as WalletAuthError {
+                isStartingUp = false
+                startupStatus = "Node online — Wallet locked"
+                selectedTab = .wallet
+                appendLog("[AUTH] \(authError.localizedDescription). Directing to Wallet sign-in.")
             } catch {
                 isStartingUp = false
                 startupStatus = "Failed"
@@ -417,17 +568,52 @@ public final class AppState: ObservableObject {
     }
 
     /// Complete first-run wallet onboarding without restarting or resetting IBD.
+    @discardableResult
     public func createEncryptedWallet(
         name: String, passphrase: String, storeInKeychain: Bool
-    ) async throws {
-        try await walletManager.createEncryptedDescriptorWallet(
+    ) async throws -> WalletCreationResult {
+        let (rpcReady, rpcStatus) = await checkRPCReadiness()
+        guard rpcReady else {
+            throw WalletCreationError.nodeUnreachable(rpcStatus)
+        }
+
+        let result = try await walletManager.createEncryptedDescriptorWallet(
             name: name, passphrase: passphrase, storeInKeychain: storeInKeychain, capability: self.authSession
         )
-        walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
-        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+        await self.loadOrEstablishReceiveAddresses(for: name)
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        self.refreshWalletInventory()
         startupStatus = "Ready"
-        appendLog("[WALLET] Encrypted descriptor wallet '\(name)' verified and ready.")
+        appendLog("[WALLET] \(result.statusMessage)")
+        if let warn = result.keychainWarning {
+            appendLog("[KEYCHAIN] Notice: \(warn)")
+        }
+        return result
+    }
+
+    public func checkRPCReadiness() async -> (isReady: Bool, status: String) {
+        do {
+            _ = try await nodeManager.rpcClient.getNetworkInfo()
+            return (true, "Ready")
+        } catch let err as RPCClientError {
+            switch err {
+            case .serverError(let code, let msg):
+                if code == -28 {
+                    return (false, "Node is warming up: \(msg)")
+                } else if code == 401 {
+                    return (false, "RPC authentication failed (HTTP 401)")
+                } else {
+                    return (false, "RPC error (\(code)): \(msg)")
+                }
+            case .networkError(let msg):
+                return (false, "Node RPC unreachable: \(msg)")
+            default:
+                return (false, err.localizedDescription)
+            }
+        } catch {
+            return (false, error.localizedDescription)
+        }
     }
 
     /// A prior attempt may have succeeded before its response was lost.
@@ -435,17 +621,20 @@ public final class AppState: ObservableObject {
     public func loadExistingWallet(name: String) async throws {
         try await walletManager.loadWallet(name: name, capability: self.authSession)
         walletSnapshot = try await walletManager.refreshWalletInfo(capability: self.authSession)
-        receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
+        await self.loadOrEstablishReceiveAddresses(for: name)
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
         startupStatus = "Ready"
         appendLog("[WALLET] Existing wallet '\(name)' loaded.")
     }
 
-    /// Enumerates loaded and on-disk wallets discovered in the node datadir.
+    /// Enumerates loaded and on-disk wallets discovered in the node datadir, strictly scoped to the authenticated operator.
     public func fetchAvailableWallets() async -> (loaded: [String], onDisk: [String]) {
-        let loaded = (try? await walletManager.rpcClient.listWallets()) ?? []
-        let dir = (try? await walletManager.rpcClient.listWalletDir())
-        let onDisk = dir?.wallets.map { $0.name } ?? []
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            return (loaded: [], onDisk: [])
+        }
+        let summaries = (try? await walletInventory.refreshInventory(capability: session)) ?? []
+        let loaded = summaries.filter { $0.isLoaded && !$0.isArchived }.map { $0.name }
+        let onDisk = summaries.filter { !$0.isArchived }.map { $0.name }
         return (loaded: loaded, onDisk: onDisk)
     }
 
@@ -458,16 +647,24 @@ public final class AppState: ObservableObject {
 
     /// Single state-owned path for node resource and pruning settings.
     /// UI updates only after configuration succeeds. Errors are never hidden.
-    public func applyNodeSettings(profile: SyncProfile, storageMode mode: StorageMode) async throws {
+    public func applyNodeSettings(profile: SyncProfile, storageMode mode: StorageMode, allowInboundP2P: Bool? = nil) async throws {
         guard !isApplyingNodeSettings else {
             throw RPCClientError.serializationError("Another settings change is already in progress.")
         }
         isApplyingNodeSettings = true
         defer { isApplyingNodeSettings = false }
-        let status = try await nodeManager.applyConfiguration(profile: profile, storageMode: mode)
+        let status = try await nodeManager.applyConfiguration(profile: profile, storageMode: mode, allowInboundP2P: allowInboundP2P)
         selectedProfileType = profile.type
+        userPreferredProfile = profile.type
         storageMode = mode
         appliedSettingsStatus = status
+        if !isUltraActive {
+            ultraStatusTitle = "\(profile.type.rawValue) Profile Active"
+            ultraStatusSubtitle = "\(profile.parThreads) threads, \(profile.dbCacheMB) MiB dbcache, max \(profile.maxConnections) peers"
+        } else {
+            ultraStatusTitle = "Ultra Battery • 4 max peers • background CPU and disk I/O"
+            ultraStatusSubtitle = "Ultra enforced: max 4 peers. Preferred \(profile.type.rawValue) / \(profile.maxConnections)-peer setting queued until stable AC."
+        }
         appendLog("[CONFIG] \(profile.type.rawValue): \(status)")
     }
 
@@ -491,14 +688,26 @@ public final class AppState: ObservableObject {
     }
 
     public func prepareSendPreview(to destinationAddress: String, amountSats: Int64, feeQuote: FeeQuote) async throws -> FundedTxPreview {
-        try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote)
+        try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote, capability: self.authSession)
     }
 
     public func executeAuthorizedSend(preview: FundedTxPreview, explicitPassphrase: String? = nil) async throws -> String {
-        let txid = try await walletManager.executeAuthorizedSend(preview: preview, explicitPassphrase: explicitPassphrase)
-        appendLog("[TRANSACTION] Broadcasted \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress): \(txid)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        let approval = try await authCoordinator.requestHighRiskApproval(
+            capability: session,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
+        )
+        let txid = try await walletManager.executeAuthorizedSend(
+            preview: preview,
+            explicitPassphrase: explicitPassphrase,
+            capability: session,
+            approval: approval
+        )
+        refreshWallet()
         return txid
     }
 
@@ -529,37 +738,103 @@ public final class AppState: ObservableObject {
     }
 
     public func refreshCoinbaseRewards() {
+        guard isWalletTabUnlocked, let session = self.authSession else { return }
         let tip = blockchainInfo?.blocks ?? 0
         let inIBD = blockchainInfo?.initialblockdownload ?? false
         Task {
-            if let rewards = try? await walletManager.fetchCoinbaseRewards(currentTipHeight: tip, isIBD: inIBD) {
+            do {
+                let rewards = try await walletManager.fetchCoinbaseRewards(currentTipHeight: tip, isIBD: inIBD, capability: session)
                 await MainActor.run {
                     self.coinbaseRewards = rewards
                 }
+            } catch {
+                appendLog("[WALLET] Coinbase rewards refresh notice: \(error.localizedDescription)")
             }
         }
     }
 
+    @discardableResult
+    public func exportBackup(to fileURL: URL, walletName: String? = nil) async throws -> BackupExportResult {
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        let current = await walletManager.currentWalletName
+        let target = walletName ?? current ?? ""
+        guard !target.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
+        // Safety: Refuse symlinks and existing files to protect operator data from destruction or redirection.
+        if (try? FileManager.default.destinationOfSymbolicLink(atPath: fileURL.path)) != nil {
+            throw WalletSecurityError.backupDestinationInvalid("Destination path cannot be a symbolic link.")
+        }
+        let resolvedURL = fileURL.resolvingSymlinksInPath()
+        guard !FileManager.default.fileExists(atPath: fileURL.path),
+              !FileManager.default.fileExists(atPath: resolvedURL.path) else {
+            throw WalletSecurityError.backupDestinationAlreadyExists(fileURL.path)
+        }
+        let initialSessionId = session.id
+        let approval = try await requestHighRiskApproval(
+            action: "export",
+            target: target,
+            reason: "Authorize exporting encrypted backup of wallet '\(target)'"
+        )
+        // Verify wallet and session identity DID NOT change during async device-owner challenge
+        guard isWalletTabUnlocked, let currentSession = self.authSession, currentSession.id == initialSessionId else {
+            throw WalletAuthError.authAbortedByLock
+        }
+
+        let result = try await walletManager.exportBackup(
+            to: fileURL,
+            targetWalletName: target,
+            capability: currentSession,
+            approval: approval
+        )
+        if result.isDurabilityConfirmed {
+            appendLog("[WALLET] Successfully exported backup of '\(target)' to \(fileURL.path) (verified persistence, SHA-256: \(result.sha256Digest.prefix(12))...)")
+        } else {
+            appendLog("[WALLET] Backup of '\(target)' exported to \(fileURL.path), but directory persistence is unconfirmed: \(result.durabilityWarning ?? "volume unsupported")")
+        }
+        return result
+    }
+
     public func restoreWallet(name: String, backupFile: URL) async throws -> String {
-        let restoredName = try await walletManager.restoreWallet(name: name, backupFile: backupFile, capability: self.authSession)
+        guard isWalletTabUnlocked, let session = self.authSession else {
+            throw WalletAuthError.unauthenticated
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, WalletManager.isValidWalletName(trimmedName) else {
+            throw WalletSecurityError.invalidWalletName
+        }
+        guard FileManager.default.fileExists(atPath: backupFile.path) else {
+            throw WalletSecurityError.restoreSourceNotFound(backupFile.path)
+        }
+        let initialSessionId = session.id
+        let approval = try await requestHighRiskApproval(
+            action: "restore",
+            target: trimmedName,
+            reason: "Authorize restoring wallet '\(trimmedName)' from backup file '\(backupFile.lastPathComponent)'"
+        )
+        guard isWalletTabUnlocked, let currentSession = self.authSession, currentSession.id == initialSessionId else {
+            throw WalletAuthError.authAbortedByLock
+        }
+        let restoredName = try await walletManager.restoreWallet(
+            name: trimmedName,
+            backupFile: backupFile,
+            capability: currentSession,
+            approval: approval
+        )
         appendLog("[WALLET] Successfully restored wallet '\(restoredName)' from \(backupFile.lastPathComponent)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-        self.receiveAddress = (try? await walletManager.generateReceiveAddress(capability: self.authSession)) ?? ""
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: currentSession)
+        await self.loadOrEstablishReceiveAddresses(for: restoredName)
+        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: currentSession)) ?? []
         return restoredName
     }
 
     public func applyProfile(_ profileType: SyncProfileType) {
         self.userPreferredProfile = profileType
         self.selectedProfileType = profileType
-        var profile = SyncProfile.preset(for: profileType)
-        profile.pruneMB = storageMode.pruneMB
-
-        if isUltraActive {
-            appendLog("[POWER] Saved preferred profile \(profileType.rawValue). Ultra power mode remains active until Mac is on stable AC power.")
-            ultraStatusSubtitle = "Preferred \(profileType.rawValue) resumes when fully AC / not charging"
-            return
-        }
+        ProfileSettingsStore.shared.setSelectedProfileType(profileType)
+        let profile = ProfileSettingsStore.shared.getProfile(for: profileType, pruneMB: storageMode.pruneMB)
 
         Task {
             do {
@@ -574,10 +849,10 @@ public final class AppState: ObservableObject {
     public func selectWallet(name: String) {
         Task { @MainActor in
             do {
-                try await walletManager.selectWallet(name: name)
-                self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-                self.receiveAddress = (try? await walletManager.generateReceiveAddress()) ?? ""
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
+                try await walletManager.selectWallet(name: name, capability: self.authSession)
+                self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+                await self.loadOrEstablishReceiveAddresses(for: name)
+                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
                 self.refreshCoinbaseRewards()
                 self.refreshFeeQuotes()
                 self.refreshWalletInventory()
@@ -619,6 +894,10 @@ public final class AppState: ObservableObject {
                 refreshWalletInventory()
                 if walletSnapshot?.name == name {
                     walletSnapshot = nil
+                    canonicalReceiveAddress = ""
+                    receiveAddress = ""
+                    activeReceiveAddresses = []
+                    archivedReceiveAddresses = []
                 }
             } catch {
                 alertMessage = "Failed to archive wallet: \(error.localizedDescription)"
@@ -645,7 +924,12 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func deleteWallet(name: String, typedConfirmation: String, verifiedBackupPath: String) {
+    public func deleteWallet(
+        name: String,
+        typedConfirmation: String,
+        verifiedBackupPath: String,
+        verifiedReceipt: VerifiedBackupReceipt? = nil
+    ) {
         Task { @MainActor in
             do {
                 let approval = try await requestHighRiskApproval(
@@ -657,6 +941,7 @@ public final class AppState: ObservableObject {
                     name: name,
                     typedConfirmation: typedConfirmation,
                     verifiedBackupPath: verifiedBackupPath,
+                    verifiedReceipt: verifiedReceipt,
                     capability: self.authSession,
                     approval: approval
                 )
@@ -664,6 +949,10 @@ public final class AppState: ObservableObject {
                 refreshWalletInventory()
                 if walletSnapshot?.name == name {
                     walletSnapshot = nil
+                    canonicalReceiveAddress = ""
+                    receiveAddress = ""
+                    activeReceiveAddresses = []
+                    archivedReceiveAddresses = []
                 }
             } catch {
                 alertMessage = "Wallet deletion refused or failed: \(error.localizedDescription)"
@@ -672,12 +961,98 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func generateNewReceiveAddress() {
-        Task {
+    @discardableResult
+    public func renameWallet(oldName: String, newName: String) async -> Bool {
+        guard let session = authSession else {
+            alertMessage = "Wallet Manager is locked. Please unlock first."
+            showAlert = true
+            return false
+        }
+        do {
+            try await walletManager.renameWallet(oldName: oldName, newName: newName, capability: session)
+            await walletInventory.renameWalletMetadata(from: oldName, to: newName)
+            appendLog("[WALLET] Renamed wallet '\(oldName)' to '\(newName)'.")
+            refreshWalletInventory()
+            if walletSnapshot?.name == oldName {
+                refreshWallet()
+            }
+            return true
+        } catch {
+            alertMessage = "Wallet rename failed: \(error.localizedDescription)"
+            showAlert = true
+            return false
+        }
+    }
+
+    @discardableResult
+    public func bumpTransactionFee(txid: String, newFeeRate: Int? = nil) async -> Bool {
+        guard isWalletTabUnlocked, self.authSession != nil else {
+            alertMessage = WalletAuthError.unauthenticated.localizedDescription
+            showAlert = true
+            return false
+        }
+        do {
+            let res = try await walletManager.bumpFee(
+                txid: txid,
+                newFeeRateSatPerVB: newFeeRate.map { Double($0) },
+                capability: self.authSession
+            )
+            refreshWallet()
+            alertMessage = "Fee bump replacement transaction broadcast successfully:\n\(res.txid)"
+            showAlert = true
+            return true
+        } catch {
+            alertMessage = "Fee bump failed: \(error.localizedDescription)"
+            showAlert = true
+            return false
+        }
+    }
+
+    @MainActor
+    public func loadOrEstablishReceiveAddresses(for walletName: String) async {
+        guard !walletName.isEmpty else {
+            self.canonicalReceiveAddress = ""
+            self.receiveAddress = ""
+            self.activeReceiveAddresses = []
+            self.archivedReceiveAddresses = []
+            return
+        }
+
+        // 1. Establish or retrieve Canonical Receive Address (Permanent, locked to creation)
+        if let canonical = try? await walletManager.getOrCreateCanonicalAddress(for: walletName, capability: self.authSession) {
+            self.canonicalReceiveAddress = canonical
+        } else {
+            self.canonicalReceiveAddress = receiveAddressStore.getCanonicalAddress(for: walletName) ?? ""
+        }
+
+        // 2. Establish or retrieve Temporary Receive Addresses (Rotatable, dynamic)
+        var temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
+        let archived = receiveAddressStore.getArchivedAddresses(for: walletName)
+
+        // If no temporary addresses exist yet and none archived, generate the initial temporary address
+        if temps.isEmpty && archived.isEmpty {
+            if let _ = try? await walletManager.generateReceiveAddress(label: "Temporary Address 1", capability: self.authSession) {
+                temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
+            }
+        }
+
+        self.activeReceiveAddresses = temps
+        self.archivedReceiveAddresses = archived
+        if !temps.contains(where: { $0.address == self.receiveAddress }) {
+            self.receiveAddress = temps.first?.address ?? ""
+        }
+    }
+
+    public func generateNewReceiveAddress(label: String = "") {
+        Task { @MainActor in
             do {
-                let addr = try await walletManager.generateReceiveAddress(capability: self.authSession)
+                guard let name = await walletManager.currentWalletName, !name.isEmpty else {
+                    throw WalletCreationError.invalidWalletName("No active wallet selected")
+                }
+                let addr = try await walletManager.generateReceiveAddress(label: label, capability: self.authSession)
+                await loadOrEstablishReceiveAddresses(for: name)
                 self.receiveAddress = addr
-                appendLog("[WALLET] Generated new receive address: \(addr)")
+                appendLog("[WALLET] Generated new receive address: \(addr) (Wallet: '\(name)')")
             } catch {
                 alertMessage = "Failed to generate receive address: \(error.localizedDescription)"
                 showAlert = true
@@ -685,13 +1060,53 @@ public final class AppState: ObservableObject {
         }
     }
 
+    public func archiveReceiveAddress(_ address: String) {
+        Task { @MainActor in
+            guard let name = await walletManager.currentWalletName, !name.isEmpty else { return }
+            receiveAddressStore.archiveAddress(address, for: name)
+            appendLog("[WALLET] Archived receive address '\(address)' for wallet '\(name)'.")
+            await loadOrEstablishReceiveAddresses(for: name)
+        }
+    }
+
+    public func unarchiveReceiveAddress(_ address: String) {
+        Task { @MainActor in
+            guard let name = await walletManager.currentWalletName, !name.isEmpty else { return }
+            receiveAddressStore.unarchiveAddress(address, for: name)
+            appendLog("[WALLET] Unarchived receive address '\(address)' for wallet '\(name)'.")
+            await loadOrEstablishReceiveAddresses(for: name)
+            self.receiveAddress = address
+        }
+    }
+
+    public func deleteReceiveAddress(_ address: String) {
+        Task { @MainActor in
+            guard let name = await walletManager.currentWalletName, !name.isEmpty else { return }
+            receiveAddressStore.deleteAddress(address, for: name)
+            appendLog("[WALLET] Permanently deleted receive address '\(address)' from wallet '\(name)'.")
+            await loadOrEstablishReceiveAddresses(for: name)
+        }
+    }
+
+    public func selectReceiveAddress(_ address: String) {
+        self.receiveAddress = address
+    }
+
     public func refreshWallet() {
         Task {
             do {
                 guard self.isWalletTabUnlocked else { return }
                 let snap = try await walletManager.refreshWalletInfo(capability: self.authSession)
-                self.walletSnapshot = snap
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                await MainActor.run {
+                    self.walletSnapshot = snap
+                }
+                let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                await MainActor.run {
+                    self.transactions = txs
+                }
+                if let name = snap.name.isEmpty ? nil : snap.name {
+                    await self.loadOrEstablishReceiveAddresses(for: name)
+                }
             } catch {
                 // Wallet may not be loaded yet or locked
             }
