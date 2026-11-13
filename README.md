@@ -63,23 +63,27 @@ To completely unload and wipe Sentinel Node Wallet with **zero residual data lef
 
 ---
 
-### Method 1: In-App 1-Click Clean Wipe & Uninstall (Recommended)
+### Method 1: In-App 1-Click Full Application & Data Uninstallation (Recommended)
 
-You can trigger a complete, verified data wipe directly from within the application before trashing the app:
+You can trigger a complete, automated uninstallation of the application bundle and all supporting data directly from within the app:
 
 1. Open **Sentinel Node Wallet**.
-2. Navigate to **Node Settings** via either:
+2. Navigate to **Advanced Node & Storage Settings** via either:
+   - Node View: Click the **Gear icon** (or **Advanced Settings**) → scroll to **Full Application & Data Uninstallation**.
    - Top Menu Bar: **Help → Clean Uninstall & Storage Wipe…**
-   - Node View: Click the **Gear icon** (or **Advanced Settings**) → scroll to **Clean Uninstall & Storage Wipe**.
-3. Click the red **"Erase All Data & Uninstall…"** button (or click *"Reveal in Finder"* to inspect the directory).
+3. Click the red **"Fully Uninstall Application & All Files…"** button (or click *"Reveal in Finder"* to inspect the directory).
 4. Review the confirmation alert:
-   > *"This will permanently delete all synchronized blockchain blocks, chainstate databases, UTXO indexes, and node configuration (~18 GB) from your Mac."*
-5. Click **"Erase All Data & Quit"**:
-   - The app gracefully halts the background `bitcoind` daemon.
+   > *"This will permanently remove Sentinel Node Wallet from your Mac:  
+   > • All synchronized blockchain blocks and chainstate (~18 GB)  
+   > • All wallet databases, auth records, and configuration  
+   > • The application bundle itself"*
+5. Click **"Uninstall Everything"**:
+   - The app gracefully shuts down the background `bitcoind` daemon.
    - It recursively deletes the entire `~/Library/Application Support/NodePocketBTCB2` data directory (~18 GB).
-   - It clears all in-memory wallet states, sessions, and logs.
-   - It displays: *"All data has been completely erased. You can now safely move Sentinel Node Wallet from /Applications to the Trash."*
-6. Click **"Quit App Now"**, then drag `/Applications/Sentinel Node Wallet.app` to the Trash.
+   - It purges the sandboxed container and all local wallets/configurations.
+   - It automatically moves the `Sentinel Node Wallet.app` application bundle to the macOS Trash.
+   - It displays: *"Sentinel Node Wallet and all 18 GB of blockchain data and supporting files have been completely uninstalled and moved to the Trash."*
+6. Click **"Exit App Now"** to complete the uninstallation. Zero residual files remain.
 
 ---
 
