@@ -139,9 +139,14 @@ public final class AppState: ObservableObject {
                 self?.adaptiveETA = eta
                 self?.refreshRollingCoverageIfNeeded(blockchain: binfo)
 
-                // Refresh transactions periodically
-                if let txs = try? await self?.walletManager.fetchRecentTransactions(count: 30) {
-                    self?.transactions = txs
+                // Refresh transactions and wallet snapshot periodically if logged in
+                if let self = self, self.isWalletTabUnlocked, let session = self.authSession {
+                    if let txs = try? await self.walletManager.fetchRecentTransactions(count: 30, capability: session) {
+                        self.transactions = txs
+                    }
+                    if let snap = try? await self.walletManager.refreshWalletInfo(capability: session) {
+                        self.walletSnapshot = snap
+                    }
                 }
             }
         }
@@ -549,6 +554,7 @@ public final class AppState: ObservableObject {
 
                 startupStatus = needsWalletSetup ? "Node running — create an encrypted wallet" : "Ready"
                 isStartingUp = false
+                self.refreshWalletInventory()
                 appendLog(needsWalletSetup
                     ? "[BOOTSTRAP] Node online; wallet setup required."
                     : "[BOOTSTRAP] Node and existing wallet ready.")

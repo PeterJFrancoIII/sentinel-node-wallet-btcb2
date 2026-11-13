@@ -106,6 +106,10 @@ public struct WalletView: View {
     @State private var isRPCOnline: Bool = false
     @State private var rpcStatusMessage: String? = nil
 
+    // Knots Node Startup Prompt
+    @State private var showNodePromptSheet: Bool = false
+    @State private var hasBypassedNodePrompt: Bool = false
+
     private var isNodeReadyForWallet: Bool {
         if case .running = state.nodeState { return true }
         return false
@@ -130,9 +134,18 @@ public struct WalletView: View {
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
             Task { await state.refreshPrice() }
+            if state.isWalletTabUnlocked && !isNodeReadyForWallet && !hasBypassedNodePrompt {
+                showNodePromptSheet = true
+            }
         }
-        .onChange(of: state.nodeState) { _ in
+        .onChange(of: state.nodeState) { newState in
             state.refreshWalletInventory()
+            if case .running = newState {
+                state.refreshWallet()
+                state.refreshFeeQuotes()
+                state.refreshCoinbaseRewards()
+                showNodePromptSheet = false
+            }
         }
         .onChange(of: state.enrolledUsername) { newName in
             if loginUsername.isEmpty { loginUsername = newName ?? "" }
@@ -148,9 +161,14 @@ public struct WalletView: View {
                 loginTotpCode = ""
                 loginRecoveryCode = ""
                 isApplePasswordSaved = false
+                hasBypassedNodePrompt = false
+                showNodePromptSheet = false
             } else {
                 state.refreshWalletInventory()
                 Task { await state.refreshPrice() }
+                if !isNodeReadyForWallet && !hasBypassedNodePrompt {
+                    showNodePromptSheet = true
+                }
             }
         }
         .onChange(of: selectedFeePreset) { _ in
@@ -161,6 +179,9 @@ public struct WalletView: View {
         }
         .onChange(of: state.walletSnapshot?.trustedBalance) { _ in
             recheckAndClampSendAmount()
+        }
+        .sheet(isPresented: $showNodePromptSheet) {
+            nodeStartupPromptSheet
         }
         .sheet(isPresented: $showPreviewSheet) {
             sendPreviewSheet
@@ -260,6 +281,68 @@ public struct WalletView: View {
                 .overlay(
                     RoundedRectangle(cornerRadius: 8)
                         .stroke(Color.yellow.opacity(0.3), lineWidth: 1)
+                )
+            }
+
+            // Knots Node offline / standby banner
+            if !isNodeReadyForWallet {
+                HStack(spacing: 12) {
+                    Image(systemName: "bolt.horizontal.circle.fill")
+                        .foregroundColor(.orange)
+                        .font(.title2)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Bitcoin Knots Node Offline")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.orange)
+                        Text("Wallets and transaction history require an active Knots Node to synchronize and display blockchain data.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                    Button(action: {
+                        if !state.isStartingUp {
+                            state.startNode()
+                        }
+                    }) {
+                        HStack(spacing: 4) {
+                            if state.isStartingUp {
+                                ProgressView().controlSize(.small)
+                                Text("Starting…")
+                            } else {
+                                Image(systemName: "play.fill")
+                                Text("Turn On Node")
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.orange.opacity(0.3), lineWidth: 1)
+                )
+            } else if let binfo = state.blockchainInfo, binfo.initialblockdownload || binfo.verificationprogress < 0.9999 {
+                // Live Node Syncing Banner
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Knots Node Synchronizing: Block \(binfo.blocks) / \(binfo.headers) (\(String(format: "%.2f%%", binfo.verificationprogress * 100)))")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.blue)
+                        Text("Wallet balances and transaction history are updating in real-time as blocks are processed.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(12)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.1)))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .stroke(Color.blue.opacity(0.25), lineWidth: 1)
                 )
             }
 
@@ -4037,5 +4120,84 @@ public struct WalletView: View {
         }
         .padding(20)
         .frame(width: 440)
+    }
+
+    private var nodeStartupPromptSheet: some View {
+        VStack(spacing: 20) {
+            HStack {
+                Spacer()
+                Button("Close") {
+                    hasBypassedNodePrompt = true
+                    showNodePromptSheet = false
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+
+            Image(systemName: "server.rack")
+                .font(.system(size: 46))
+                .foregroundColor(.orange)
+
+            VStack(spacing: 6) {
+                Text("Turn On Bitcoin Knots Node?")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                Text("The Bitcoin Knots Node is currently offline. Wallets, balances, and transaction history require the Knots Node to synchronize and display blockchain data.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if state.isStartingUp {
+                VStack(spacing: 10) {
+                    ProgressView()
+                    Text(state.startupStatus.isEmpty ? "Starting Knots Node…" : state.startupStatus)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(.vertical, 8)
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundColor(.blue)
+                    Text("Enabling the node connects to the Bitcoin Knots daemon and begins synchronizing blocks and UTXOs in the background.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.08)))
+            }
+
+            HStack(spacing: 16) {
+                Button("Bypass") {
+                    hasBypassedNodePrompt = true
+                    showNodePromptSheet = false
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .disabled(state.isStartingUp)
+
+                Button(action: {
+                    state.startNode()
+                }) {
+                    HStack(spacing: 6) {
+                        if state.isStartingUp {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Starting…")
+                        } else {
+                            Image(systemName: "play.fill")
+                            Text("Enable Knots Node")
+                        }
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+                .disabled(state.isStartingUp)
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
     }
 }
