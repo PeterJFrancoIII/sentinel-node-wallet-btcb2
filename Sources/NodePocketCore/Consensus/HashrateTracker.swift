@@ -107,6 +107,14 @@ public struct HashrateReport: Sendable {
         formatRate(smoothedHashratePH)
     }
 
+    public var macdReport: MACDReport {
+        MACDCalculator.calculate(history: history, fastPeriod: 12, slowPeriod: 30, signalPeriod: 9)
+    }
+
+    public func macdReport(fast: Int, slow: Int, signal: Int) -> MACDReport {
+        MACDCalculator.calculate(history: history, fastPeriod: fast, slowPeriod: slow, signalPeriod: signal)
+    }
+
     private func formatRate(_ ph: Double) -> String {
         if ph >= 1000.0 {
             return String(format: "%.2f EH/s", ph / 1000.0)
@@ -278,8 +286,20 @@ public final class HashrateTracker: @unchecked Sendable {
             avgInterval = 600.0
         }
 
-        // Append to history points (max 30 points)
-        if historyPoints.last?.height != latest.height {
+        // Seed/backfill history points if history is incomplete relative to available samples
+        if historyPoints.count < min(30, max(0, samples.count - 1)) {
+            backfillHistoryPoints(nominalPH: nominalPH)
+        }
+
+        // Maintain history points (max 30 points)
+        if let lastIdx = historyPoints.indices.last, historyPoints[lastIdx].height == latest.height {
+            historyPoints[lastIdx] = HashrateHistoryPoint(
+                height: latest.height,
+                timestamp: latest.timestamp,
+                hashratePH: networkPH,
+                difficulty: latest.difficulty
+            )
+        } else {
             historyPoints.append(HashrateHistoryPoint(
                 height: latest.height,
                 timestamp: latest.timestamp,
@@ -307,5 +327,44 @@ public final class HashrateTracker: @unchecked Sendable {
             isSyncing: false,
             history: historyPoints
         )
+    }
+
+    private func backfillHistoryPoints(nominalPH: Double) {
+        guard samples.count >= 2 else { return }
+        let count = min(30, samples.count - 1)
+        let startIndex = samples.count - count
+        var newHistory: [HashrateHistoryPoint] = []
+
+        for i in startIndex..<samples.count {
+            let sample = samples[i]
+            let windowStart = max(0, i - windowSize + 1)
+            var winHashes = 0.0
+            var winSeconds = 0.0
+            var winIntervals = 0
+
+            for j in windowStart...i {
+                if let dt = samples[j].dtRaw, dt > 0 {
+                    winHashes += samples[j].expectedHashes
+                    winSeconds += dt
+                    winIntervals += 1
+                }
+            }
+
+            let ratePH: Double
+            if winIntervals > 0 && winSeconds > 0 {
+                ratePH = (winHashes / winSeconds) / 1e15
+            } else {
+                ratePH = nominalPH
+            }
+
+            newHistory.append(HashrateHistoryPoint(
+                height: sample.height,
+                timestamp: sample.timestamp,
+                hashratePH: ratePH,
+                difficulty: sample.difficulty
+            ))
+        }
+
+        self.historyPoints = newHistory
     }
 }
