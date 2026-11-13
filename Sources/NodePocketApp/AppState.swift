@@ -139,9 +139,14 @@ public final class AppState: ObservableObject {
                 self?.adaptiveETA = eta
                 self?.refreshRollingCoverageIfNeeded(blockchain: binfo)
 
-                // Refresh transactions periodically
-                if let txs = try? await self?.walletManager.fetchRecentTransactions(count: 30) {
-                    self?.transactions = txs
+                // Refresh transactions and wallet snapshot periodically if logged in
+                if let self = self, self.isWalletTabUnlocked, let session = self.authSession {
+                    if let txs = try? await self.walletManager.fetchRecentTransactions(count: 30, capability: session) {
+                        self.transactions = txs
+                    }
+                    if let snap = try? await self.walletManager.refreshWalletInfo(capability: session) {
+                        self.walletSnapshot = snap
+                    }
                 }
             }
         }
@@ -549,6 +554,7 @@ public final class AppState: ObservableObject {
 
                 startupStatus = needsWalletSetup ? "Node running — create an encrypted wallet" : "Ready"
                 isStartingUp = false
+                self.refreshWalletInventory()
                 appendLog(needsWalletSetup
                     ? "[BOOTSTRAP] Node online; wallet setup required."
                     : "[BOOTSTRAP] Node and existing wallet ready.")
@@ -643,6 +649,44 @@ public final class AppState: ObservableObject {
             await nodeManager.stop()
             appendLog("[NODE] Stopped node.")
         }
+    }
+
+    /// Completely wipes all synced blockchain blocks, chainstate, UTXO indexes,
+    /// wallet databases, and configuration to prepare for a clean app uninstallation.
+    public func wipeAllDataAndPrepareForUninstall() async throws {
+        appendLog("[UNINSTALL] Initiating complete data wipe and clean uninstall...")
+
+        // 1. Gracefully stop Bitcoin Knots daemon
+        await nodeManager.stop()
+
+        let fm = FileManager.default
+        let datadir = nodeManager.config.dataDirectory
+
+        // 2. Remove canonical datadir
+        if fm.fileExists(atPath: datadir.path) {
+            try fm.removeItem(at: datadir)
+            appendLog("[UNINSTALL] Deleted data directory at \(datadir.path)")
+        }
+
+        // 3. Remove alternate unsandboxed App Support path if running sandboxed
+        let home = fm.homeDirectoryForCurrentUser
+        let unsandboxedAppSupport = home.appendingPathComponent("Library/Application Support/NodePocketBTCB2")
+        if fm.fileExists(atPath: unsandboxedAppSupport.path) && unsandboxedAppSupport.standardizedFileURL.path != datadir.standardizedFileURL.path {
+            try? fm.removeItem(at: unsandboxedAppSupport)
+            appendLog("[UNINSTALL] Deleted unsandboxed data directory at \(unsandboxedAppSupport.path)")
+        }
+
+        // 4. Invalidate sessions and clear active in-memory state
+        await authCoordinator.invalidateSession()
+        await walletManager.resetActiveWallet()
+        self.authSession = nil
+        self.isWalletTabUnlocked = false
+        self.walletSnapshot = nil
+        self.walletSummaries = []
+        self.transactions = []
+        self.blockchainInfo = nil
+
+        appendLog("[UNINSTALL] All node sync data and application state successfully purged.")
     }
 
     /// Single state-owned path for node resource and pruning settings.

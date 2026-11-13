@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import NodePocketCore
 
 public struct AdvancedSheet: View {
@@ -14,6 +15,12 @@ public struct AdvancedSheet: View {
     @State private var parInput: String = "2"
     @State private var maxConnectionsInput: String = "24"
     @State private var enableInboundP2P: Bool = false
+
+    // Clean Uninstall & Data Wipe States
+    @State private var showWipeConfirmation: Bool = false
+    @State private var isWipingData: Bool = false
+    @State private var wipeCompleted: Bool = false
+    @State private var wipeErrorMessage: String? = nil
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -229,6 +236,45 @@ public struct AdvancedSheet: View {
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(.secondary)
                     }
+
+                    Divider()
+
+                    // Clean Uninstall & Storage Wipe
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Image(systemName: "trash.circle.fill")
+                                .foregroundColor(.red)
+                            Text("Clean Uninstall & Storage Wipe")
+                                .font(.headline)
+                        }
+                        Text("Permanently erase all synced blockchain blocks (~18 GB), chainstate databases, UTXO indexes, and node configuration from your Mac before removing the application.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        HStack(spacing: 12) {
+                            Button(role: .destructive, action: {
+                                showWipeConfirmation = true
+                            }) {
+                                HStack(spacing: 6) {
+                                    if isWipingData {
+                                        ProgressView().controlSize(.small)
+                                        Text("Wiping Data…")
+                                    } else {
+                                        Image(systemName: "trash.fill")
+                                        Text("Erase All Data & Uninstall…")
+                                    }
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .tint(.red)
+                            .disabled(isWipingData)
+
+                            Button("Reveal in Finder") {
+                                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: state.nodeManager.config.dataDirectory.path)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                 }
             }
 
@@ -247,9 +293,41 @@ public struct AdvancedSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 540, height: 560)
+        .frame(width: 540, height: 600)
         .onAppear {
             loadCurrentSettings()
+        }
+        .alert("Permanently Erase All Data?", isPresented: $showWipeConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Erase All Data & Quit", role: .destructive) {
+                Task {
+                    isWipingData = true
+                    defer { isWipingData = false }
+                    do {
+                        try await state.wipeAllDataAndPrepareForUninstall()
+                        wipeCompleted = true
+                    } catch {
+                        wipeErrorMessage = error.localizedDescription
+                    }
+                }
+            }
+        } message: {
+            Text("This will permanently delete all synchronized blockchain blocks, chainstate databases, UTXO indexes, and node configuration (~18 GB) from your Mac.\n\nOnce completed, Sentinel Node Wallet will quit and you can safely drag the app to Trash without leaving any residual data.")
+        }
+        .alert("Data Erased Successfully", isPresented: $wipeCompleted) {
+            Button("Quit App Now") {
+                NSApp.terminate(nil)
+            }
+        } message: {
+            Text("All blockchain data, wallets, and configuration files have been completely removed from your Mac.\n\nYou can now safely move Sentinel Node Wallet from /Applications to the Trash.")
+        }
+        .alert("Failed to Erase Data", isPresented: Binding(
+            get: { wipeErrorMessage != nil },
+            set: { if !$0 { wipeErrorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { wipeErrorMessage = nil }
+        } message: {
+            Text(wipeErrorMessage ?? "An unknown error occurred while erasing application data.")
         }
     }
 
