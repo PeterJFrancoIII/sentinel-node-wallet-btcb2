@@ -140,6 +140,9 @@ public struct ContentView: View {
         .sheet(isPresented: $showAdvancedSheet) {
             AdvancedSheet()
         }
+        .sheet(isPresented: $state.showUninstallWipeSheet) {
+            AdvancedSheet()
+        }
         .alert(isPresented: $state.showAlert) {
             Alert(
                 title: Text("Notice"),

@@ -168,6 +168,20 @@ struct NodePocketApp: App {
                 }
                 .keyboardShortcut("z", modifiers: [.command, .control])
             }
+            CommandGroup(replacing: .help) {
+                Button("Sentinel Node Wallet Documentation") {
+                    if let url = URL(string: "https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Divider()
+                Button("Reveal Data Folder in Finder") {
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: appState.nodeManager.config.dataDirectory.path)
+                }
+                Button("Clean Uninstall & Storage Wipe…") {
+                    appState.showUninstallWipeSheet = true
+                }
+            }
         }
     }
 }
