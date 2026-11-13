@@ -107,6 +107,16 @@ public struct ContentView: View {
                         state.applyProfile(newProfile)
                     }
                 }
+
+                // Advanced Node Settings Button (Always Visible in Top Bar)
+                Button(action: { showAdvancedSheet = true }) {
+                    Image(systemName: "gearshape.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Open Advanced Node & Storage Settings")
+                .accessibilityIdentifier("top-settings-button")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 10)

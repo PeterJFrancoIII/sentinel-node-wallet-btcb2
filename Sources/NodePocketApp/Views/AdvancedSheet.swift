@@ -17,6 +17,7 @@ public struct AdvancedSheet: View {
     @State private var enableInboundP2P: Bool = false
 
     // Clean Uninstall & Data Wipe States
+    @State private var settingsTab: Int = 0 // 0 = Node & Storage, 1 = Full Uninstallation
     @State private var showWipeConfirmation: Bool = false
     @State private var isWipingData: Bool = false
     @State private var wipeCompleted: Bool = false
@@ -43,8 +44,16 @@ public struct AdvancedSheet: View {
 
             Divider()
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
+            Picker("Settings Section", selection: $settingsTab) {
+                Label("Node & Storage", systemImage: "server.rack").tag(0)
+                Label("Full Uninstallation", systemImage: "trash.fill").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.bottom, 2)
+
+            if settingsTab == 0 {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 20) {
                     // Storage Mode Selection
                     VStack(alignment: .leading, spacing: 12) {
                         Text("Storage Mode & Blockchain Retention")
@@ -240,48 +249,35 @@ public struct AdvancedSheet: View {
 
                     Divider()
 
-                    // Full Application & Data Uninstallation
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Image(systemName: "trash.circle.fill")
-                                .foregroundColor(.red)
-                            Text("Full Application & Data Uninstallation")
-                                .font(.headline)
+                    // Quick Jump to Full Uninstallation
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Looking to completely remove this application?")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                            Text("Wipe all 18 GB of synced blocks and uninstall the app bundle.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
                         }
-                        Text("Completely remove Sentinel Node Wallet from this Mac, including all 18 GB of synchronized blockchain data, chainstate databases, wallet databases, and the application bundle itself.")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-
-                        HStack(spacing: 12) {
-                            Button(role: .destructive, action: {
-                                showWipeConfirmation = true
-                            }) {
-                                HStack(spacing: 6) {
-                                    if isWipingData {
-                                        ProgressView().controlSize(.small)
-                                        Text("Uninstalling…")
-                                    } else {
-                                        Image(systemName: "trash.fill")
-                                        Text("Fully Uninstall Application & All Files…")
-                                    }
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(.red)
-                            .disabled(isWipingData)
-
-                            Button("Reveal in Finder") {
-                                NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: state.nodeManager.config.dataDirectory.path)
-                            }
-                            .buttonStyle(.bordered)
+                        Spacer()
+                        Button("Go to Full Uninstall") {
+                            settingsTab = 1
                         }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
                     }
+                    .padding(10)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.08)))
                 }
             }
+        } else {
+            fullUninstallationTab
+        }
 
-            Divider()
+        Divider()
 
-            HStack {
+        HStack {
+            if settingsTab == 0 {
                 Spacer()
                 if state.isApplyingNodeSettings {
                     ProgressView().controlSize(.small)
@@ -291,7 +287,18 @@ public struct AdvancedSheet: View {
                 }
                 .disabled(state.isApplyingNodeSettings)
                 .buttonStyle(.borderedProminent)
+            } else {
+                Button("Back to Node Settings") {
+                    settingsTab = 0
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                Button("Cancel / Done") {
+                    dismiss()
+                }
+                .buttonStyle(.plain)
             }
+        }
         }
         .padding(24)
         .frame(width: 540, height: 600)
@@ -365,6 +372,124 @@ public struct AdvancedSheet: View {
                 .foregroundColor(.secondary)
         }
         .accessibilityElement(children: .combine)
+    }
+
+    private var fullUninstallationTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
+                    Image(systemName: "trash.circle.fill")
+                        .font(.system(size: 36))
+                        .foregroundColor(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Complete Uninstallation & Storage Wipe")
+                            .font(.title3)
+                            .bold()
+                        Text("Purge all synchronized blockchain data and remove the app.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Items that will be permanently deleted:")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "server.rack")
+                                .foregroundColor(.red)
+                                .frame(width: 20)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Synchronized Blockchain Storage (~18 GB)")
+                                    .font(.caption)
+                                    .bold()
+                                Text(state.nodeManager.config.dataDirectory.path)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                            }
+                        }
+
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "person.badge.key.fill")
+                                .foregroundColor(.red)
+                                .frame(width: 20)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Operator Wallets & Credentials")
+                                    .font(.caption)
+                                    .bold()
+                                Text("All local wallet databases, transaction caches, and session configurations.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "trash.fill")
+                                .foregroundColor(.red)
+                                .frame(width: 20)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Application Bundle")
+                                    .font(.caption)
+                                    .bold()
+                                Text("Moves Sentinel Node Wallet.app to macOS Trash.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Warning: Unrecoverable Action")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.red)
+
+                    Text("This process gracefully stops the Bitcoin Knots background daemon, purges all block headers and chainstate, and cleans up all sandbox cache directories. Back up your seed phrases and wallet descriptors before proceeding.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.08)))
+
+                HStack(spacing: 12) {
+                    Button(role: .destructive, action: {
+                        showWipeConfirmation = true
+                    }) {
+                        HStack(spacing: 6) {
+                            if isWipingData {
+                                ProgressView().controlSize(.small)
+                                Text("Uninstalling…")
+                            } else {
+                                Image(systemName: "trash.fill")
+                                Text("Fully Uninstall Application & All Files…")
+                            }
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .controlSize(.large)
+                    .disabled(isWipingData)
+                    .accessibilityIdentifier("full-uninstall-button")
+
+                    Button("Reveal Data in Finder") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: state.nodeManager.config.dataDirectory.path)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                }
+                .padding(.top, 4)
+            }
+        }
     }
 
     private func prunePresetButton(_ mb: Int, label: String) -> some View {
