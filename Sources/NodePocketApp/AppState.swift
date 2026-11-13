@@ -651,6 +651,44 @@ public final class AppState: ObservableObject {
         }
     }
 
+    /// Completely wipes all synced blockchain blocks, chainstate, UTXO indexes,
+    /// wallet databases, and configuration to prepare for a clean app uninstallation.
+    public func wipeAllDataAndPrepareForUninstall() async throws {
+        appendLog("[UNINSTALL] Initiating complete data wipe and clean uninstall...")
+
+        // 1. Gracefully stop Bitcoin Knots daemon
+        await nodeManager.stop()
+
+        let fm = FileManager.default
+        let datadir = nodeManager.config.dataDirectory
+
+        // 2. Remove canonical datadir
+        if fm.fileExists(atPath: datadir.path) {
+            try fm.removeItem(at: datadir)
+            appendLog("[UNINSTALL] Deleted data directory at \(datadir.path)")
+        }
+
+        // 3. Remove alternate unsandboxed App Support path if running sandboxed
+        let home = fm.homeDirectoryForCurrentUser
+        let unsandboxedAppSupport = home.appendingPathComponent("Library/Application Support/NodePocketBTCB2")
+        if fm.fileExists(atPath: unsandboxedAppSupport.path) && unsandboxedAppSupport.standardizedFileURL.path != datadir.standardizedFileURL.path {
+            try? fm.removeItem(at: unsandboxedAppSupport)
+            appendLog("[UNINSTALL] Deleted unsandboxed data directory at \(unsandboxedAppSupport.path)")
+        }
+
+        // 4. Invalidate sessions and clear active in-memory state
+        await authCoordinator.invalidateSession()
+        await walletManager.resetActiveWallet()
+        self.authSession = nil
+        self.isWalletTabUnlocked = false
+        self.walletSnapshot = nil
+        self.walletSummaries = []
+        self.transactions = []
+        self.blockchainInfo = nil
+
+        appendLog("[UNINSTALL] All node sync data and application state successfully purged.")
+    }
+
     /// Single state-owned path for node resource and pruning settings.
     /// UI updates only after configuration succeeds. Errors are never hidden.
     public func applyNodeSettings(profile: SyncProfile, storageMode mode: StorageMode, allowInboundP2P: Bool? = nil) async throws {
