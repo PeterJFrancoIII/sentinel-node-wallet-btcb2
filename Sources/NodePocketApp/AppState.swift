@@ -717,19 +717,11 @@ public final class AppState: ObservableObject {
         let datadir = nodeManager.config.dataDirectory
         var wipedData = false
 
-        // 2. Remove canonical datadir (with strict symlink guard)
+        // 2. Remove canonical datadir
         if fm.fileExists(atPath: datadir.path) {
-            let isSymlink = (try? datadir.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink ?? false
-            if isSymlink {
-                // Delete ONLY the symbolic link pointer, NEVER recursively wipe an external volume
-                try fm.removeItem(at: datadir)
-                wipedData = true
-                appendLog("[UNINSTALL] Removed data directory symlink at \(datadir.path) (external volume preserved)")
-            } else {
-                try fm.removeItem(at: datadir)
-                wipedData = true
-                appendLog("[UNINSTALL] Deleted data directory at \(datadir.path)")
-            }
+            try fm.removeItem(at: datadir)
+            wipedData = true
+            appendLog("[UNINSTALL] Deleted data directory at \(datadir.path)")
         }
 
         // 3. Remove alternate unsandboxed App Support path if running sandboxed

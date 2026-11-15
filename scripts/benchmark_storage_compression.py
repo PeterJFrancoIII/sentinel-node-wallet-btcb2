@@ -90,6 +90,7 @@ def benchmark_codec(name: str, algo_code: int, data: bytes):
     t_decomp = time.perf_counter() - t1
 
     assert decomp_size == src_len, f"Decompressed size mismatch for {name}"
+    assert decomp_buf.raw[:decomp_size] == data, f"Decompressed data byte mismatch for {name}"
 
     reduction_pct = ((src_len - comp_size) / src_len) * 100.0
     comp_mb_s = (src_len / (1024 * 1024)) / t_comp if t_comp > 0 else 0.0
@@ -208,23 +209,23 @@ rpcpassword=test_pass_secure_123
 
 def main():
     parser = argparse.ArgumentParser(description="Sentinel Node Wallet Storage Compression Benchmark")
-    parser.add_argument("--regtest", action="store_true", default=True, help="Run on isolated quiesced regtest snapshot (Default: True)")
-    parser.add_argument("--chainstate-dir", default=None)
-    parser.add_argument("--blocks-dir", default=None)
+    parser.add_argument("--regtest", action="store_true", default=False, help="Run on isolated quiesced regtest snapshot")
+    parser.add_argument("--chainstate-dir", default=None, help="Path to offline quiesced chainstate directory")
+    parser.add_argument("--blocks-dir", default=None, help="Path to offline quiesced blocks directory")
     parser.add_argument("--bin-dir", default=os.path.expanduser("~/Developer/NodePocketBTCB2/.cache/bitcoin-29.4.3.knots20260508/bin"))
     parser.add_argument("--max-sample-mb", type=int, default=64, help="Maximum bytes per file sample in MB")
     args = parser.parse_args()
 
     print("=== Sentinel Node Wallet Storage & Compression Benchmark ===")
     cleanup_dir = None
-    if args.regtest or not args.chainstate_dir:
+    if args.chainstate_dir and not args.regtest:
+        chainstate_dir = os.path.expanduser(args.chainstate_dir)
+        blocks_dir = os.path.expanduser(args.blocks_dir) if args.blocks_dir else None
+        mode_label = "OFFLINE SPECIFIED DATASET (Explicit Point-in-time)"
+    else:
         print("[ISOLATION MODE] Generating verified offline quiesced regtest dataset...")
         cleanup_dir, chainstate_dir, blocks_dir = generate_quiesced_regtest_snapshot(args.bin_dir)
         mode_label = "OFFLINE QUIESCED REGTEST SNAPSHOT (Deterministic)"
-    else:
-        chainstate_dir = os.path.expanduser(args.chainstate_dir)
-        blocks_dir = os.path.expanduser(args.blocks_dir)
-        mode_label = "READ-ONLY POINT-IN-TIME (Preliminary)"
 
     print(f"Benchmark Mode: {mode_label}")
     print(f"Chainstate Dir: {chainstate_dir}")

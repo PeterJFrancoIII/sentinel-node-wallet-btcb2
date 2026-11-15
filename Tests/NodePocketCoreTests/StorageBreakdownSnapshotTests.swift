@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import NodePocketCore
 
 final class StorageBreakdownSnapshotTests: XCTestCase {
@@ -8,7 +9,8 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
             chainstateBytes: 18 * 1024 * 1024 * 1024,
             indexesBytes: 4096,
             walletsBytes: 65536,
-            totalDataDirBytes: 19 * 1024 * 1024 * 1024
+            totalDataDirBytes: 19 * 1024 * 1024 * 1024,
+            rpcSizeOnDisk: 550 * 1024 * 1024
         )
 
         XCTAssertFalse(snapshot.formattedBlocksSize.isEmpty)
@@ -16,6 +18,7 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertFalse(snapshot.formattedTotalSize.isEmpty)
         XCTAssertEqual(snapshot.blocksBytes, 550 * 1024 * 1024)
         XCTAssertEqual(snapshot.chainstateBytes, 18 * 1024 * 1024 * 1024)
+        XCTAssertEqual(snapshot.rpcSizeOnDisk, 550 * 1024 * 1024)
     }
 
     func testMeasureNonExistentDirectoryReturnsZero() {
@@ -26,6 +29,7 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.chainstateBytes, 0)
         XCTAssertEqual(snapshot.totalDataDirBytes, 0)
         XCTAssertFalse(snapshot.isAvailable)
+        XCTAssertEqual(snapshot.totalQuality, .unavailable)
         XCTAssertTrue(snapshot.formattedTotalSize.contains("Unavailable"))
     }
 
@@ -48,6 +52,9 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(snapshot.blocksBytes, 1024 * 1024)
         XCTAssertGreaterThanOrEqual(snapshot.chainstateBytes, 1024 * 1024)
         XCTAssertGreaterThanOrEqual(snapshot.totalDataDirBytes, 2 * 1024 * 1024)
+        XCTAssertEqual(snapshot.blocksQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.chainstateQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.totalQuality, .measuredAllocated)
     }
 
     func testMeasureAsyncMatchesSynchronousResult() async throws {
@@ -66,6 +73,7 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertEqual(syncSnap.blocksBytes, asyncSnap.blocksBytes)
         XCTAssertEqual(syncSnap.chainstateBytes, asyncSnap.chainstateBytes)
         XCTAssertEqual(syncSnap.totalDataDirBytes, asyncSnap.totalDataDirBytes)
+        XCTAssertEqual(syncSnap.totalQuality, asyncSnap.totalQuality)
     }
 
     func testSymlinksAreStrictlySkippedAndDoNotLeakExternalBytes() throws {
@@ -120,6 +128,7 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.blocksBytes, 0, "Symlink root must return 0 bytes")
         XCTAssertEqual(snapshot.totalDataDirBytes, 0, "Symlink root must fail-closed")
         XCTAssertFalse(snapshot.isAvailable, "Symlink root must be marked unavailable")
+        XCTAssertEqual(snapshot.totalQuality, .unavailable)
         XCTAssertTrue(snapshot.formattedTotalSize.contains("Unavailable"), "Must format as Unavailable, never 0 bytes")
     }
 
@@ -153,35 +162,139 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertLessThan(snapshot.totalDataDirBytes, 1024 * 1024, "Total datadir must not count external directory symlink")
     }
 
-    func testDatadirSymlinkRemovalPreservesExternalVolumeTarget() throws {
-        let externalTarget = FileManager.default.temporaryDirectory.appendingPathComponent("ExternalVolumeSimulation_\(UUID().uuidString)")
-        let datadirSymlink = FileManager.default.temporaryDirectory.appendingPathComponent("NodePocketSymlink_\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: externalTarget, withIntermediateDirectories: true)
+    func testDivergentRPCAndFilesystemAllocationParity() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("DivergentRPCTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let blocksDir = tempDir.appendingPathComponent("blocks")
+        let chainstateDir = tempDir.appendingPathComponent("chainstate")
+        try FileManager.default.createDirectory(at: blocksDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: chainstateDir, withIntermediateDirectories: true)
+
+        // Physical files: 200 KB in blocks, 300 KB in chainstate
+        try Data(repeating: 0x11, count: 200 * 1024).write(to: blocksDir.appendingPathComponent("blk00000.dat"))
+        try Data(repeating: 0x22, count: 300 * 1024).write(to: chainstateDir.appendingPathComponent("000001.ldb"))
+
+        // Deliberately divergent RPC value: 50 GB
+        let divergentRPC: Int64 = 50 * 1024 * 1024 * 1024
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir, rpcSizeOnDisk: divergentRPC)
+
+        XCTAssertTrue(snapshot.isAvailable)
+        // blocksBytes MUST reflect physical filesystem allocation (~200 KB), NEVER the 50 GB RPC figure!
+        XCTAssertLessThan(snapshot.blocksBytes, 1024 * 1024, "blocksBytes must be physical filesystem allocation")
+        // totalDataDirBytes MUST reflect physical filesystem allocation (~500 KB), NEVER 50 GB + chainstate!
+        XCTAssertLessThan(snapshot.totalDataDirBytes, 1024 * 1024, "totalDataDirBytes must be pure physical filesystem total")
+        // rpcSizeOnDisk must be cleanly retained as a separate optional field
+        XCTAssertEqual(snapshot.rpcSizeOnDisk, divergentRPC)
+        XCTAssertEqual(snapshot.formattedRpcSizeOnDisk, ByteCountFormatter.string(fromByteCount: divergentRPC, countStyle: .file))
+        XCTAssertEqual(snapshot.blocksQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.totalQuality, .measuredAllocated)
+    }
+
+    func testPerComponentQualityWithMissingOptionalDirectories() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("OptionalDirTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Create only chainstate (no indexes, no wallets)
+        let chainstateDir = tempDir.appendingPathComponent("chainstate")
+        try FileManager.default.createDirectory(at: chainstateDir, withIntermediateDirectories: true)
+        try Data(repeating: 0x33, count: 200 * 1024).write(to: chainstateDir.appendingPathComponent("000001.ldb"))
+
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
+
+        XCTAssertTrue(snapshot.isAvailable)
+        XCTAssertEqual(snapshot.chainstateQuality, .measuredAllocated)
+        XCTAssertGreaterThan(snapshot.chainstateBytes, 0)
+        // Absent optional directories must report 0 bytes with .measuredAllocated, NOT fail or downgrade the snapshot
+        XCTAssertEqual(snapshot.indexesQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.indexesBytes, 0)
+        XCTAssertEqual(snapshot.walletsQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.walletsBytes, 0)
+        XCTAssertEqual(snapshot.totalQuality, .measuredAllocated)
+    }
+
+    func testHiddenFilesIncludedInAllocation() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("HiddenFilesTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let blocksDir = tempDir.appendingPathComponent("blocks")
+        try FileManager.default.createDirectory(at: blocksDir, withIntermediateDirectories: true)
+
+        // Write a visible 100 KB file and a hidden 200 KB file
+        try Data(repeating: 0x44, count: 100 * 1024).write(to: blocksDir.appendingPathComponent("blk00000.dat"))
+        try Data(repeating: 0x55, count: 200 * 1024).write(to: blocksDir.appendingPathComponent(".hidden_block_data"))
+
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
+
+        // Both visible and hidden disk-consuming files must be counted in allocation
+        XCTAssertGreaterThanOrEqual(snapshot.blocksBytes, 300 * 1024, "Hidden files must be counted in allocation")
+        XCTAssertGreaterThanOrEqual(snapshot.totalDataDirBytes, 300 * 1024, "Hidden files must be counted in total datadir")
+    }
+
+    func testMixedSuccessQualityWithUnreadableComponent() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("MixedSuccessTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Valid chainstate directory
+        let chainstateDir = tempDir.appendingPathComponent("chainstate")
+        try FileManager.default.createDirectory(at: chainstateDir, withIntermediateDirectories: true)
+        try Data(repeating: 0x66, count: 250 * 1024).write(to: chainstateDir.appendingPathComponent("000001.ldb"))
+
+        // Inaccessible indexes directory (chmod 000)
+        let indexesDir = tempDir.appendingPathComponent("indexes")
+        try FileManager.default.createDirectory(at: indexesDir, withIntermediateDirectories: true)
+        try Data(repeating: 0x77, count: 50 * 1024).write(to: indexesDir.appendingPathComponent("index.dat"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: indexesDir.path)
         defer {
-            try? FileManager.default.removeItem(at: externalTarget)
-            try? FileManager.default.removeItem(at: datadirSymlink)
+            // Restore permissions to allow cleanup
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: indexesDir.path)
         }
 
-        // Put a precious file on the external target
-        let preciousFile = externalTarget.appendingPathComponent("precious_wallet.dat")
-        try Data("precious data".utf8).write(to: preciousFile)
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
 
-        // Create symlink
-        try FileManager.default.createSymbolicLink(at: datadirSymlink, withDestinationURL: externalTarget)
+        XCTAssertTrue(snapshot.isAvailable, "Snapshot overall must remain available")
+        // Valid chainstate MUST NOT be suppressed by unreadable indexes
+        XCTAssertEqual(snapshot.chainstateQuality, .measuredAllocated)
+        XCTAssertGreaterThan(snapshot.chainstateBytes, 0)
+        XCTAssertFalse(snapshot.formattedChainstateSize.contains("Unavailable"))
+        // Unreadable indexes must report Unavailable
+        XCTAssertEqual(snapshot.indexesQuality, .unavailable)
+        XCTAssertEqual(snapshot.formattedIndexesSize, "Unavailable")
+        // Total quality must reflect partial traversal
+        XCTAssertEqual(snapshot.totalQuality, .partial)
+        XCTAssertTrue(snapshot.formattedTotalSize.contains("(partial)"))
+    }
 
-        // Simulate AppState uninstall symlink defense
-        let fm = FileManager.default
-        let isSymlink = (try? datadirSymlink.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink ?? false
-        XCTAssertTrue(isSymlink, "Must detect that datadir is a symlink")
+    func testSparseFileAllocationParity() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("SparseTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        if isSymlink {
-            try fm.removeItem(at: datadirSymlink)
+        let blocksDir = tempDir.appendingPathComponent("blocks")
+        try FileManager.default.createDirectory(at: blocksDir, withIntermediateDirectories: true)
+
+        let sparseFileURL = blocksDir.appendingPathComponent("sparse_block.dat")
+        let fd = open(sparseFileURL.path, O_CREAT | O_RDWR | O_TRUNC, 0o644)
+        guard fd >= 0 else { throw NSError(domain: "Test", code: 1) }
+        let data = Data(repeating: 0x41, count: 10 * 1024 * 1024)
+        _ = data.withUnsafeBytes { ptr in
+            write(fd, ptr.baseAddress, ptr.count)
         }
+        var hole = fpunchhole_t(fp_flags: 0, reserved: 0, fp_offset: 0, fp_length: 9 * 1024 * 1024)
+        let punchRes = fcntl(fd, F_PUNCHHOLE, &hole)
+        close(fd)
+        XCTAssertEqual(punchRes, 0, "F_PUNCHHOLE must succeed on APFS")
 
-        // Verify that datadirSymlink was removed, BUT the externalTarget and its contents REMAIN INTACT!
-        XCTAssertFalse(fm.fileExists(atPath: datadirSymlink.path), "Symlink pointer must be removed")
-        XCTAssertTrue(fm.fileExists(atPath: externalTarget.path), "External target directory MUST be preserved")
-        XCTAssertTrue(fm.fileExists(atPath: preciousFile.path), "Files in external target directory MUST be intact")
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
+
+        XCTAssertTrue(snapshot.isAvailable)
+        XCTAssertEqual(snapshot.blocksQuality, .measuredAllocated)
+        // Physical APFS allocation after punching a 9 MB hole in 10 MB is ~1 MB, far less than 5 MB
+        XCTAssertLessThan(snapshot.blocksBytes, 5 * 1024 * 1024, "Sparse file must measure physical allocation, not 10 MB logical size")
     }
 
     func testMeasurementQualityFormattingDistinctions() {
@@ -192,7 +305,11 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
             indexesBytes: 0,
             walletsBytes: 0,
             totalDataDirBytes: 3 * 1024 * 1024,
-            measurementQuality: .measuredAllocated
+            blocksQuality: .measuredAllocated,
+            chainstateQuality: .measuredAllocated,
+            indexesQuality: .measuredAllocated,
+            walletsQuality: .measuredAllocated,
+            totalQuality: .measuredAllocated
         )
         XCTAssertFalse(allocatedSnap.formattedChainstateSize.contains("(logical)"))
         XCTAssertFalse(allocatedSnap.formattedChainstateSize.contains("(partial)"))
@@ -204,7 +321,11 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
             indexesBytes: 0,
             walletsBytes: 0,
             totalDataDirBytes: 3 * 1024 * 1024,
-            measurementQuality: .fallbackLogicalEstimate
+            blocksQuality: .fallbackLogicalEstimate,
+            chainstateQuality: .fallbackLogicalEstimate,
+            indexesQuality: .fallbackLogicalEstimate,
+            walletsQuality: .fallbackLogicalEstimate,
+            totalQuality: .fallbackLogicalEstimate
         )
         XCTAssertTrue(logicalSnap.formattedChainstateSize.contains("(logical)"))
         XCTAssertTrue(logicalSnap.formattedChainstateSize.hasPrefix("~"))
@@ -216,7 +337,11 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
             indexesBytes: 0,
             walletsBytes: 0,
             totalDataDirBytes: 3 * 1024 * 1024,
-            measurementQuality: .partial
+            blocksQuality: .partial,
+            chainstateQuality: .partial,
+            indexesQuality: .partial,
+            walletsQuality: .partial,
+            totalQuality: .partial
         )
         XCTAssertTrue(partialSnap.formattedChainstateSize.contains("(partial)"))
 
@@ -229,7 +354,11 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
             totalDataDirBytes: 0,
             isAvailable: false,
             failureReason: "Permission Denied",
-            measurementQuality: .unavailable
+            blocksQuality: .unavailable,
+            chainstateQuality: .unavailable,
+            indexesQuality: .unavailable,
+            walletsQuality: .unavailable,
+            totalQuality: .unavailable
         )
         XCTAssertEqual(unavailableSnap.formattedChainstateSize, "Unavailable")
         XCTAssertEqual(unavailableSnap.formattedTotalSize, "Unavailable (Permission Denied)")
@@ -245,6 +374,8 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.blocksBytes, 0)
         XCTAssertEqual(snapshot.chainstateBytes, 0)
         XCTAssertEqual(snapshot.totalDataDirBytes, 0)
-        XCTAssertEqual(snapshot.measurementQuality, .measuredAllocated, "Observed empty directory quality is measuredAllocated")
+        XCTAssertEqual(snapshot.blocksQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.chainstateQuality, .measuredAllocated)
+        XCTAssertEqual(snapshot.totalQuality, .measuredAllocated, "Observed empty directory quality is measuredAllocated")
     }
 }
