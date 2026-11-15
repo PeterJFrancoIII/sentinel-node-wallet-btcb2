@@ -183,4 +183,68 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertTrue(fm.fileExists(atPath: externalTarget.path), "External target directory MUST be preserved")
         XCTAssertTrue(fm.fileExists(atPath: preciousFile.path), "Files in external target directory MUST be intact")
     }
+
+    func testMeasurementQualityFormattingDistinctions() {
+        // 1. Measured Allocated
+        let allocatedSnap = StorageBreakdownSnapshot(
+            blocksBytes: 1024 * 1024,
+            chainstateBytes: 2 * 1024 * 1024,
+            indexesBytes: 0,
+            walletsBytes: 0,
+            totalDataDirBytes: 3 * 1024 * 1024,
+            measurementQuality: .measuredAllocated
+        )
+        XCTAssertFalse(allocatedSnap.formattedChainstateSize.contains("(logical)"))
+        XCTAssertFalse(allocatedSnap.formattedChainstateSize.contains("(partial)"))
+
+        // 2. Fallback Logical Estimate
+        let logicalSnap = StorageBreakdownSnapshot(
+            blocksBytes: 1024 * 1024,
+            chainstateBytes: 2 * 1024 * 1024,
+            indexesBytes: 0,
+            walletsBytes: 0,
+            totalDataDirBytes: 3 * 1024 * 1024,
+            measurementQuality: .fallbackLogicalEstimate
+        )
+        XCTAssertTrue(logicalSnap.formattedChainstateSize.contains("(logical)"))
+        XCTAssertTrue(logicalSnap.formattedChainstateSize.hasPrefix("~"))
+
+        // 3. Partial Failure
+        let partialSnap = StorageBreakdownSnapshot(
+            blocksBytes: 1024 * 1024,
+            chainstateBytes: 2 * 1024 * 1024,
+            indexesBytes: 0,
+            walletsBytes: 0,
+            totalDataDirBytes: 3 * 1024 * 1024,
+            measurementQuality: .partial
+        )
+        XCTAssertTrue(partialSnap.formattedChainstateSize.contains("(partial)"))
+
+        // 4. Unavailable
+        let unavailableSnap = StorageBreakdownSnapshot(
+            blocksBytes: 0,
+            chainstateBytes: 0,
+            indexesBytes: 0,
+            walletsBytes: 0,
+            totalDataDirBytes: 0,
+            isAvailable: false,
+            failureReason: "Permission Denied",
+            measurementQuality: .unavailable
+        )
+        XCTAssertEqual(unavailableSnap.formattedChainstateSize, "Unavailable")
+        XCTAssertEqual(unavailableSnap.formattedTotalSize, "Unavailable (Permission Denied)")
+    }
+
+    func testEmptyObservedDirectoryReturnsAllocatedZero() throws {
+        let emptyDir = FileManager.default.temporaryDirectory.appendingPathComponent("EmptyDir_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: emptyDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyDir) }
+
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: emptyDir)
+        XCTAssertTrue(snapshot.isAvailable, "Observed empty directory must be available")
+        XCTAssertEqual(snapshot.blocksBytes, 0)
+        XCTAssertEqual(snapshot.chainstateBytes, 0)
+        XCTAssertEqual(snapshot.totalDataDirBytes, 0)
+        XCTAssertEqual(snapshot.measurementQuality, .measuredAllocated, "Observed empty directory quality is measuredAllocated")
+    }
 }

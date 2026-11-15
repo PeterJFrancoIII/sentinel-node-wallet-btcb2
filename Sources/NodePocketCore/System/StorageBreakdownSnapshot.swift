@@ -1,5 +1,12 @@
 import Foundation
 
+public enum StorageMeasurementQuality: String, Sendable, Equatable {
+    case measuredAllocated = "Allocated"
+    case fallbackLogicalEstimate = "Logical Estimate"
+    case partial = "Partial"
+    case unavailable = "Unavailable"
+}
+
 public struct StorageBreakdownSnapshot: Sendable, Equatable {
     public let blocksBytes: Int64
     public let chainstateBytes: Int64
@@ -8,6 +15,7 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
     public let totalDataDirBytes: Int64
     public let isAvailable: Bool
     public let failureReason: String?
+    public let measurementQuality: StorageMeasurementQuality
     public let measuredAt: Date
 
     public init(
@@ -18,6 +26,7 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         totalDataDirBytes: Int64,
         isAvailable: Bool = true,
         failureReason: String? = nil,
+        measurementQuality: StorageMeasurementQuality = .measuredAllocated,
         measuredAt: Date = Date()
     ) {
         self.blocksBytes = blocksBytes
@@ -27,32 +36,63 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         self.totalDataDirBytes = totalDataDirBytes
         self.isAvailable = isAvailable
         self.failureReason = failureReason
+        self.measurementQuality = measurementQuality
         self.measuredAt = measuredAt
     }
 
     public var formattedBlocksSize: String {
         guard isAvailable else { return "Unavailable" }
-        return ByteCountFormatter.string(fromByteCount: blocksBytes, countStyle: .file)
+        let size = ByteCountFormatter.string(fromByteCount: blocksBytes, countStyle: .file)
+        switch measurementQuality {
+        case .measuredAllocated: return size
+        case .fallbackLogicalEstimate: return "~\(size) (logical)"
+        case .partial: return "\(size) (partial)"
+        case .unavailable: return "Unavailable"
+        }
     }
 
     public var formattedChainstateSize: String {
         guard isAvailable else { return "Unavailable" }
-        return ByteCountFormatter.string(fromByteCount: chainstateBytes, countStyle: .file)
+        let size = ByteCountFormatter.string(fromByteCount: chainstateBytes, countStyle: .file)
+        switch measurementQuality {
+        case .measuredAllocated: return size
+        case .fallbackLogicalEstimate: return "~\(size) (logical)"
+        case .partial: return "\(size) (partial)"
+        case .unavailable: return "Unavailable"
+        }
     }
 
     public var formattedIndexesSize: String {
         guard isAvailable else { return "Unavailable" }
-        return ByteCountFormatter.string(fromByteCount: indexesBytes, countStyle: .file)
+        let size = ByteCountFormatter.string(fromByteCount: indexesBytes, countStyle: .file)
+        switch measurementQuality {
+        case .measuredAllocated: return size
+        case .fallbackLogicalEstimate: return "~\(size) (logical)"
+        case .partial: return "\(size) (partial)"
+        case .unavailable: return "Unavailable"
+        }
     }
 
     public var formattedWalletsSize: String {
         guard isAvailable else { return "Unavailable" }
-        return ByteCountFormatter.string(fromByteCount: walletsBytes, countStyle: .file)
+        let size = ByteCountFormatter.string(fromByteCount: walletsBytes, countStyle: .file)
+        switch measurementQuality {
+        case .measuredAllocated: return size
+        case .fallbackLogicalEstimate: return "~\(size) (logical)"
+        case .partial: return "\(size) (partial)"
+        case .unavailable: return "Unavailable"
+        }
     }
 
     public var formattedTotalSize: String {
         guard isAvailable else { return failureReason != nil ? "Unavailable (\(failureReason!))" : "Unavailable" }
-        return ByteCountFormatter.string(fromByteCount: totalDataDirBytes, countStyle: .file)
+        let size = ByteCountFormatter.string(fromByteCount: totalDataDirBytes, countStyle: .file)
+        switch measurementQuality {
+        case .measuredAllocated: return size
+        case .fallbackLogicalEstimate: return "~\(size) (logical)"
+        case .partial: return "\(size) (partial)"
+        case .unavailable: return "Unavailable"
+        }
     }
 
     /// Asynchronous nonblocking measurement executed on a detached background utility thread.
@@ -73,7 +113,8 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
                 walletsBytes: 0,
                 totalDataDirBytes: 0,
                 isAvailable: false,
-                failureReason: "Directory not found"
+                failureReason: "Directory not found",
+                measurementQuality: .unavailable
             )
         }
 
@@ -87,7 +128,8 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
                 walletsBytes: 0,
                 totalDataDirBytes: 0,
                 isAvailable: false,
-                failureReason: "Symlink root rejected"
+                failureReason: "Symlink root rejected",
+                measurementQuality: .unavailable
             )
         }
 
@@ -96,41 +138,64 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         let indexesURL = dataDirectory.appendingPathComponent("indexes")
         let walletsURL = dataDirectory.appendingPathComponent("wallets")
 
-        let measuredBlocks = directorySize(at: blocksURL)
-        let effectiveBlocks = (rpcSizeOnDisk != nil && rpcSizeOnDisk! > 0) ? rpcSizeOnDisk! : measuredBlocks
-        let measuredChainstate = directorySize(at: chainstateURL)
-        let measuredIndexes = directorySize(at: indexesURL)
-        let measuredWallets = directorySize(at: walletsURL)
-        let measuredTotal = directorySize(at: dataDirectory)
+        let blocksMeasurement = directoryMeasurement(at: blocksURL)
+        let effectiveBlocks = (rpcSizeOnDisk != nil && rpcSizeOnDisk! > 0) ? rpcSizeOnDisk! : blocksMeasurement.bytes
+        let chainstateMeasurement = directoryMeasurement(at: chainstateURL)
+        let indexesMeasurement = directoryMeasurement(at: indexesURL)
+        let walletsMeasurement = directoryMeasurement(at: walletsURL)
+        let totalMeasurement = directoryMeasurement(at: dataDirectory)
+
+        // Determine aggregate measurement quality
+        let allQualities = [blocksMeasurement.quality, chainstateMeasurement.quality, indexesMeasurement.quality, walletsMeasurement.quality, totalMeasurement.quality]
+        let aggregateQuality: StorageMeasurementQuality
+        if allQualities.contains(.unavailable) {
+            aggregateQuality = .unavailable
+        } else if allQualities.contains(.partial) {
+            aggregateQuality = .partial
+        } else if allQualities.contains(.fallbackLogicalEstimate) {
+            aggregateQuality = .fallbackLogicalEstimate
+        } else {
+            aggregateQuality = .measuredAllocated
+        }
 
         return StorageBreakdownSnapshot(
             blocksBytes: effectiveBlocks,
-            chainstateBytes: measuredChainstate,
-            indexesBytes: measuredIndexes,
-            walletsBytes: measuredWallets,
-            totalDataDirBytes: max(measuredTotal, effectiveBlocks + measuredChainstate),
+            chainstateBytes: chainstateMeasurement.bytes,
+            indexesBytes: indexesMeasurement.bytes,
+            walletsBytes: walletsMeasurement.bytes,
+            totalDataDirBytes: max(totalMeasurement.bytes, effectiveBlocks + chainstateMeasurement.bytes),
             isAvailable: true,
             failureReason: nil,
+            measurementQuality: aggregateQuality,
             measuredAt: Date()
         )
     }
 
-    private static func directorySize(at url: URL) -> Int64 {
+    private struct DirectoryMeasurement {
+        let bytes: Int64
+        let quality: StorageMeasurementQuality
+    }
+
+    private static func directoryMeasurement(at url: URL) -> DirectoryMeasurement {
         // Guard against symlink root
         if let rootValues = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
            rootValues.isSymbolicLink == true {
-            return 0
+            return DirectoryMeasurement(bytes: 0, quality: .unavailable)
         }
 
         guard let enumerator = FileManager.default.enumerator(
             at: url,
             includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return 0 }
+        ) else { return DirectoryMeasurement(bytes: 0, quality: .unavailable) }
 
         var total: Int64 = 0
+        var hasLogicalFallback = false
+        var hasInaccessibleFile = false
+
         for case let fileURL as URL in enumerator {
             guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]) else {
+                hasInaccessibleFile = true
                 continue
             }
             if values.isSymbolicLink == true {
@@ -139,10 +204,28 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
                 continue
             }
             guard values.isRegularFile == true else { continue }
-            // Measure actual on-disk allocated bytes if available (APFS extent allocation), fallback to logical fileSize
-            let allocSize = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
-            total += Int64(allocSize)
+
+            if let alloc = values.totalFileAllocatedSize {
+                total += Int64(alloc)
+            } else if let alloc = values.fileAllocatedSize {
+                total += Int64(alloc)
+            } else if let logical = values.fileSize {
+                hasLogicalFallback = true
+                total += Int64(logical)
+            } else {
+                hasInaccessibleFile = true
+            }
         }
-        return total
+
+        let quality: StorageMeasurementQuality
+        if hasInaccessibleFile {
+            quality = .partial
+        } else if hasLogicalFallback {
+            quality = .fallbackLogicalEstimate
+        } else {
+            quality = .measuredAllocated
+        }
+
+        return DirectoryMeasurement(bytes: total, quality: quality)
     }
 }
