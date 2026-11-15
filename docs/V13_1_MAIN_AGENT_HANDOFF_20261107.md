@@ -1,4 +1,4 @@
-# Current Agent Handoff — Sentinel Node Wallet v13.1
+> **Historical document — not the current release or policy (November 14, 2026).** This record preserves earlier design, audits or agent-reported outcomes and may contain superseded bundle IDs, pre-merge PR states, old test counts, obsolete product controls, or historical safety decisions. **Do not use it as live operator instructions or current proof of approval.** The active sources are [Current Project Status](PROJECT_STATUS.md), [Governance](../GOVERNANCE.md), [Security](../SECURITY.md), [Release Matrix](../TEST_AND_RELEASE_MATRIX.md) and [GitHub v1.0.0 Build 3](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3).\n\n# Current Agent Handoff — Sentinel Node Wallet v13.1
 
 **Current snapshot supersedes 2026-11-07 headings:** 2026-11-10. **Project status and blockers:** [PROJECT_STATUS.md](PROJECT_STATUS.md). **Decision:** development progress accepted; public release, real funds and production deployment **NO-GO**.
 

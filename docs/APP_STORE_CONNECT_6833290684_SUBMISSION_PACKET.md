@@ -1,4 +1,4 @@
-# Sentinel Node Wallet — Complete macOS App Store Connect Submission Packet
+> **Historical document — not the current release or policy (November 14, 2026).** This record preserves earlier design, audits or agent-reported outcomes and may contain superseded bundle IDs, pre-merge PR states, old test counts, obsolete product controls, or historical safety decisions. **Do not use it as live operator instructions or current proof of approval.** The active sources are [Current Project Status](PROJECT_STATUS.md), [Governance](../GOVERNANCE.md), [Security](../SECURITY.md), [Release Matrix](../TEST_AND_RELEASE_MATRIX.md) and [GitHub v1.0.0 Build 3](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3).\n\n# Sentinel Node Wallet — Complete macOS App Store Connect Submission Packet
 
 **Target owner-supplied ASC record:** [App ID 6833290684](https://appstoreconnect.apple.com/apps/6833290684/distribution/macos/version/inflight)  
 **Bundle identifier in source:** `app.nodepocket.btcb2` (must match actual ASC app before upload)  
