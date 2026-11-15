@@ -16,7 +16,7 @@
 For a public trustable outside-store DMG, use a properly authorized **Developer ID Application** identity, hardened runtime, correctly signed embedded binaries and notarization/stapling with Apple's notary service. `scripts/build_production_dmg.sh` provides a guarded candidate pipeline; do **not** assume it was used for the published Build 3 DMG. Prerequisites include:
 
 - Owner-installed valid Developer ID certificate and local notarization credentials; never commit Apple keys or profiles.
-- Owner-approved HTTPS associated-domain AASA matching actual team and **current** bundle `pool.sentineldefensetechnologies.co.za` if Apple Passwords is used. The old `app.nodepocket.btcb2` AASA in historical documentation is not the packaging identifier.
+- Owner-approved HTTPS associated-domain AASA matching actual team and **current** bundle `pool.sentineldefensetechnologies.co.za` if Apple Passwords is used. The old `app.nodepocket.btcb2` AASA in historical documentation is not the packaging identifier. **Important source mismatch:** the checked-in `scripts/build_production_dmg.sh` still hard-codes `BUNDLE_ID=app.nodepocket.btcb2`. Do **not** run it unchanged for the Build 3 bundle: first review and repair the script, provision appropriate entitlements/AASA for the actual `pool.sentineldefensetechnologies.co.za` identity, and re-qualify the signature and notarization pipeline on an isolated test app.
 - Independent BTCB2 consensus/signing and complete native credential/backup acceptance; no live wallet testing.
 - Final accepted notarization receipt, stapling validation, trusted Gatekeeper assessment and signed-file hash manifest. Public download only after approved release gates.
 
