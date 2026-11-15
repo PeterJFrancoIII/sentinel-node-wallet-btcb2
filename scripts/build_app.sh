@@ -91,14 +91,9 @@ EOF
 
 # Code sign with Apple Development identity or ad-hoc fallback
 DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
-ENTITLEMENTS="${ROOT_DIR}/dist/AppStore.entitlements.plist"
 if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then
     echo "Signing with Developer Identity: ${DEV_IDENTITY}"
-    if [ -f "${ENTITLEMENTS}" ]; then
-        codesign --force --deep --sign "${DEV_IDENTITY}" --entitlements "${ENTITLEMENTS}" --options runtime "${APP_BUNDLE}"
-    else
-        codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
-    fi
+    codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
 else
     echo "Signing with ad-hoc identity"
     codesign --force --deep --sign - "${APP_BUNDLE}"
