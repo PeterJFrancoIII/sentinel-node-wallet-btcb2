@@ -1,207 +1,70 @@
 # Sentinel Node Wallet — BTCB2
 
-[![Release](https://img.shields.io/badge/Release-v1.0.0--Build3-blue.svg)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3)
-[![Tests](https://img.shields.io/badge/Tests-144%2F144%20Passing-brightgreen.svg)]()
-[![Network](https://img.shields.io/badge/Network-BTCB2%20MainNet-orange.svg)]()
-[![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B%20(Apple%20Silicon)-lightgrey.svg)]()
+**Latest GitHub release:** [v1.0.0 (Build 3)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) · **macOS:** 13+ on Apple Silicon · **BTCB2:** BLAKE2b / BIP-110 MainNet.
 
-**Sentinel Node Wallet** is a standalone, self-custodial native macOS SwiftUI client for **Bitcoin Knots (BTCB2 BLAKE2b / BIP-110 MainNet)**. It bundles an embedded Bitcoin Knots daemon with an encrypted Native SegWit (Bech32) descriptor wallet, multi-operator security isolation, Touch ID biometric gating, and adaptive storage profiles.
+Sentinel Node Wallet is an independent SwiftUI macOS application that bundles a local Bitcoin Knots daemon and provides node operations, encrypted-descriptor wallet management and locally calculated blockchain network analytics. The project is **not** an exchange, mining program, cloud wallet or part of any other operational system.
 
-- **Target App ID:** Apple App Store Connect App ID `6833290684`
-- **Bundle Identifier:** `pool.sentineldefensetechnologies.co.za`
-- **App Store Version:** `1.0` (Build `3`)
-- **Canonical Repository:** [`PeterJFrancoIII/sentinel-node-wallet-btcb2`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2)
-- **Latest Release & DMG Installer:** [`v1.0.0-build3`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3)
-- **Direct DMG Download:** [`Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg)
+| Identity / release | Current record |
+|---|---|
+| GitHub release tag | `v1.0.0-build3` |
+| Release source commit (identified in release notes) | [`357766bf`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/357766bf8d5e219208148101dde5bc7c26f59b0e) |
+| Installer asset | [`Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg) |
+| DMG SHA-256 from GitHub release asset metadata | `892798a3a7bf4c50b4cf220d6ac3e4a0b071c8c8acc1d993da1d04212d01b114` |
+| App Store Connect record | [App ID `6833290684`](https://appstoreconnect.apple.com/apps/6833290684/distribution/macos/version/inflight) |
+| Current macOS bundle identifier in release scripts | `pool.sentineldefensetechnologies.co.za` |
+| Version / build in packaging scripts | `1.0 (3)` |
+| Pin in build scripts | Bitcoin Knots `29.4.3.knots20260508` |
+| CI for current main docs/source baseline | [#43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) — **144 executed, 143 passed, 0 failed, 1 skipped** |
 
----
+> **Release qualification:** The DMG asset is publicly available on GitHub; that is **not** evidence of Apple Developer ID notarization, Gatekeeper acceptance, App Store approval or an independently audited BTCB2 wallet. The direct-DMG script attempts **Apple Development** signing when that identity is installed, not Developer ID signing/notarization. The interactive Keychain XCTest remains skipped in hosted CI. Consult [Project Status](docs/PROJECT_STATUS.md), [Security](SECURITY.md) and [Test Matrix](TEST_AND_RELEASE_MATRIX.md) before trusting the app with funds.
 
-## Table of Contents
+## Install the published DMG
 
-1. [Key Features](#key-features)
-2. [How to Fully Unload & Cleanly Uninstall Sentinel Node Wallet](#how-to-fully-unload--cleanly-uninstall-sentinel-node-wallet)
-   - [Why macOS Leaves Data Behind Upon Trashing](#why-macos-leaves-data-behind-upon-trashing)
-   - [Method 1: In-App 1-Click Clean Wipe & Uninstall (Recommended)](#method-1-in-app-1-click-clean-wipe--uninstall-recommended)
-   - [Method 2: Standalone Shell Script (`scripts/clean_uninstall.sh`)](#method-2-standalone-shell-script-scriptsclean_uninstallsh)
-   - [Method 3: Complete Manual Terminal Unload](#method-3-complete-manual-terminal-unload)
-3. [Architecture & Security](#architecture--security)
-   - [Multi-Operator Wallet Isolation](#multi-operator-wallet-isolation)
-   - [Touch ID / Password Gated Keychain Autofill](#touch-id--password-gated-keychain-autofill)
-   - [Interactive Knots Node Startup Prompt & Live Sync](#interactive-knots-node-startup-prompt--live-sync)
-   - [Real-Time Fee Calculation & Net Recipient Model](#real-time-fee-calculation--net-recipient-model)
-4. [Storage Modes & Hardware Optimization](#storage-modes--hardware-optimization)
-5. [Development & Verification](#development--verification)
-6. [License & Governance](#license--governance)
+1. Open the [Build 3 release](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) and download the DMG.
+2. Verify its SHA-256 against the value above and the downloadable `SHA256SUMS.txt` release asset: `shasum -a 256 Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`.
+3. Mount the DMG and drag **Sentinel Node Wallet.app** to **Applications**.
+4. Review the installed app's macOS signature and Gatekeeper decision before running. Do **not** assume a development-signed image is trusted or notarized; do not bypass security warnings merely to install.
+5. On first launch, use a **disposable, zero-funds wallet** until the pending native acceptance and BTCB2 signing audits are completed.
 
----
+The downloadable `BUILD_MANIFEST.json` and `SHA256SUMS.txt` on the release page are separate artifacts. Verify their contents against the installer you actually download; GitHub's published digest establishes file-integrity metadata, not source-to-binary reproducibility or financial safety.
 
-## Key Features
+## Functionality in current source
 
-- **Embedded Bitcoin Knots Daemon:** Autonomous 1-click startup, loopback-only RPC (`127.0.0.1:8332`), and continuous daemon health/hashrate tracking.
-- **30-Block Hashrate Dot Plot & MACD Momentum:** Real-time CoreGraphics / SwiftUI dot plot showing rolling block hashrate with 12/30 dual-EMA overlays and aligned MACD oscillator histogram.
-- **Native SegWit (Bech32) Descriptor Wallets:** Fully encrypted local wallet databases using strict integer Satoshi arithmetic.
-- **Multi-Operator Account Isolation:** Strict operator segregation; new operator accounts have zero access to existing operators' wallets.
-- **Biometric Keychain Gating:** Operator credentials require Touch ID or Mac system password validation (`LAContext.evaluatePolicy(.deviceOwnerAuthentication)`).
-- **Interactive Node Startup Prompt:** Detects node state on login, prompting operators to Enable or Bypass with a live blockchain synchronization progress card.
-- **1-Click Clean Uninstaller:** Complete in-app and CLI removal of all ~18 GB blockchain blocks, caches, and application files with zero residual footprint.
-- **Dynamic Fee Recalculation:** Instant recalculation when selecting `MAX` balance or editing recipient amounts, preserving required fee headroom.
-- **Ultra Power Policy:** Automatically throttles CPU threads, dbcache (128 MiB), and enforces max 4 outbound peers when running on MacBook battery power.
+- **Node:** Embedded `bitcoind` and `bitcoin-cli`; start/stop and live sync progress; RPC bound to `127.0.0.1:8332`; peer and block-height indicators; optional, operator-controlled incoming P2P (normally port 8333).
+- **Storage:** Pruning defaults to **2,048 MiB of retained block files** on new installations, with a **550 MiB minimum** and `pruneduringinit=550`; optional archival history on qualifying external storage. The prune target does **not** cap total node disk usage or indicate the full amount needed for validation.
+- **Profiles:** Quiet, Balanced and Fast selectable; Ultra battery policy applies separate power-saving overrides. Customized profile settings are persisted. Defaults are documented below, not universal fixed running metrics.
+- **Wallet:** Local encrypted descriptor wallets, multiple operator accounts with ownership isolation, receiving addresses and QR codes, history, balances, maturity reporting, backups, restore workflows and nondestructive Archive.
+- **Authentication:** Local usernames/passwords, TOTP and recovery mechanisms, Keychain hooks, Touch ID or system password prompts for supported protected interactions. These features still require acceptance on each actual signed distribution build.
+- **Network:** Local-consensus hashrate/difficulty estimates, rolling 30-block dot plot and dual-EMA/MACD chart; optional public **read-only ticker** queries to Neoxa and NonKYC for estimated fiat values. The app does **not** place exchange trades.
+- **Uninstall:** An explicitly destructive **Full Uninstallation** UI and separate `scripts/clean_uninstall.sh` exist. They can remove blockchain data **and local wallet databases**. This is **not** the same operation as nondestructive wallet Archive or currently blocked individual-wallet Delete; see below.
 
----
+### Default resource profiles
 
-## How to Fully Unload & Cleanly Uninstall Sentinel Node Wallet
+| Profile | Verification threads | Cache | Connection cap | Notes |
+|---|---:|---:|---:|---|
+| Quiet | 1 | 128 MiB | 3 | Lower-priority work |
+| Balanced | 2 | 256 MiB | 8 | Default for a new installation |
+| Fast | 4 | 1,024 MiB | 24 | Faster validation on AC |
+| Ultra (battery) | 1 | 128 MiB | 4 | Automatic override; inbound listening off |
 
-### Why macOS Leaves Data Behind Upon Trashing
+A connection cap is not a guaranteed count of connected peers. Existing configuration, custom settings and runtime override logic can alter effective behavior.
 
-On macOS, dragging an application (`.app`) to the Trash **never runs any uninstallation script** and **never deletes `Application Support` or container data automatically**. 
+## Wallet and uninstall safety
 
-Apple designed macOS this way intentionally:
-- The macOS Finder treats `.app` bundles as ordinary folders. Moving an app to the Trash is simply a filesystem move operation.
-- Apple deliberately separates application binaries (`/Applications/*.app`) from user data (`~/Library/Application Support/*`) so that updating, troubleshooting, or reinstalling an app never deletes personal wallets, settings, or licenses.
-- Applications cannot execute cleanup code while in the Trash because their process is already terminated.
+**On-chain spending is not independently certified.** The current RPC implementation defaults `isBroadcastRestricted=true` and denies send/sign/broadcast/RBF methods while that flag is active. WalletManager also checks this flag; code contains paths that can transact if that restriction is disabled. **No independent BIP-110/BLAKE2b SIGHASH_UNIFIED signing audit is recorded here. Do not use real funds or deliberately disable that restriction.**
 
-Because the Bitcoin Knots node synchronizes **~18 GB** of blockchain blocks and chainstate databases, removing only the `.app` bundle from `/Applications` will leave this data on your hard drive. 
+**Individual-wallet Delete remains hard-disabled in current source** pending independently verified isolated encrypted backup→restore; use **Archive** instead. **Full Uninstallation is different:** the app and CLI include broad deletion routines that may erase the node data directory, wallets and other local information without independently proving recoverability. **Back up and actually verify recovery off-device before using any uninstall/wipe function.** Do not assume the tool leaves zero residual files or can safely distinguish a wallet you wish to keep. Never execute `scripts/clean_uninstall.sh` merely as a development cleanup.
 
-To completely unload and wipe Sentinel Node Wallet with **zero residual data left behind**, use one of the three methods below.
+## Build, test, and contribute
 
----
+- Swift Package Manager project: `Package.swift`; targets `NodePocketApp`, `NodePocketCore`, `NodePocketCoreTests`. Build with `swift build -c release --arch arm64`; test with `swift test` on a suitable macOS host.
+- `scripts/build_app.sh`: local application bundle; `scripts/build_dmg.sh`: local drag-to-Applications DMG. **Neither alone is proof of Developer ID signing/notarization.**
+- `scripts/package_appstore_archive.sh`: constructs an App Store candidate archive using Swift build and Apple Development signing in the checked-in script; separate Apple distribution/upload processing is **not** verified by hosted CI.
+- Hosted CI tests and builds, but does not perform the interactive Keychain test, signed-app GUI wallet recovery, real-funds signing, or independent external audit.
+- For exact roles, release gates and required evidence, see [GOVERNANCE](GOVERNANCE.md), [AGENTS](AGENTS.md), [SECURITY](SECURITY.md), [CONTRIBUTING](CONTRIBUTING.md), [Release Matrix](TEST_AND_RELEASE_MATRIX.md) and [Current Status](docs/PROJECT_STATUS.md). Older v7–v14 specifications remain historical references, not current release instructions.
 
-### Method 1: In-App 1-Click Full Application & Data Uninstallation (Recommended)
+## Support, privacy and attribution
 
-You can trigger a complete, automated uninstallation of the application bundle and all supporting data directly from within the app:
+[Issues and support](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/issues) · [Privacy policy](docs/PRIVACY.md) · [Architecture](docs/ARCHITECTURE.md) · [License and attribution](NOTICE.md).
 
-1. Open **Sentinel Node Wallet**.
-2. Navigate to **Advanced Node & Storage Settings** via either:
-   - Node View: Click the **Gear icon** (or **Advanced Settings**) → scroll to **Full Application & Data Uninstallation**.
-   - Top Menu Bar: **Help → Clean Uninstall & Storage Wipe…**
-3. Click the red **"Fully Uninstall Application & All Files…"** button (or click *"Reveal in Finder"* to inspect the directory).
-4. Review the confirmation alert:
-   > *"This will permanently remove Sentinel Node Wallet from your Mac:  
-   > • All synchronized blockchain blocks and chainstate (~18 GB)  
-   > • All wallet databases, auth records, and configuration  
-   > • The application bundle itself"*
-5. Click **"Uninstall Everything"**:
-   - The app gracefully shuts down the background `bitcoind` daemon.
-   - It recursively deletes the entire `~/Library/Application Support/NodePocketBTCB2` data directory (~18 GB).
-   - It purges the sandboxed container and all local wallets/configurations.
-   - It automatically moves the `Sentinel Node Wallet.app` application bundle to the macOS Trash.
-   - It displays: *"Sentinel Node Wallet and all 18 GB of blockchain data and supporting files have been completely uninstalled and moved to the Trash."*
-6. Click **"Exit App Now"** to complete the uninstallation. Zero residual files remain.
-
----
-
-### Method 2: Standalone Shell Script (`scripts/clean_uninstall.sh`)
-
-If you have already closed the app, or prefer an automated Terminal uninstaller, use the provided clean uninstall script:
-
-```bash
-cd /Users/computer/Developer/NodePocketBTCB2
-./scripts/clean_uninstall.sh
-```
-
-**What this script does:**
-1. Gracefully terminates any active `bitcoind` or `Sentinel Node Wallet` processes.
-2. Recursively deletes `~/Library/Application Support/NodePocketBTCB2` (~18 GB).
-3. Deletes the Mac App Store sandbox container `~/Library/Containers/pool.sentineldefensetechnologies.co.za` (if present).
-4. Removes `/Applications/Sentinel Node Wallet.app` from your Applications folder.
-5. Reclaims 100% of the disk space with interactive confirmation.
-
----
-
-### Method 3: Complete Manual Terminal Unload
-
-For power users or automated deployment scripts, run the following commands in Terminal:
-
-```bash
-# 1. Gracefully stop the Bitcoin Knots daemon and app process
-killall bitcoind 2>/dev/null || true
-pkill -f "Sentinel Node Wallet" 2>/dev/null || true
-sleep 1
-
-# 2. Delete the 18 GB node sync and wallet data directory
-rm -rf "$HOME/Library/Application Support/NodePocketBTCB2"
-
-# 3. Delete the Mac App Store sandbox container (if running sandboxed build)
-rm -rf "$HOME/Library/Containers/pool.sentineldefensetechnologies.co.za"
-
-# 4. Remove the application bundle from /Applications
-rm -rf "/Applications/Sentinel Node Wallet.app"
-
-echo "Sentinel Node Wallet and all supporting data have been completely removed."
-```
-
----
-
-## Architecture & Security
-
-### Multi-Operator Wallet Isolation
-Sentinel Node Wallet enforces strict per-operator isolation:
-- The metadata registry maps every descriptor wallet to its creator's canonical operator account (`walletOwners: [String: String]`).
-- New operator accounts initialize with zero wallet access until explicitly creating or onboarding a wallet.
-- High-risk operations (`loadWallet`, `selectWallet`, `archiveWallet`, `deleteWalletFromMac`, `bumpFee`, `exportBackup`, `restoreWallet`, `prepareSendPreview`) fail closed if called across operator boundaries.
-
-### Touch ID / Password Gated Keychain Autofill
-- Login fields start completely blank; background Keychain sniffing on screen appearance is disabled.
-- Autofilling credentials or 1-click login requires hardware Touch ID or Mac password authentication (`LAContext.evaluatePolicy(.deviceOwnerAuthentication)`).
-- TOTP secrets are stored in macOS Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` to prevent authorization errors.
-
-### Interactive Knots Node Startup Prompt & Live Sync
-- When an operator signs in while the Knots Node is offline, an interactive prompt window appears:
-  - **Enable Knots Node:** Starts the node daemon, binds loopback RPC, loads the operator's wallet, and dismisses upon connection.
-  - **Bypass:** Allows offline standby access to the Wallet Manager without blocking the operator.
-- A dynamic offline banner remains visible with a 1-click "Turn On Node" button if bypassed.
-- While synchronizing, a live status banner tracks current block height, validated headers, and percentage progress, actively streaming confirmed balances as blocks arrive.
-
-### Real-Time Fee Calculation & Net Recipient Model
-- **Net Recipient Model:** The amount entered in "Amount to Send" represents the exact net amount the counterparty will receive.
-- **MAX Button:** Automatically computes `Available Balance - Estimated Transaction Fee` to avoid balance exhaustion.
-- **Fixed-Point Formatting:** Enforces strict 8-decimal string formatting (`0.00000001`) to prevent floating-point scientific notation RPC errors (`RPC Server Error (-3): Invalid amount`).
-
----
-
-## Storage Modes & Hardware Optimization
-
-| Profile | Threads | dbcache | Max Connections | Use Case |
-| :--- | :--- | :--- | :--- | :--- |
-| **Quiet** | 1 | 256 MiB | 8 | Thermal-conscious, silent background sync |
-| **Balanced** | 2 | 512 MiB | 24 | Default everyday balance of speed and efficiency |
-| **Fast** | 4 | 1024 MiB | 40 | Rapid Initial Block Download (IBD) on AC power |
-| **Ultra (Battery)** | 1 | 128 MiB | 4 (`listen=0`) | Automatic hardware preservation on battery power |
-
-- **Compact Pruning:** Enforces minimum 550 MiB block/undo pruning to minimize disk usage on storage-constrained Macs.
-- **Archival Mode:** Retains complete historical block data for archival operators and external storage volumes.
-
----
-
-## Development & Verification
-
-### Prerequisites
-- macOS 13.0+ (Ventura, Sonoma, Sequoia)
-- Apple Silicon (M1/M2/M3/M4)
-- Xcode 15+ and Swift 5.9+
-
-### Running the Test Suite
-```bash
-cd /Users/computer/Developer/NodePocketBTCB2
-swift test
-```
-*Current test suite status:* **144 tests passed, 0 failures, 1 interactive keychain test skipped (100% pass rate)**.
-
-### Packaging Standalone macOS .DMG Installer
-```bash
-./scripts/build_dmg.sh
-```
-Compiles, packages, and signs `Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg` with embedded verified Bitcoin Knots binaries, drag-to-Applications symlink, and detached SHA-256 checksums (`dist/SHA256SUMS.txt`).
-
-### Packaging for Mac App Store
-```bash
-./scripts/package_appstore_archive.sh
-```
-Compiles, seals, and packages `Sentinel Node Wallet.pkg` using Apple Cloud Managed Signing and App Sandboxing.
-
----
-
-## License & Governance
-
-- Distributed under the terms specified in [NOTICE.md](NOTICE.md).
-- Canonical operating and coordination directives adhere to [Shared Memory Agent Rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md).
+**Privacy caveat:** Blockchain peers and public market-data providers can observe normal network metadata including IP address. Wallet records are local by design; do not mistake that for a claim that all networking is private or that local device compromise cannot affect a hot wallet.
