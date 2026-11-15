@@ -15,7 +15,8 @@ BIN_DIR="$(swift build -c release --arch arm64 --show-bin-path)"
 BIN_PATH="${BIN_DIR}/NodePocketApp"
 APP_BUNDLE="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 
-rm -rf "${ROOT_DIR}/dist"
+mkdir -p "${ROOT_DIR}/dist"
+rm -rf "${APP_BUNDLE}"
 mkdir -p "${APP_BUNDLE}/Contents/MacOS"
 mkdir -p "${APP_BUNDLE}/Contents/Resources"
 
