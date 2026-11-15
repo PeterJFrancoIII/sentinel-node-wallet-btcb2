@@ -1,7 +1,7 @@
 # Sentinel Node Wallet — BTCB2
 
-[![Release](https://img.shields.io/badge/Release-v1.0.0--Build2-blue.svg)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0)
-[![Tests](https://img.shields.io/badge/Tests-138%2F138%20Passing-brightgreen.svg)]()
+[![Release](https://img.shields.io/badge/Release-v1.0.0--Build3-blue.svg)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3)
+[![Tests](https://img.shields.io/badge/Tests-144%2F144%20Passing-brightgreen.svg)]()
 [![Network](https://img.shields.io/badge/Network-BTCB2%20MainNet-orange.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B%20(Apple%20Silicon)-lightgrey.svg)]()
 
@@ -9,9 +9,10 @@
 
 - **Target App ID:** Apple App Store Connect App ID `6833290684`
 - **Bundle Identifier:** `pool.sentineldefensetechnologies.co.za`
-- **App Store Version:** `1.0` (Build `2`)
+- **App Store Version:** `1.0` (Build `3`)
 - **Canonical Repository:** [`PeterJFrancoIII/sentinel-node-wallet-btcb2`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2)
-- **Release Tag:** [`v1.0.0`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0)
+- **Latest Release & DMG Installer:** [`v1.0.0-build3`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3)
+- **Direct DMG Download:** [`Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg)
 
 ---
 
@@ -37,10 +38,12 @@
 ## Key Features
 
 - **Embedded Bitcoin Knots Daemon:** Autonomous 1-click startup, loopback-only RPC (`127.0.0.1:8332`), and continuous daemon health/hashrate tracking.
+- **30-Block Hashrate Dot Plot & MACD Momentum:** Real-time CoreGraphics / SwiftUI dot plot showing rolling block hashrate with 12/30 dual-EMA overlays and aligned MACD oscillator histogram.
 - **Native SegWit (Bech32) Descriptor Wallets:** Fully encrypted local wallet databases using strict integer Satoshi arithmetic.
 - **Multi-Operator Account Isolation:** Strict operator segregation; new operator accounts have zero access to existing operators' wallets.
 - **Biometric Keychain Gating:** Operator credentials require Touch ID or Mac system password validation (`LAContext.evaluatePolicy(.deviceOwnerAuthentication)`).
 - **Interactive Node Startup Prompt:** Detects node state on login, prompting operators to Enable or Bypass with a live blockchain synchronization progress card.
+- **1-Click Clean Uninstaller:** Complete in-app and CLI removal of all ~18 GB blockchain blocks, caches, and application files with zero residual footprint.
 - **Dynamic Fee Recalculation:** Instant recalculation when selecting `MAX` balance or editing recipient amounts, preserving required fee headroom.
 - **Ultra Power Policy:** Automatically throttles CPU threads, dbcache (128 MiB), and enforces max 4 outbound peers when running on MacBook battery power.
 
@@ -182,7 +185,13 @@ Sentinel Node Wallet enforces strict per-operator isolation:
 cd /Users/computer/Developer/NodePocketBTCB2
 swift test
 ```
-*Current test suite status:* **138 tests passed, 0 failures, 1 interactive keychain test skipped (100% pass rate)**.
+*Current test suite status:* **144 tests passed, 0 failures, 1 interactive keychain test skipped (100% pass rate)**.
+
+### Packaging Standalone macOS .DMG Installer
+```bash
+./scripts/build_dmg.sh
+```
+Compiles, packages, and signs `Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg` with embedded verified Bitcoin Knots binaries, drag-to-Applications symlink, and detached SHA-256 checksums (`dist/SHA256SUMS.txt`).
 
 ### Packaging for Mac App Store
 ```bash
