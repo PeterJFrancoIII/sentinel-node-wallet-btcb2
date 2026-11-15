@@ -321,7 +321,7 @@ public struct AdvancedSheet: View {
                 }
             }
         } message: {
-            Text("This will permanently remove Sentinel Node Wallet from your Mac:\n\n• All synchronized blockchain blocks and chainstate (\(state.storageBreakdown?.formattedTotalSize ?? "measured dynamically"))\n• All wallet databases, auth records, and configuration\n• The application bundle itself\n\nThis action cannot be undone. Are you sure you want to proceed?")
+            Text("This will permanently remove Sentinel Node Wallet from your Mac:\n\n• All synchronized blockchain blocks and chainstate (\(state.storageBreakdown?.isAvailable == true ? state.storageBreakdown!.formattedTotalSize : "measured dynamically"))\n• All wallet databases, auth records, and configuration\n• The application bundle itself\n\nThis action cannot be undone. Are you sure you want to proceed?")
         }
         .alert("Uninstallation Complete", isPresented: $wipeCompleted) {
             Button("Exit App Now") {
@@ -402,7 +402,7 @@ public struct AdvancedSheet: View {
                                 .foregroundColor(.red)
                                 .frame(width: 20)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text("Synchronized Blockchain Storage (\(state.storageBreakdown?.formattedTotalSize ?? "measured dynamically"))")
+                                Text("Synchronized Blockchain Storage (\(state.storageBreakdown?.isAvailable == true ? state.storageBreakdown!.formattedTotalSize : "measured dynamically"))")
                                     .font(.caption)
                                     .bold()
                                 Text(state.nodeManager.config.dataDirectory.path)

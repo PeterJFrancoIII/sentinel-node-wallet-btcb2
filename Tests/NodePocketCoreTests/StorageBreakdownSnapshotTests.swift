@@ -25,6 +25,8 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.blocksBytes, 0)
         XCTAssertEqual(snapshot.chainstateBytes, 0)
         XCTAssertEqual(snapshot.totalDataDirBytes, 0)
+        XCTAssertFalse(snapshot.isAvailable)
+        XCTAssertTrue(snapshot.formattedTotalSize.contains("Unavailable"))
     }
 
     func testMeasureMockDataDirectory() throws {
@@ -113,10 +115,42 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         // Create a symlink pointing to realDir
         try FileManager.default.createSymbolicLink(at: symlinkDir, withDestinationURL: realDir)
 
-        // Measuring the symlink directory directly must return 0 (refuses symlink root)
+        // Measuring the symlink directory directly must return 0 and unavailable status
         let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: symlinkDir)
         XCTAssertEqual(snapshot.blocksBytes, 0, "Symlink root must return 0 bytes")
         XCTAssertEqual(snapshot.totalDataDirBytes, 0, "Symlink root must fail-closed")
+        XCTAssertFalse(snapshot.isAvailable, "Symlink root must be marked unavailable")
+        XCTAssertTrue(snapshot.formattedTotalSize.contains("Unavailable"), "Must format as Unavailable, never 0 bytes")
+    }
+
+    func testDirectorySymlinkDescendantsAreSkipped() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("DirSymlinkTest_\(UUID().uuidString)")
+        let externalDir = FileManager.default.temporaryDirectory.appendingPathComponent("ExternalDir_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: externalDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            try? FileManager.default.removeItem(at: externalDir)
+        }
+
+        // Put 10 MB in the external directory
+        let externalData = Data(repeating: 0xEE, count: 10 * 1024 * 1024)
+        try externalData.write(to: externalDir.appendingPathComponent("external_block.dat"))
+
+        // Create blocks directory with a 200 KB valid file
+        let blocksDir = tempDir.appendingPathComponent("blocks")
+        try FileManager.default.createDirectory(at: blocksDir, withIntermediateDirectories: true)
+        try Data(repeating: 0xFF, count: 200 * 1024).write(to: blocksDir.appendingPathComponent("blk00000.dat"))
+
+        // Create a directory symlink inside blocks/ pointing to the 10 MB external directory
+        let dirSymlink = blocksDir.appendingPathComponent("symlinked_dir")
+        try FileManager.default.createSymbolicLink(at: dirSymlink, withDestinationURL: externalDir)
+
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
+        XCTAssertTrue(snapshot.isAvailable)
+        // Must measure ONLY the 200 KB local file, completely skipping descending into the 10 MB symlinked directory
+        XCTAssertLessThan(snapshot.blocksBytes, 1024 * 1024, "Directory symlink descendants must be skipped")
+        XCTAssertLessThan(snapshot.totalDataDirBytes, 1024 * 1024, "Total datadir must not count external directory symlink")
     }
 
     func testDatadirSymlinkRemovalPreservesExternalVolumeTarget() throws {

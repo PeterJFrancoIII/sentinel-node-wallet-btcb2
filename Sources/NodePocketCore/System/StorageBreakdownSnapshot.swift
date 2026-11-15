@@ -6,6 +6,8 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
     public let indexesBytes: Int64
     public let walletsBytes: Int64
     public let totalDataDirBytes: Int64
+    public let isAvailable: Bool
+    public let failureReason: String?
     public let measuredAt: Date
 
     public init(
@@ -14,6 +16,8 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         indexesBytes: Int64,
         walletsBytes: Int64,
         totalDataDirBytes: Int64,
+        isAvailable: Bool = true,
+        failureReason: String? = nil,
         measuredAt: Date = Date()
     ) {
         self.blocksBytes = blocksBytes
@@ -21,27 +25,34 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         self.indexesBytes = indexesBytes
         self.walletsBytes = walletsBytes
         self.totalDataDirBytes = totalDataDirBytes
+        self.isAvailable = isAvailable
+        self.failureReason = failureReason
         self.measuredAt = measuredAt
     }
 
     public var formattedBlocksSize: String {
-        ByteCountFormatter.string(fromByteCount: blocksBytes, countStyle: .file)
+        guard isAvailable else { return "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: blocksBytes, countStyle: .file)
     }
 
     public var formattedChainstateSize: String {
-        ByteCountFormatter.string(fromByteCount: chainstateBytes, countStyle: .file)
+        guard isAvailable else { return "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: chainstateBytes, countStyle: .file)
     }
 
     public var formattedIndexesSize: String {
-        ByteCountFormatter.string(fromByteCount: indexesBytes, countStyle: .file)
+        guard isAvailable else { return "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: indexesBytes, countStyle: .file)
     }
 
     public var formattedWalletsSize: String {
-        ByteCountFormatter.string(fromByteCount: walletsBytes, countStyle: .file)
+        guard isAvailable else { return "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: walletsBytes, countStyle: .file)
     }
 
     public var formattedTotalSize: String {
-        ByteCountFormatter.string(fromByteCount: totalDataDirBytes, countStyle: .file)
+        guard isAvailable else { return failureReason != nil ? "Unavailable (\(failureReason!))" : "Unavailable" }
+        return ByteCountFormatter.string(fromByteCount: totalDataDirBytes, countStyle: .file)
     }
 
     /// Asynchronous nonblocking measurement executed on a detached background utility thread.
@@ -60,7 +71,9 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
                 chainstateBytes: 0,
                 indexesBytes: 0,
                 walletsBytes: 0,
-                totalDataDirBytes: 0
+                totalDataDirBytes: 0,
+                isAvailable: false,
+                failureReason: "Directory not found"
             )
         }
 
@@ -72,7 +85,9 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
                 chainstateBytes: 0,
                 indexesBytes: 0,
                 walletsBytes: 0,
-                totalDataDirBytes: 0
+                totalDataDirBytes: 0,
+                isAvailable: false,
+                failureReason: "Symlink root rejected"
             )
         }
 
@@ -94,6 +109,8 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
             indexesBytes: measuredIndexes,
             walletsBytes: measuredWallets,
             totalDataDirBytes: max(measuredTotal, effectiveBlocks + measuredChainstate),
+            isAvailable: true,
+            failureReason: nil,
             measuredAt: Date()
         )
     }
@@ -107,15 +124,21 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
 
         guard let enumerator = FileManager.default.enumerator(
             at: url,
-            includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey],
+            includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey],
             options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return 0 }
 
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]),
-                  values.isSymbolicLink != true,
-                  values.isRegularFile == true else { continue }
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .isDirectoryKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]) else {
+                continue
+            }
+            if values.isSymbolicLink == true {
+                // Strictly refuse to traverse into directory symlinks or count symlink targets
+                enumerator.skipDescendants()
+                continue
+            }
+            guard values.isRegularFile == true else { continue }
             // Measure actual on-disk allocated bytes if available (APFS extent allocation), fallback to logical fileSize
             let allocSize = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
             total += Int64(allocSize)

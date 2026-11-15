@@ -250,8 +250,8 @@ public struct NodeView: View {
                         title: "Block Prune Target",
                         value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
                         subtitle: state.storageMode.isArchival
-                            ? (state.storageBreakdown != nil ? "Full-history archive (\(state.storageBreakdown!.formattedTotalSize))" : "Full-history archive")
-                            : (state.storageBreakdown != nil
+                            ? (state.storageBreakdown?.isAvailable == true ? "Full-history archive (\(state.storageBreakdown!.formattedTotalSize))" : "Full-history archive")
+                            : (state.storageBreakdown?.isAvailable == true
                                 ? "\(state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus) • UTXO: \(state.storageBreakdown!.formattedChainstateSize)"
                                 : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus)),
                         icon: "internaldrive.fill",
