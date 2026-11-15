@@ -7,9 +7,9 @@ Sentinel Node Wallet is an independent SwiftUI macOS application that bundles a 
 | Identity / release | Current record |
 |---|---|
 | GitHub release tag | `v1.0.0-build3` |
-| Release source commit (identified in release notes) | [`357766bf`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/357766bf8d5e219208148101dde5bc7c26f59b0e) |
+| Release source commit (identified in release notes) | [`838f119c`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/838f119cd5a748313fe2e9cc537dbce0074bf8a7) |
 | Installer asset | [`Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg) |
-| DMG SHA-256 from GitHub release asset metadata | `892798a3a7bf4c50b4cf220d6ac3e4a0b071c8c8acc1d993da1d04212d01b114` |
+| DMG SHA-256 from GitHub release asset metadata | `7b5adb42155cff6f18fd312778b9edfcf46987731927f79b7d057dac3bec9f3a` |
 | App Store Connect record | [App ID `6833290684`](https://appstoreconnect.apple.com/apps/6833290684/distribution/macos/version/inflight) |
 | Current macOS bundle identifier in release scripts | `pool.sentineldefensetechnologies.co.za` |
 | Version / build in packaging scripts | `1.0 (3)` |
