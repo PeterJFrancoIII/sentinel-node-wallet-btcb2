@@ -10,6 +10,8 @@ public enum StorageMeasurementQuality: String, Sendable, Equatable {
 public struct StorageBreakdownSnapshot: Sendable, Equatable {
     public let blocksBytes: Int64
     public let chainstateBytes: Int64
+    /// Physical allocation for optional secondary indexes in root datadir/indexes (e.g. txindex, blockfilterindex).
+    /// Distinct from mandatory block index LevelDB which resides under blocks/index and is accounted under blocksBytes.
     public let indexesBytes: Int64
     public let walletsBytes: Int64
     public let totalDataDirBytes: Int64
@@ -179,11 +181,11 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         let indexesURL = dataDirectory.appendingPathComponent("indexes")
         let walletsURL = dataDirectory.appendingPathComponent("wallets")
 
-        let blocksMeasurement = directoryMeasurement(at: blocksURL, isOptional: true)
-        let chainstateMeasurement = directoryMeasurement(at: chainstateURL, isOptional: true)
-        let indexesMeasurement = directoryMeasurement(at: indexesURL, isOptional: true)
-        let walletsMeasurement = directoryMeasurement(at: walletsURL, isOptional: true)
-        let totalMeasurement = directoryMeasurement(at: dataDirectory, isOptional: false)
+        let blocksMeasurement = directoryMeasurement(at: blocksURL, isOptional: false, parentDirectory: dataDirectory)
+        let chainstateMeasurement = directoryMeasurement(at: chainstateURL, isOptional: false, parentDirectory: dataDirectory)
+        let indexesMeasurement = directoryMeasurement(at: indexesURL, isOptional: true, parentDirectory: dataDirectory)
+        let walletsMeasurement = directoryMeasurement(at: walletsURL, isOptional: true, parentDirectory: dataDirectory)
+        let totalMeasurement = directoryMeasurement(at: dataDirectory, isOptional: false, parentDirectory: nil)
 
         // Evaluate aggregate quality across components
         let componentQualities = [blocksMeasurement.quality, chainstateMeasurement.quality, indexesMeasurement.quality, walletsMeasurement.quality]
@@ -223,12 +225,29 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         let quality: StorageMeasurementQuality
     }
 
-    private static func directoryMeasurement(at url: URL, isOptional: Bool = false) -> DirectoryMeasurement {
+    private static func directoryMeasurement(
+        at url: URL,
+        isOptional: Bool = false,
+        parentDirectory: URL? = nil
+    ) -> DirectoryMeasurement {
         let fm = FileManager.default
 
-        // Handle absent optional directory (e.g. indexes/ or wallets/ when disabled or unused)
+        // Handle absent directory
         guard fm.fileExists(atPath: url.path) else {
-            return DirectoryMeasurement(bytes: 0, quality: .measuredAllocated)
+            if isOptional {
+                // Optional directory (e.g. indexes/ or wallets/ when disabled or unused)
+                return DirectoryMeasurement(bytes: 0, quality: .measuredAllocated)
+            }
+            // For required directories (e.g. blocks/ or chainstate/):
+            // Check if the parent data directory exists but is completely empty (clean fresh startup).
+            // Legitimate fresh/empty startup has no blocks or chainstate yet, so it is measuredAllocated (0 bytes).
+            // However, in an established node (parent directory has other contents/files), an absent required directory is unavailable.
+            if let parent = parentDirectory, fm.fileExists(atPath: parent.path) {
+                if let contents = try? fm.contentsOfDirectory(atPath: parent.path), contents.isEmpty {
+                    return DirectoryMeasurement(bytes: 0, quality: .measuredAllocated)
+                }
+            }
+            return DirectoryMeasurement(bytes: 0, quality: .unavailable)
         }
 
         // Guard against unreadable directory

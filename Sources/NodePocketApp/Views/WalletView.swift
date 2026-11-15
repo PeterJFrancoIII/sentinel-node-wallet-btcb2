@@ -12,6 +12,7 @@ public struct WalletView: View {
     @State private var storeInKeychain = true
     @State private var showWalletPassphrase = false
     @State private var isCreatingWallet = false
+    @State private var createWalletErrorMessage: String? = nil
 
     // Send Form Fields
     @State private var sendAddressInput = ""
@@ -3615,8 +3616,23 @@ public struct WalletView: View {
             .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
             .cornerRadius(6)
 
+            if let errorMsg = createWalletErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(errorMsg)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(6)
+            }
+
             HStack {
                 Button("Cancel") {
+                    createWalletErrorMessage = nil
                     passphraseInput = ""
                     passphraseConfirmInput = ""
                     showWalletPassphrase = false
@@ -3626,6 +3642,7 @@ public struct WalletView: View {
                 .buttonStyle(.bordered)
 
                 Button("Open / Restore Existing Wallet…") {
+                    createWalletErrorMessage = nil
                     showCreateModal = false
                     showOpenRestoreModal = true
                 }
@@ -3636,12 +3653,14 @@ public struct WalletView: View {
 
                 Button("Create Encrypted Wallet") {
                     guard !isCreatingWallet else { return }
+                    createWalletErrorMessage = nil
                     let name = walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
                     let passphrase = passphraseInput
                     let save = storeInKeychain
                     guard WalletManager.isValidWalletName(name),
                           !passphrase.isEmpty,
                           passphrase == passphraseConfirmInput else {
+                        createWalletErrorMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.alertMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.showAlert = true
                         return
@@ -3654,6 +3673,7 @@ public struct WalletView: View {
                             let result = try await state.createEncryptedWallet(
                                 name: name, passphrase: passphrase, storeInKeychain: save
                             )
+                            createWalletErrorMessage = nil
                             showCreateModal = false
                             passphraseInput = ""
                             passphraseConfirmInput = ""
@@ -3666,9 +3686,11 @@ public struct WalletView: View {
                             }
                             state.showAlert = true
                         } catch let creationErr as WalletCreationError {
+                            createWalletErrorMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.alertMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.showAlert = true
                         } catch {
+                            createWalletErrorMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.alertMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.showAlert = true
                         }

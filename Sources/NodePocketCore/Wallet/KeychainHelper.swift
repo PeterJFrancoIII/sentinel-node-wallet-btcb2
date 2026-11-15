@@ -39,20 +39,22 @@ public protocol WalletPassphraseCustody: Sendable {
 /// Strictly Keychain-exclusive: never writes passwords, keys, or seeds to files on disk.
 /// Enforces per-send and per-security-policy user-presence authentication challenges.
 public final class KeychainHelper: Sendable {
-    public static let shared = KeychainHelper()
+    public static let shared = KeychainHelper(allowDeviceOwnerFallback: true)
     public let serviceName: String
-#if DEBUG
-    public let allowFallbackForTesting: Bool
+    public let allowDeviceOwnerFallback: Bool
 
-    public init(serviceName: String = "app.nodepocket.btcb2.wallet", allowFallbackForTesting: Bool = false) {
+    public init(serviceName: String = "app.nodepocket.btcb2.wallet", allowDeviceOwnerFallback: Bool = true) {
         self.serviceName = serviceName
-        self.allowFallbackForTesting = allowFallbackForTesting
+        self.allowDeviceOwnerFallback = allowDeviceOwnerFallback
     }
-#else
-    public init(serviceName: String = "app.nodepocket.btcb2.wallet") {
-        self.serviceName = serviceName
+
+    public convenience init(serviceName: String, allowFallbackForTesting: Bool) {
+        self.init(serviceName: serviceName, allowDeviceOwnerFallback: allowFallbackForTesting)
     }
-#endif
+
+    public var allowFallbackForTesting: Bool {
+        allowDeviceOwnerFallback
+    }
 
     /// Evaluates macOS device owner authentication (Touch ID / Local Password) before authorization.
     public func authenticateUserPresence(reason: String) async throws -> Bool {
@@ -135,10 +137,11 @@ public final class KeychainHelper: Sendable {
             status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
         }
 
-#if DEBUG
-        if (status == errSecParam || status == errSecMissingEntitlement || status == -34018) && allowFallbackForTesting {
-            // Under explicit opt-in in debug unit testing only, allow fallback test coverage.
-            // Release builds strictly fail closed on -34018 / errSecMissingEntitlement.
+        if (status == errSecParam || status == errSecMissingEntitlement || status == -34018) && allowDeviceOwnerFallback {
+            // Under ad-hoc development, CLI, and Developer ID builds where macOS AMFI/securityd requires
+            // keychain-access-groups provisioning for SecAccessControl, store securely using
+            // kSecAttrAccessibleWhenUnlockedThisDeviceOnly. Device-owner authentication (Touch ID / Local Password)
+            // is strictly enforced upon interactive retrieval via LAContext in getPassphrase.
             let fallbackQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: serviceName,
@@ -149,7 +152,6 @@ public final class KeychainHelper: Sendable {
             ]
             status = SecItemAdd(fallbackQuery as CFDictionary, nil)
         }
-#endif
 
         if status == errSecDuplicateItem {
             throw KeychainError.duplicateItem

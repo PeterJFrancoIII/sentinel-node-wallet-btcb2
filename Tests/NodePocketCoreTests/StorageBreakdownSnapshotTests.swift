@@ -197,7 +197,11 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
-        // Create only chainstate (no indexes, no wallets)
+        // Create required blocks and chainstate (no optional indexes, no optional wallets)
+        let blocksDir = tempDir.appendingPathComponent("blocks")
+        try FileManager.default.createDirectory(at: blocksDir, withIntermediateDirectories: true)
+        try Data(repeating: 0x22, count: 100 * 1024).write(to: blocksDir.appendingPathComponent("blk00000.dat"))
+
         let chainstateDir = tempDir.appendingPathComponent("chainstate")
         try FileManager.default.createDirectory(at: chainstateDir, withIntermediateDirectories: true)
         try Data(repeating: 0x33, count: 200 * 1024).write(to: chainstateDir.appendingPathComponent("000001.ldb"))
@@ -205,6 +209,8 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
 
         XCTAssertTrue(snapshot.isAvailable)
+        XCTAssertEqual(snapshot.blocksQuality, .measuredAllocated)
+        XCTAssertGreaterThan(snapshot.blocksBytes, 0)
         XCTAssertEqual(snapshot.chainstateQuality, .measuredAllocated)
         XCTAssertGreaterThan(snapshot.chainstateBytes, 0)
         // Absent optional directories must report 0 bytes with .measuredAllocated, NOT fail or downgrade the snapshot
@@ -213,6 +219,29 @@ final class StorageBreakdownSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.walletsQuality, .measuredAllocated)
         XCTAssertEqual(snapshot.walletsBytes, 0)
         XCTAssertEqual(snapshot.totalQuality, .measuredAllocated)
+    }
+
+    func testAbsentRequiredDirectoryInEstablishedNodeReturnsUnavailable() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("AbsentRequiredTest_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Established node with chainstate and bitcoin.conf, but missing required blocks/
+        let chainstateDir = tempDir.appendingPathComponent("chainstate")
+        try FileManager.default.createDirectory(at: chainstateDir, withIntermediateDirectories: true)
+        try Data(repeating: 0x33, count: 100 * 1024).write(to: chainstateDir.appendingPathComponent("000001.ldb"))
+        try "test=1".data(using: .utf8)!.write(to: tempDir.appendingPathComponent("bitcoin.conf"))
+
+        let snapshot = StorageBreakdownSnapshot.measure(dataDirectory: tempDir)
+
+        XCTAssertTrue(snapshot.isAvailable, "Snapshot is available but partial")
+        XCTAssertEqual(snapshot.blocksQuality, .unavailable, "Missing required blocks/ directory in established node must be .unavailable")
+        XCTAssertEqual(snapshot.blocksBytes, 0)
+        XCTAssertEqual(snapshot.chainstateQuality, .measuredAllocated)
+        XCTAssertGreaterThan(snapshot.chainstateBytes, 0)
+        XCTAssertEqual(snapshot.indexesQuality, .measuredAllocated, "Absent optional indexes/ remains .measuredAllocated")
+        XCTAssertEqual(snapshot.walletsQuality, .measuredAllocated, "Absent optional wallets/ remains .measuredAllocated")
+        XCTAssertEqual(snapshot.totalQuality, .partial, "Aggregate quality must be .partial when a required directory is missing")
     }
 
     func testHiddenFilesIncludedInAllocation() throws {
