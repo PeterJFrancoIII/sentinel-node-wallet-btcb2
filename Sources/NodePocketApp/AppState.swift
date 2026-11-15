@@ -43,6 +43,10 @@ public final class AppState: ObservableObject {
     private var lastPowerTransitionTime: Date = Date()
     private var isEvaluatingPower: Bool = false
 
+    // Dynamic Storage Telemetry
+    private var lastStorageMeasurementTime: Date?
+    private var isMeasuringStorage: Bool = false
+
     // Navigation Tab
     @Published public var selectedTab: AppViewTab = .node
 
@@ -141,7 +145,7 @@ public final class AppState: ObservableObject {
                 self?.adaptiveETA = eta
                 self?.refreshRollingCoverageIfNeeded(blockchain: binfo)
                 if let datadir = self?.nodeManager.config.dataDirectory {
-                    self?.storageBreakdown = StorageBreakdownSnapshot.measure(
+                    self?.triggerStorageMeasurementIfNeeded(
                         dataDirectory: datadir,
                         rpcSizeOnDisk: binfo.size_on_disk
                     )
@@ -224,7 +228,7 @@ public final class AppState: ObservableObject {
             let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
             self.systemHealth = snapshot
             self.evaluatePowerStateAndUltraPolicy(snapshot: snapshot)
-            self.storageBreakdown = StorageBreakdownSnapshot.measure(
+            self.triggerStorageMeasurementIfNeeded(
                 dataDirectory: self.nodeManager.config.dataDirectory,
                 rpcSizeOnDisk: self.blockchainInfo?.size_on_disk
             )
@@ -239,11 +243,31 @@ public final class AppState: ObservableObject {
         }
         let initial = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
         self.systemHealth = initial
-        self.storageBreakdown = StorageBreakdownSnapshot.measure(
+        triggerStorageMeasurementIfNeeded(
             dataDirectory: self.nodeManager.config.dataDirectory,
             rpcSizeOnDisk: nil
         )
         self.evaluatePowerStateAndUltraPolicy(snapshot: initial)
+    }
+
+    private func triggerStorageMeasurementIfNeeded(dataDirectory: URL, rpcSizeOnDisk: Int64?) {
+        let now = Date()
+        if isMeasuringStorage { return }
+        if let last = lastStorageMeasurementTime, now.timeIntervalSince(last) < 30 {
+            return
+        }
+        isMeasuringStorage = true
+        lastStorageMeasurementTime = now
+        Task { [weak self] in
+            let snapshot = await StorageBreakdownSnapshot.measureAsync(
+                dataDirectory: dataDirectory,
+                rpcSizeOnDisk: rpcSizeOnDisk
+            )
+            await MainActor.run {
+                self?.storageBreakdown = snapshot
+                self?.isMeasuringStorage = false
+            }
+        }
     }
 
     public func evaluatePowerStateAndUltraPolicy(snapshot: SystemHealthSnapshot) {
@@ -693,11 +717,19 @@ public final class AppState: ObservableObject {
         let datadir = nodeManager.config.dataDirectory
         var wipedData = false
 
-        // 2. Remove canonical datadir
+        // 2. Remove canonical datadir (with strict symlink guard)
         if fm.fileExists(atPath: datadir.path) {
-            try fm.removeItem(at: datadir)
-            wipedData = true
-            appendLog("[UNINSTALL] Deleted data directory at \(datadir.path)")
+            let isSymlink = (try? datadir.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink ?? false
+            if isSymlink {
+                // Delete ONLY the symbolic link pointer, NEVER recursively wipe an external volume
+                try fm.removeItem(at: datadir)
+                wipedData = true
+                appendLog("[UNINSTALL] Removed data directory symlink at \(datadir.path) (external volume preserved)")
+            } else {
+                try fm.removeItem(at: datadir)
+                wipedData = true
+                appendLog("[UNINSTALL] Deleted data directory at \(datadir.path)")
+            }
         }
 
         // 3. Remove alternate unsandboxed App Support path if running sandboxed

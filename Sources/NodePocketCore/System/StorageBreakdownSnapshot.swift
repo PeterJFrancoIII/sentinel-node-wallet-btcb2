@@ -44,9 +44,29 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
         ByteCountFormatter.string(fromByteCount: totalDataDirBytes, countStyle: .file)
     }
 
+    /// Asynchronous nonblocking measurement executed on a detached background utility thread.
+    public static func measureAsync(dataDirectory: URL, rpcSizeOnDisk: Int64? = nil) async -> StorageBreakdownSnapshot {
+        await Task.detached(priority: .utility) {
+            measure(dataDirectory: dataDirectory, rpcSizeOnDisk: rpcSizeOnDisk)
+        }.value
+    }
+
+    /// Synchronous measurement safely bounded to prevent symlink traversal.
     public static func measure(dataDirectory: URL, rpcSizeOnDisk: Int64? = nil) -> StorageBreakdownSnapshot {
         let fm = FileManager.default
         guard fm.fileExists(atPath: dataDirectory.path) else {
+            return StorageBreakdownSnapshot(
+                blocksBytes: 0,
+                chainstateBytes: 0,
+                indexesBytes: 0,
+                walletsBytes: 0,
+                totalDataDirBytes: 0
+            )
+        }
+
+        // Refuse to follow symbolic link escaping the intended data directory
+        if let rootValues = try? dataDirectory.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           rootValues.isSymbolicLink == true {
             return StorageBreakdownSnapshot(
                 blocksBytes: 0,
                 chainstateBytes: 0,
@@ -79,17 +99,26 @@ public struct StorageBreakdownSnapshot: Sendable, Equatable {
     }
 
     private static func directorySize(at url: URL) -> Int64 {
+        // Guard against symlink root
+        if let rootValues = try? url.resourceValues(forKeys: [.isSymbolicLinkKey]),
+           rootValues.isSymbolicLink == true {
+            return 0
+        }
+
         guard let enumerator = FileManager.default.enumerator(
             at: url,
-            includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles]
+            includingPropertiesForKeys: [.totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey],
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
         ) else { return 0 }
+
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
-                  values.isRegularFile == true,
-                  let size = values.fileSize else { continue }
-            total += Int64(size)
+            guard let values = try? fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .totalFileAllocatedSizeKey, .fileAllocatedSizeKey, .fileSizeKey]),
+                  values.isSymbolicLink != true,
+                  values.isRegularFile == true else { continue }
+            // Measure actual on-disk allocated bytes if available (APFS extent allocation), fallback to logical fileSize
+            let allocSize = values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0
+            total += Int64(allocSize)
         }
         return total
     }
