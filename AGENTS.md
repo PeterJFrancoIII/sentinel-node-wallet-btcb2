@@ -1,30 +1,33 @@
 # Agent Instructions — Sentinel Node Wallet BTCB2
 
-**Read first:** [Current project status](docs/PROJECT_STATUS.md) → [Governance](GOVERNANCE.md) → [Security](SECURITY.md) → [Test/release matrix](TEST_AND_RELEASE_MATRIX.md). Older implementation receipts are historical, not current instructions.
+**Start with:** [Governance](GOVERNANCE.md) → [Current Status](docs/PROJECT_STATUS.md) → [Security](SECURITY.md) → [Release Matrix](TEST_AND_RELEASE_MATRIX.md). Historical v7–v14 design memos and handoffs must not override the current source or current guardrails.
 
-**Scope:** NODEPOCKET_BTCB2_ONLY. Standalone macOS SwiftUI BTCB2/BLAKE2b/BIP-110 MainNet-only Knots app: Node, Wallet, Network + Advanced sheet. No changes to unrelated repositories, operators' other systems, wallets, credentials or processes. No remote RPC or additional consumer chains. Preserve the real datadir, Keychain service, app identity, sync/IBD and all wallet files.
+## Canonical identity and release
 
-## At entry
+- Project isolation key: `NODEPOCKET_BTCB2_ONLY`. A standalone SwiftUI/macOS BTCB2 BLAKE2b/BIP-110 MainNet wallet and embedded Bitcoin Knots node; Node/Wallet/Network/Advanced screens.
+- Current code branch: `main`. [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) **merged**; do not treat old `fix/v13-1-security-remediation-20261107` handoffs as the working source.
+- Latest published [GitHub v1.0.0 Build 3 DMG](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3), release-notes source `357766bf`, SHA-256 listed in README and GitHub release; current main baseline before this docs refresh `31f888b`. Never assume the release is notarized, approved by Apple or wallet-security-certified.
+- Active bundle identifier `pool.sentineldefensetechnologies.co.za`, Apple app record `6833290684`, `1.0 (3)` in packaging scripts. Prior `app.nodepocket.btcb2` and `com.nodepocket.btcb2` are historical references.
+- Built-in Bitcoin Knots `29.4.3.knots20260508`; block/node RPC localhost only, optional inbound P2P under operator control. Normal app is MainNet only; use separate temporary regtest datadirs for tests.
 
-1. Query canonical SCM **Session_Gemini_NodePocketBTCB2_20261106-1741** via search_nodes then open_nodes; search **InterAgent_Dialogue_Channel** for latest exact-session peer receipts. Apply [SCM rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md).
-2. Fetch [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10), its **fresh** HEAD and CI. Latest verified source+CI baseline: **7bdfd0e**; 133 executed / 132 passed / zero failed / one interactive Keychain test skipped on [CI #42940525641](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42940525641). Optimized SwiftUI Release, pinned-Knots ad-hoc bundle and REAL isolated regtest CLI backup→restore PASS. Source-only spending lock remains active; signing is UNVERIFIED. This does not establish native Keychain PASS. Branch is **unmerged**.
-3. Confirm status evidence in [Project Status](docs/PROJECT_STATUS.md). Distinguish **BUILT source**, **PEER-REPORTED native**, and **independently verified**. Do not recast stale V12/v13 planning as undone code.
+## Agent entry protocol
 
-## Current work order (priority)
+1. Read latest release/commits, GitHub CI and the actual active source before editing. For this snapshot, [CI #43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) on `31f888b` succeeded: **144 executed / 143 passed / 0 failed / 1 skipped** (device-interactive Keychain). It also completed release compile, ad-hoc bundle and isolated Knots CLI backup/restore. Those do not constitute acceptance of signed app, DMG or spending.
+2. Search shared memory entity `Session_Gemini_NodePocketBTCB2_20261106-1741` and `InterAgent_Dialogue_Channel`; retain exact peer provenance, including dispatch `MSG:gemini-sentinel-v100-build3-github-dmg-release-121`. A failed connector lookup is not proof that the receipt does not exist.
+3. Distinguish **SOURCE**, **CI**, **LOCAL PEER-REPORTED**, **INDEPENDENT NATIVE**, **PUBLIC DISTRIBUTION** and **APP STORE APPROVAL**. Report exact immutable SHAs, tests and unresolved acceptance.
+4. Use a fresh, reviewed PR; run `swift test`, build/package scripts where authorized, `python3 tools/verify_governance.py` and `bash scripts/secret_scan.sh`; separate local runtime tests from CI. Never use a live wallet or production datadir as a test fixture.
 
-- **P0** Keychain failure/mismatched-secret creation path is now source/CI remediated (5e7a597); independently verify actual Keychain hardware accept/deny/cancel and offline-custody acknowledgment, then prove encrypted wallet RPC creation and immediate inventory on an installed Mac using only isolated zero-funds test data.
-- **P0** Prove positive bitcoin.conf and cookie-only daemon adoption; bind RPC endpoint to PID/executable/datadir; validate credentials and safe file types/permissions.
-- **P1** Correct window recreation/force unwrap/targeted zoom; independently exercise Dock/Cmd+Tab/closed window.
-- **P0 destructive operation HOLD** 2aa0e15 disables ALL wallet Delete/Trash operations until a genuine isolated encrypted-wallet restore proof is recorded. A matching backup header/receipt is not a recovery proof. Archive remains available. No tests are permitted to use the operator MainNet datadir, even when an environment flag is set.
-- **CI-only recovery proof** 7bdfd0e demonstrated actual Knots regtest encrypted-wallet backup→restore with separate name, locked wallet, descriptors and address ownership on ephemeral Mac CI. This is NOT the signed SwiftUI user flow or a recovery verification tied to a wallet-deletion receipt. Delete remains blocked.
-- **P0 release gates** Native Keychain/2FA/Apple Passwords, recoverable backups, daemon PID/RPC binding, Ultra profile transitions, fork/signing and distribution audit. Check current pinned Knots 29.4.3 against independently authenticated 29.5 on isolated test environment. Keep send disabled; see [guarded owner-run release checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md).
+## Active safety gates
 
-## Safety and receipts
+- Generic BitcoinRPCClient defaults `isBroadcastRestricted=true`; WalletManager Send and RBF conditional guards depend on this flag. Any bypass/disabled restriction must be treated as **P0 unsafe for real funds** until independent fork-specific signing/fee/replay/recipient-binding audit and explicit owner approval.
+- Individual-wallet Delete currently always rejects after validation because there is **no independently verified isolated restore proof**; do not replace this hard stop with file-header, checksum or backup-receipt checks alone. Archive is available.
+- **Full Uninstallation is separate and destructive**: it attempts removal of node blockchain state and wallet files. Do not invoke or document it as a safe substitute for ordinary uninstall; require verified off-device recovery and explicit operator intent.
+- Source Keychain, Touch ID, TOTP and Apple Passwords hooks are not proof of actual signed-app consent, entitlement or login behavior. Hosted CI skips the interactive Keychain case.
+- Direct DMG `scripts/build_dmg.sh` may use Apple Development signing; its public GitHub release has no confirmed Developer ID notarization/Gatekeeper acceptance here. App Store archive `scripts/package_appstore_archive.sh` is a separate path with App Sandbox and development signing in checked-in script; actual cloud signing and App Store status need first-party receipts.
+- Never expose private material, perform financial transactions, change Apple account configuration or touch unrelated software unless the operator explicitly authorizes it.
 
-- No production daemon stop/restart, app deployment, wallet delete/restore, funded test, file/chainstate reset, unreviewed PR merge or spend. Operator authorization is a separate gate.
-- Isolated regtest is **test-only**; never expose an alternate network in the product. Preserve immutable wallet/passphrase identity; passphrase alone is not a wallet backup.
-- **Priority P0 completed at SOURCE+CI only:** c19332b re-established signingPathUnverified in WalletManager and generic RPC denying send, RBF and signing calls, and disabled SwiftUI Send/RBF. Never re-arm based on IBD/height or a Python reference test; only future separately approved independent BTCB2 SIGHASH_UNIFIED security qualification may change the hold.
-- Do not bypass signingPathUnverified, Keychain OSStatus errors, daemon-verification rejection or backup durability uncertainty.
-- Handoff with exact SHA, CI URL/counts, native environment + redacted reproduction, PASS/FAIL/SKIPPED/NOT RUN, superseded receipt IDs, open blockers and next safe action. No secrets or personal data.
+## Change / handoff standard
 
-See detailed legacy contracts in docs/; they do not override these current release controls.
+Submit source SHA and review branch, CI job/test counts (not “all passed” when skipped), provenance and actual signed-artifact checks, backup/restore proof, complete list of regressions, any Apple/privacy-policy drift and safe rollback. Prefer small audited patches. Keep [README](README.md), [Project Status](docs/PROJECT_STATUS.md), [Release Matrix](TEST_AND_RELEASE_MATRIX.md), [Security](SECURITY.md), [Privacy](docs/PRIVACY.md) and release notes consistent. Historical documents must be visibly labeled as such.
+
+Current release artifact **exists**; independent financial and distribution-security certification remains **open**.

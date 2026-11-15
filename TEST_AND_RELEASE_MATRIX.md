@@ -1,26 +1,31 @@
 # Test and Release Matrix — Sentinel Node Wallet BTCB2
 
-**Snapshot:** 2026-11-10 (EST); code **7bdfd0e**; [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) open/unmerged. [CI #42940525641](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/42940525641): **133 executed / 132 passed / 0 failed / 1 skipped** (interactive Keychain). **No release authorization.**
+**Snapshot:** November 14, 2026 (America/New_York). [GitHub v1.0.0 Build 3](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) publicly published; [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) **merged**. Current main before this docs update `31f888b`; exact-[SHA CI #43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) **SUCCESS: 144 executed / 143 passed / 0 failed / 1 skipped**. No independent real-funds or notarization certification.
 
-**Evidence classes:** SOURCE = implemented, CI = automated tests, PEER = agent's unreproduced native claim, NATIVE = independently recorded on-device test, OPEN = missing/failed/insufficient. A skipped or conditional test is **not** NATIVE PASS.
+**Evidence taxonomy:** SOURCE = current source behavior; CI = automated checkout/test; RELEASE = publicly available GitHub artifact; PEER = agent-reported host/Apple claims; NATIVE = independently captured signed-app result; OPEN = unproven or failing. A skipped test is not a pass.
 
-| Gate | Current evidence | Decision |
+| Capability / gate | Evidence at Build 3 source baseline | Status |
 |---|---|---|
-| Three-tab app, sync/profile, Ultra=4/listen=0 | SOURCE + CI | Built; native transition OPEN |
-| Multi-user local password/TOTP/recovery, step-up | SOURCE + CI | Built; real user-presence/2FA OPEN |
-| Neoxa/NonKYC price quotes and override | SOURCE + tests | Built; live pricing/fallback OPEN |
-| Wallet inventory, Archive, Delete, backup | SOURCE + CI: Archive active; **Trash/delete hard-disabled** at 2aa0e15 until isolated encrypted Knots recovery proof; prior ignored failed live restore removed | **SOURCE+CI PASS for NO-DELETE HOLD; recoverable deletion P0 OPEN** |
-| Real Knots descriptor wallet recovery on isolated CI worker | 7bdfd0e CI #42940525641: real regtest daemon in temporary datadir; 24,576-byte backup, distinct restored wallet, locked state and address ownership verified using CLI | **PASS (isolated real-Knots CLI CI); NOT equivalent to signed app/UI recovery or production deletion proof** |
-| Encrypted descriptor create via installed Wallet UI | RPC/mocks and separate real Knots CLI check; user previously reported UI runtime failure | **P0 OPEN — independently verify GUI and full backup flow** |
-| Keychain requested-save failure and duplicate credential | Creation-only pre-save now fails before RPC on unavailable/mismatched/canceled Keychain; injected unit tests; actual Mac behavior not yet tested | **SOURCE + CI PASS (5 custody tests); NATIVE OPEN — P0** |
-| Adopt existing Knots via bitcoin.conf or .cookie | SOURCE #071 + CI negative tests; live success PEER | **P0 OPEN** positive/PID/RPC binding |
-| Dock/Cmd+Tab/closed-window/zoom | SOURCE #070; live use PEER | P1 OPEN zero-window/force-unwrap |
-| Apple Passwords + signed app, consent and Keychain test | Candidate UI; CI interactive test SKIPPED | **P0 OPEN** |
-| BTCB2 send and RBF security hold | #079 had executable sendtoaddress/bumpfee path; c19332b restores WalletManager, generic RPC and UI hard gates; 2 new native Swift CI regressions passed | **SOURCE + CI PASS for application-layer HOLD; signing and live funds remain P0 BLOCKED** |
-| Bitcoin Knots binary/checkpoint + BIP-110 SIGHASH_UNIFIED PSBT/signing | Partial source and Python reference-only tests; no independently verified signed transaction or funded PSBT binding | **P0 OPEN — do not enable funds** |
-| Optimized SwiftUI Release executable and ad-hoc .app bundle | CI #42940525641: optimized release compile, pinned Knots archive/executable SHA256 check, ad-hoc codesign verification, Info.plist validation, and build manifest PR SHA PASS | **SOURCE + CI PASS (NOT Developer ID/notarized or installed app acceptance)** |
-| Full signed app, embedded daemon, notarized DMG, Gatekeeper, updater, SBOM and external audit | New guarded Developer ID/AASA/notary script `scripts/build_production_dmg.sh`; owner certificates, HTTPS domain, native notarization and audits NOT RUN | **P0 OPEN, NOT DISTRIBUTED** |
+| Native SwiftUI Node / Wallet / Network + Advanced | Source present; optimized Release CI compile | **SOURCE + CI PASS** |
+| Embedded Bitcoin Knots 29.4.3 and BTCB2 anchors | Pinned source/archive verification; isolated CLI regtest | **SOURCE + CI PASS**, signed binary provenance independent review **OPEN** |
+| RPC listener and P2P | `server=1`, loopback `rpcbind=127.0.0.1`, configurable `listen=0/1`; packaging includes server/client sandbox entitlements | SOURCE; signed sandboxed runtime **OPEN** |
+| Sync profiles | Quiet 1/128/3, Balanced 2/256/8, Fast 4/1024/24; Ultra battery 1/128/4 (threads/cache MiB/peer cap) | SOURCE; all real mode transitions **OPEN** |
+| Pruned / archival storage | New default 2,048 MiB prune, minimum 550 MiB, optional external archival; existing selections preserved | SOURCE; storage migration QA **OPEN** |
+| 30-block hash rate / dual-EMA MACD charts | HashrateTracker, MACDCalculator, SwiftUI views and unit tests | SOURCE + CI PASS; real runtime chart acceptance **OPEN** |
+| Local operator authorization / wallet ownership | Multi-operator auth, TOTP, local Keychain, step-up, ownership isolation | SOURCE + CI; signed Mac human-interaction QA **OPEN** |
+| Encrypted descriptor wallet create, inventory, receive, history | WalletManager/WalletView and test coverage | SOURCE + CI; shipping-app GUI with real encrypted restore **OPEN** |
+| Wallet backup and isolated restore | Actual temporary Knots regtest CLI backup→restore completed in CI | **CI PASS (test-only)**; GUI/destructive restore authorization **OPEN** |
+| Individual-wallet destructive Delete | Current `WalletInventory` unconditionally rejects after backup-header checks, absent isolated restore proof | **SOURCE HOLD**; do not enable without acceptance |
+| Full Uninstallation / wipe | AppState and standalone script can broadly remove local data, including wallets | **SOURCE EXISTS; P0 SAFE-UNINSTALL REVIEW OPEN** |
+| Outbound Send/RBF | RPC defaults broadcast restricted; conditional manager guards; alternate paths exist when deliberately unrestricted | **RESTRICTED BY DEFAULT; independent fork signing P0 OPEN** |
+| Apple Passwords / Touch ID / Keychain | Source hooks; hosted interactive Keychain XCTest skipped | SOURCE + partial CI; **NATIVE P0 OPEN** |
+| Optional Neoxa/NonKYC ticker | Read-only GET endpoints in price service; network metadata exposure documented | SOURCE; live network privacy/availability **OPEN** |
+| GitHub macOS DMG | Build 3 release with DMG, SHA256SUMS.txt, BUILD_MANIFEST.json, published asset digest `892798a3...` | **RELEASE VERIFIED**; notarization/Gatekeeper/source-to-DMG independently **OPEN** |
+| App Store Connect | App ID 6833290684, active script bundle `pool.sentineldefensetechnologies.co.za`, v1.0 Build3 | SOURCE/peer report; **Apple final approval NOT independently verified** |
+| Full signed/native security and financial release | No independent BTCB2 signing, GUI restore, interactive Keychain and notarization acceptance packet | **NO FUNDS/SECURITY GO** |
 
-**Required next evidence:** (1) fail-closed passphrase custody and native isolated create→inventory→backup→restore; (2) positive cookie/conf adoption and negative endpoint/PID/file-type tests; (3) native window/Ultra/2FA and Apple Passwords; (4) signing, binary provenance, independent security and distribution. No real operator wallet or live funds may be used for qualification.
+**Current CI evidence:** [Build 3 source run #43663728634](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663728634) also succeeded at `357766bf`. GitHub logs for both runs show 144 XCTest executions with one interactive Keychain skip, and isolated Knots CLI encrypted recovery. Do not print “144 passed” for this run.
 
-**Provenance:** [Project Status](docs/PROJECT_STATUS.md) · SCM session Session_Gemini_NodePocketBTCB2_20261106-1741; last peer MSG:SENTINEL-DAEMON-ADOPT-REPAIR-RECEIPT-20261109-071; [SCM rules](https://github.com/PeterJFrancoIII/Shared-Cognitive-Memory-for-Cross-Platform-AI-Conversations/tree/main/docs/SHARED_MEMORY_AGENT_RULES.md). New receipts must include exact SHA, CI and separately sourced native PASS/FAIL/SKIP evidence.
+**Required closeout:** verify DMG file bytes/checksum and final code signature + Gatekeeper, independently test installed signed SwiftUI GUI, confirm wallet recovery and all destructive flows, commission an independent fork-signing audit, and prove current Apple disposition by authenticated first-party record. All test work must use disposable zero-funds datadirs.
+
+[Project Status](docs/PROJECT_STATUS.md) · [Security](SECURITY.md) · [Governance](GOVERNANCE.md) · [Release Checklist](docs/PRODUCTION_RELEASE_CHECKLIST.md)

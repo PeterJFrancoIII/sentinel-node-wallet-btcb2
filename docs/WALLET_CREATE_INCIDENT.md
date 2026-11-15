@@ -1,3 +1,5 @@
+> **Historical document — not the current release or policy (November 14, 2026).** This record preserves earlier design, audits or agent-reported outcomes and may contain superseded bundle IDs, pre-merge PR states, old test counts, obsolete product controls, or historical safety decisions. **Do not use it as live operator instructions or current proof of approval.** The active sources are [Current Project Status](PROJECT_STATUS.md), [Governance](../GOVERNANCE.md), [Security](../SECURITY.md), [Release Matrix](../TEST_AND_RELEASE_MATRIX.md) and [GitHub v1.0.0 Build 3](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3).
+
 # Create Encrypted Wallet — Open P0 Incident
 
 **Status (2026-11-09): unresolved native acceptance; [Project Status](PROJECT_STATUS.md).** The operator reported a wallet-creation attempt failing with “Network connection error: Could not connect to the server.” The previous completion claim was not a verified installed-app success.
