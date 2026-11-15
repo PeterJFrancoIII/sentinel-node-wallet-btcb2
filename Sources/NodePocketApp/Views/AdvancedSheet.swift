@@ -89,7 +89,7 @@ public struct AdvancedSheet: View {
 
                                 rollingHistorySelectionPreview
 
-                                Text("ℹ️ Note: Pruning limits apply to historical raw block files. A compact pruned node performs 100% cryptographic validation of all blocks and consensus rules.")
+                                Text("ℹ️ Note: Pruning limits apply to historical raw block files (reducing ~700 GB of blocks down to your selected target). All Bitcoin full nodes must also maintain the live UTXO chainstate database (~18 GB) to validate consensus and verify spendability.")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }

@@ -247,11 +247,11 @@ public struct NodeView: View {
                     )
 
                     metricCard(
-                        title: "Storage Footprint",
+                        title: "Block Prune Target",
                         value: state.storageMode.isArchival ? "Archival" : "\(state.storageMode.pruneMB) MiB",
                         subtitle: state.storageMode.isArchival
-                            ? "Full-history archive (when fully synced)"
-                            : (state.rollingHistoryCoverage?.description ?? state.rollingHistoryStatus),
+                            ? "Full-history archive (~700 GB)"
+                            : "\(state.storageMode.pruneMB) MiB blocks + ~18 GB UTXO state",
                         icon: "internaldrive.fill",
                         color: .green
                     )
