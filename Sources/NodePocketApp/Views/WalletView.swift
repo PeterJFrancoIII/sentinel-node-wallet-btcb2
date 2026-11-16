@@ -73,6 +73,8 @@ public struct WalletView: View {
     @State private var selectedTxFilter: String = "all"
 
     // V13 Local Login & 2FA State
+    @AppStorage("lastSelectedOperatorUsername") private var lastOperatorUsername: String = ""
+    @State private var createWalletErrorMessage: String? = nil
     @State private var loginUsername: String = ""
     @State private var loginPassword: String = ""
     @State private var appleSavedPasswordCoordinator: AppleSavedPasswordCoordinator? = nil
@@ -88,6 +90,10 @@ public struct WalletView: View {
     @State private var isAuthActionInProgress: Bool = false
     @State private var authLocalError: String? = nil
     @State private var showEnrollmentCard: Bool = false
+
+    private var cleanLoginTotp: String {
+        loginTotpCode.filter { !$0.isWhitespace && $0 != "-" }
+    }
 
     // Price Service & Override Sheet
     @State private var showPriceOverrideSheet: Bool = false
@@ -129,7 +135,7 @@ public struct WalletView: View {
         }
         .onAppear {
             state.refreshAuthState()
-            if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? "" }
+            reconcileOperatorSelection(with: state.enrolledUsernames)
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
@@ -147,13 +153,20 @@ public struct WalletView: View {
                 showNodePromptSheet = false
             }
         }
+        .onChange(of: state.enrolledUsernames) { names in
+            reconcileOperatorSelection(with: names)
+        }
         .onChange(of: state.enrolledUsername) { newName in
             if loginUsername.isEmpty { loginUsername = newName ?? "" }
         }
-        .onChange(of: loginUsername) { _ in
+        .onChange(of: loginUsername) { newUser in
+            if !newUser.isEmpty {
+                lastOperatorUsername = newUser
+            }
             loginPassword = ""
             loginTotpCode = ""
             isApplePasswordSaved = false
+            authLocalError = nil
         }
         .onChange(of: state.isWalletTabUnlocked) { unlocked in
             if !unlocked {
@@ -815,15 +828,21 @@ public struct WalletView: View {
 
             if !showRecoveryLogin {
                 if state.enrolledUsernames.count > 1 {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Select Operator Account").font(.caption).bold()
-                        Picker("Account", selection: $loginUsername) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Select Operator Account").font(.caption).bold()
+                            Spacer()
+                            Text("Selected: \(loginUsername.isEmpty ? "None" : loginUsername)")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                                .bold()
+                        }
+                        Picker("Operator Account", selection: $loginUsername) {
                             ForEach(state.enrolledUsernames, id: \.self) { u in
                                 Text(u).tag(u)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: .infinity)
+                        .pickerStyle(.segmented)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
@@ -901,7 +920,8 @@ public struct WalletView: View {
                             do {
                                 let userToSave = loginUsername
                                 let passToSave = loginPassword
-                                try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: cleanLoginTotp)
+                                lastOperatorUsername = loginUsername
                                 try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: userToSave, password: passToSave)
                                 loginPassword = ""
                                 loginTotpCode = ""
@@ -918,7 +938,7 @@ public struct WalletView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("user-login-submit")
-                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || loginTotpCode.count != 6 || isAuthActionInProgress)
+                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || cleanLoginTotp.count != 6 || isAuthActionInProgress)
 
                     Button(action: {
                         requestAutofillWithBiometrics(for: loginUsername, andLogin: true)
@@ -1002,6 +1022,16 @@ public struct WalletView: View {
 
     // MARK: - Apple Passwords & macOS Keychain Biometric Autofill
 
+    private func reconcileOperatorSelection(with names: [String]) {
+        guard !names.isEmpty else { return }
+        if !lastOperatorUsername.isEmpty,
+           let match = names.first(where: { $0.caseInsensitiveCompare(lastOperatorUsername) == .orderedSame }) {
+            loginUsername = match
+        } else if loginUsername.isEmpty || !names.contains(where: { $0.caseInsensitiveCompare(loginUsername) == .orderedSame }) {
+            loginUsername = state.enrolledUsername ?? names.first ?? ""
+        }
+    }
+
     private func requestAutofillWithBiometrics(for username: String? = nil, andLogin: Bool = false) {
         let target = (username?.isEmpty ?? true)
             ? (state.enrolledUsername ?? state.enrolledUsernames.first ?? "")
@@ -1050,9 +1080,10 @@ public struct WalletView: View {
                                let c = refreshed.totpCode {
                                 loginTotpCode = c
                             }
-                            if andLogin && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                            if andLogin && !loginPassword.isEmpty && cleanLoginTotp.count == 6 {
                                 do {
-                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: cleanLoginTotp)
+                                    lastOperatorUsername = loginUsername
                                     loginPassword = ""
                                     loginTotpCode = ""
                                 } catch {
@@ -1073,11 +1104,12 @@ public struct WalletView: View {
                 }
 
                 if andLogin {
-                    if !loginUsername.isEmpty && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                    if !loginUsername.isEmpty && !loginPassword.isEmpty && cleanLoginTotp.count == 6 {
                         let userToLogin = loginUsername
                         let passToLogin = loginPassword
-                        let codeToLogin = loginTotpCode
+                        let codeToLogin = cleanLoginTotp
                         try await state.loginUser(username: userToLogin, password: passToLogin, totpCode: codeToLogin)
+                        lastOperatorUsername = userToLogin
                         loginPassword = ""
                         loginTotpCode = ""
                     }
@@ -3615,8 +3647,23 @@ public struct WalletView: View {
             .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
             .cornerRadius(6)
 
+            if let errorMsg = createWalletErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(errorMsg)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(6)
+            }
+
             HStack {
                 Button("Cancel") {
+                    createWalletErrorMessage = nil
                     passphraseInput = ""
                     passphraseConfirmInput = ""
                     showWalletPassphrase = false
@@ -3626,6 +3673,7 @@ public struct WalletView: View {
                 .buttonStyle(.bordered)
 
                 Button("Open / Restore Existing Wallet…") {
+                    createWalletErrorMessage = nil
                     showCreateModal = false
                     showOpenRestoreModal = true
                 }
@@ -3636,12 +3684,14 @@ public struct WalletView: View {
 
                 Button("Create Encrypted Wallet") {
                     guard !isCreatingWallet else { return }
+                    createWalletErrorMessage = nil
                     let name = walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
                     let passphrase = passphraseInput
                     let save = storeInKeychain
                     guard WalletManager.isValidWalletName(name),
                           !passphrase.isEmpty,
                           passphrase == passphraseConfirmInput else {
+                        createWalletErrorMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.alertMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.showAlert = true
                         return
@@ -3654,6 +3704,7 @@ public struct WalletView: View {
                             let result = try await state.createEncryptedWallet(
                                 name: name, passphrase: passphrase, storeInKeychain: save
                             )
+                            createWalletErrorMessage = nil
                             showCreateModal = false
                             passphraseInput = ""
                             passphraseConfirmInput = ""
@@ -3666,9 +3717,11 @@ public struct WalletView: View {
                             }
                             state.showAlert = true
                         } catch let creationErr as WalletCreationError {
+                            createWalletErrorMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.alertMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.showAlert = true
                         } catch {
+                            createWalletErrorMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.alertMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.showAlert = true
                         }

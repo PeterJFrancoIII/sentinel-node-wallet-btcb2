@@ -324,6 +324,10 @@ public actor WalletAuthCoordinator {
         !records.isEmpty
     }
 
+    public func reloadRecordsFromDisk() {
+        self.records = Self.loadRecords(from: registryURL)
+    }
+
     /// Backwards compatibility property returning the primary/first enrolled record.
     public var record: AuthRegistryRecord? {
         records.values.first
@@ -488,6 +492,9 @@ public actor WalletAuthCoordinator {
                 isAuthInFlight = false
             }
         }
+
+        // Authoritatively reload records from disk before validating credentials
+        self.records = Self.loadRecords(from: registryURL)
 
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
@@ -666,6 +673,9 @@ public actor WalletAuthCoordinator {
                 isAuthInFlight = false
             }
         }
+
+        // Authoritatively reload records from disk before validating credentials
+        self.records = Self.loadRecords(from: registryURL)
 
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
@@ -1192,7 +1202,10 @@ public actor WalletAuthCoordinator {
         time: TimeInterval = Date().timeIntervalSince1970,
         toleranceSteps: Int = 1
     ) -> (valid: Bool, timeStep: Int64) {
-        let cleanCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCode = code
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanCode.count == 6, Int(cleanCode) != nil else {
             return (false, 0)
         }
@@ -1295,7 +1308,7 @@ public actor WalletAuthCoordinator {
         var dataTypeRef: AnyObject?
         var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
 
-        if status == errSecAuthFailed || status == -25293 {
+        if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
             // Supply authentication context with localized reason for items with .userPresence ACL
             let context = LAContext()
             context.localizedReason = "Authenticate to unlock Sentinel Node Wallet 2FA secret"
@@ -1400,7 +1413,14 @@ public actor WalletAuthCoordinator {
         ]
 
         var dataTypeRef: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
+            let context = LAContext()
+            context.localizedReason = "Authenticate to unlock Sentinel Node Wallet saved password"
+            var interactiveQuery = query
+            interactiveQuery[kSecUseAuthenticationContext as String] = context
+            status = SecItemCopyMatching(interactiveQuery as CFDictionary, &dataTypeRef)
+        }
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
             throw WalletAuthError.storageError("Failed to load operator password from Keychain: status \(status)")
         }
