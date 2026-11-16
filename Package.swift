@@ -16,7 +16,9 @@ let package = Package(
             targets: ["NodePocketApp"]
         )
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
+    ],
     targets: [
         .target(
             name: "NodePocketCore",
@@ -25,7 +27,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "NodePocketApp",
-            dependencies: ["NodePocketCore"],
+            dependencies: [
+                "NodePocketCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources/NodePocketApp"
         ),
         .testTarget(
@@ -35,3 +40,4 @@ let package = Package(
         )
     ]
 )
+

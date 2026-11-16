@@ -57,6 +57,14 @@ if [ -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
     cp "${ROOT_DIR}/Resources/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 fi
 
+# Embed Sparkle.framework if present in binary output directory
+if [ -d "${BIN_DIR}/Sparkle.framework" ]; then
+    echo "Embedding Sparkle.framework into bundle..."
+    mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
+    cp -R "${BIN_DIR}/Sparkle.framework" "${APP_BUNDLE}/Contents/Frameworks/"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet" 2>/dev/null || true
+fi
+
 # Create Info.plist
 cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -85,6 +93,12 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.finance</string>
+    <key>SUEnableAutomaticChecks</key>
+    <false/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <false/>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml</string>
 </dict>
 </plist>
 EOF
@@ -93,9 +107,15 @@ EOF
 DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
 if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then
     echo "Signing with Developer Identity: ${DEV_IDENTITY}"
+    if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
+        codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
+    fi
     codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
 else
     echo "Signing with ad-hoc identity"
+    if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
+        codesign --force --sign - "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
+    fi
     codesign --force --deep --sign - "${APP_BUNDLE}"
 fi
 
