@@ -74,6 +74,7 @@ public struct WalletView: View {
     @State private var selectedTxFilter: String = "all"
 
     // V13 Local Login & 2FA State
+    @AppStorage("lastSelectedOperatorUsername") private var lastOperatorUsername: String = ""
     @State private var loginUsername: String = ""
     @State private var loginPassword: String = ""
     @State private var appleSavedPasswordCoordinator: AppleSavedPasswordCoordinator? = nil
@@ -89,6 +90,10 @@ public struct WalletView: View {
     @State private var isAuthActionInProgress: Bool = false
     @State private var authLocalError: String? = nil
     @State private var showEnrollmentCard: Bool = false
+
+    private var cleanLoginTotp: String {
+        loginTotpCode.filter { !$0.isWhitespace && $0 != "-" }
+    }
 
     // Price Service & Override Sheet
     @State private var showPriceOverrideSheet: Bool = false
@@ -130,7 +135,13 @@ public struct WalletView: View {
         }
         .onAppear {
             state.refreshAuthState()
-            if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? "" }
+            if loginUsername.isEmpty {
+                if !lastOperatorUsername.isEmpty && state.enrolledUsernames.contains(where: { $0.caseInsensitiveCompare(lastOperatorUsername) == .orderedSame }) {
+                    loginUsername = state.enrolledUsernames.first(where: { $0.caseInsensitiveCompare(lastOperatorUsername) == .orderedSame }) ?? lastOperatorUsername
+                } else {
+                    loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? ""
+                }
+            }
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
@@ -151,10 +162,14 @@ public struct WalletView: View {
         .onChange(of: state.enrolledUsername) { newName in
             if loginUsername.isEmpty { loginUsername = newName ?? "" }
         }
-        .onChange(of: loginUsername) { _ in
+        .onChange(of: loginUsername) { newUser in
+            if !newUser.isEmpty {
+                lastOperatorUsername = newUser
+            }
             loginPassword = ""
             loginTotpCode = ""
             isApplePasswordSaved = false
+            authLocalError = nil
         }
         .onChange(of: state.isWalletTabUnlocked) { unlocked in
             if !unlocked {
@@ -816,15 +831,21 @@ public struct WalletView: View {
 
             if !showRecoveryLogin {
                 if state.enrolledUsernames.count > 1 {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Select Operator Account").font(.caption).bold()
-                        Picker("Account", selection: $loginUsername) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Select Operator Account").font(.caption).bold()
+                            Spacer()
+                            Text("Selected: \(loginUsername.isEmpty ? "None" : loginUsername)")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                                .bold()
+                        }
+                        Picker("Operator Account", selection: $loginUsername) {
                             ForEach(state.enrolledUsernames, id: \.self) { u in
                                 Text(u).tag(u)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: .infinity)
+                        .pickerStyle(.segmented)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
@@ -852,11 +873,23 @@ public struct WalletView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("6-Digit 2FA Verification Code").font(.caption).bold()
+                    HStack {
+                        Text("6-Digit 2FA Verification Code").font(.caption).bold()
+                        Spacer()
+                        if cleanLoginTotp.count == 6 {
+                            Text("Format: Ready")
+                                .font(.caption2)
+                                .foregroundColor(.green)
+                        } else if !loginTotpCode.isEmpty {
+                            Text("\(cleanLoginTotp.count)/6 digits")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
                     TextField("000000", text: $loginTotpCode)
                         .textContentType(.oneTimeCode)
                         .textFieldStyle(.roundedBorder)
-                        .frame(width: 140)
+                        .frame(width: 150)
                         .accessibilityIdentifier("user-login-totp")
                 }
 
@@ -902,7 +935,9 @@ public struct WalletView: View {
                             do {
                                 let userToSave = loginUsername
                                 let passToSave = loginPassword
-                                try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                let totpToSubmit = cleanLoginTotp
+                                try await state.loginUser(username: userToSave, password: passToSave, totpCode: totpToSubmit)
+                                lastOperatorUsername = userToSave
                                 try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: userToSave, password: passToSave)
                                 loginPassword = ""
                                 loginTotpCode = ""
@@ -919,7 +954,7 @@ public struct WalletView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("user-login-submit")
-                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || loginTotpCode.count != 6 || isAuthActionInProgress)
+                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || cleanLoginTotp.count != 6 || isAuthActionInProgress)
 
                     Button(action: {
                         requestAutofillWithBiometrics(for: loginUsername, andLogin: true)
@@ -969,7 +1004,9 @@ public struct WalletView: View {
                             authLocalError = nil
                             defer { isAuthActionInProgress = false }
                             do {
-                                try await state.loginWithRecoveryCode(username: loginUsername, code: loginRecoveryCode)
+                                let norm = loginRecoveryCode.replacingOccurrences(of: " ", with: "").replacingOccurrences(of: "-", with: "")
+                                try await state.loginWithRecoveryCode(username: loginUsername, code: norm)
+                                lastOperatorUsername = loginUsername
                             } catch {
                                 authLocalError = error.localizedDescription
                             }
@@ -1004,17 +1041,25 @@ public struct WalletView: View {
     // MARK: - Apple Passwords & macOS Keychain Biometric Autofill
 
     private func requestAutofillWithBiometrics(for username: String? = nil, andLogin: Bool = false) {
-        let target = (username?.isEmpty ?? true)
-            ? (state.enrolledUsername ?? state.enrolledUsernames.first ?? "")
-            : (username ?? "")
+        let chosen = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let target: String
+        if !chosen.isEmpty {
+            target = chosen
+        } else if !loginUsername.isEmpty {
+            target = loginUsername
+        } else if !lastOperatorUsername.isEmpty {
+            target = lastOperatorUsername
+        } else {
+            target = state.enrolledUsername ?? state.enrolledUsernames.first ?? ""
+        }
+
         guard !target.isEmpty else {
             authLocalError = "Please select or enter an operator username first."
             return
         }
 
-        if loginUsername.isEmpty {
-            loginUsername = target
-        }
+        loginUsername = target
+        lastOperatorUsername = target
 
         isAuthActionInProgress = true
         authLocalError = nil
@@ -1041,6 +1086,7 @@ public struct WalletView: View {
                     let picker = AppleSavedPasswordCoordinator()
                     picker.onCredential = { user, pass in
                         loginUsername = user
+                        lastOperatorUsername = user
                         loginPassword = pass
                         isApplePasswordSaved = true
                         authLocalError = nil
@@ -1051,9 +1097,10 @@ public struct WalletView: View {
                                let c = refreshed.totpCode {
                                 loginTotpCode = c
                             }
-                            if andLogin && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                            if andLogin && !loginPassword.isEmpty && cleanLoginTotp.count == 6 {
                                 do {
-                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: cleanLoginTotp)
+                                    lastOperatorUsername = loginUsername
                                     loginPassword = ""
                                     loginTotpCode = ""
                                 } catch {
@@ -1074,11 +1121,12 @@ public struct WalletView: View {
                 }
 
                 if andLogin {
-                    if !loginUsername.isEmpty && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                    if !loginUsername.isEmpty && !loginPassword.isEmpty && cleanLoginTotp.count == 6 {
                         let userToLogin = loginUsername
                         let passToLogin = loginPassword
-                        let codeToLogin = loginTotpCode
+                        let codeToLogin = cleanLoginTotp
                         try await state.loginUser(username: userToLogin, password: passToLogin, totpCode: codeToLogin)
+                        lastOperatorUsername = userToLogin
                         loginPassword = ""
                         loginTotpCode = ""
                     }

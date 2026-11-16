@@ -350,6 +350,7 @@ public final class AppState: ObservableObject {
 
     public func refreshAuthState() {
         Task { @MainActor in
+            await authCoordinator.reloadRecordsFromDisk()
             self.isAuthEnrolled = await authCoordinator.isEnrolled
             self.enrolledUsername = await authCoordinator.enrolledUsername
             self.enrolledUsernames = await authCoordinator.enrolledUsernames
