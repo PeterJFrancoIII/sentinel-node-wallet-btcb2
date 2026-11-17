@@ -1523,7 +1523,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         try updatedData.write(to: registryURL, options: .atomic)
 
         // Calling reloadRecordsFromDisk should reload disk state
-        await coordinator.reloadRecordsFromDisk()
+        try await coordinator.reloadRecordsFromDisk()
         let names = await coordinator.enrolledUsernames
         XCTAssertTrue(names.contains("reload_user"))
     }

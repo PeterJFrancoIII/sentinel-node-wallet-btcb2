@@ -3,6 +3,27 @@ import CommonCrypto
 import Security
 import LocalAuthentication
 
+public enum AuthRegistryStorageError: LocalizedError, Sendable, Equatable {
+    case unreadableFile(path: String, underlyingError: String)
+    case malformedJSON(path: String, underlyingError: String)
+    case versionIncompatible(version: Int, supportedVersions: [Int])
+    case writeFailed(path: String, underlyingError: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unreadableFile(let path, let underlying):
+            return "Unable to read auth registry file at \(path): \(underlying)"
+        case .malformedJSON(let path, let underlying):
+            return "Auth registry at \(path) contains corrupted or malformed data: \(underlying)"
+        case .versionIncompatible(let ver, let supported):
+            let supp = supported.map(String.init).joined(separator: ", ")
+            return "Auth registry version \(ver) is incompatible with supported versions [\(supp)]."
+        case .writeFailed(let path, let underlying):
+            return "Failed to write auth registry to \(path): \(underlying)"
+        }
+    }
+}
+
 public enum WalletAuthError: LocalizedError, Sendable, Equatable {
     case unauthenticated
     case invalidCredentials
@@ -18,6 +39,7 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
     case weakPassword(String)
     case cryptographicError(String)
     case storageError(String)
+    case registryStorageError(AuthRegistryStorageError)
     case unauthorizedHighRiskAction(String)
     case approvalExpired
     case authAbortedByLock
@@ -54,6 +76,8 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
             return "Cryptographic operation failed: \(reason)"
         case .storageError(let reason):
             return "Secure storage operation failed: \(reason)"
+        case .registryStorageError(let err):
+            return err.localizedDescription
         case .unauthorizedHighRiskAction(let reason):
             return "High-risk action rejected: \(reason)"
         case .approvalExpired:
@@ -232,6 +256,12 @@ public actor WalletAuthCoordinator {
     private var isAuthInFlight: Bool = false
     private var recordGeneration: UInt64 = 0
     private var currentAuthEpoch: UInt64 = 0
+    public private(set) var registryLoadError: AuthRegistryStorageError? = nil
+
+    public var isRegistryHealthy: Bool {
+        registryLoadError == nil
+    }
+
     public static let sessionDurationSeconds: TimeInterval = 15 * 60 // 15 minutes
 
     // P0-3: Private registry of unforgeable, single-use high-risk approvals
@@ -292,29 +322,40 @@ public actor WalletAuthCoordinator {
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
         self.registryURL = dataDirectory.appendingPathComponent("auth_registry.json")
-        self.records = Self.loadRecords(from: registryURL)
+        do {
+            self.records = try Self.loadRecordsStrict(from: registryURL)
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.records = [:]
+            self.registryLoadError = err
+        } catch {
+            self.records = [:]
+            self.registryLoadError = .unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+        }
 
         guard let secret = try? Self.randomBytes(count: 32) else {
             fatalError("Cryptographic failure: unable to obtain 32 secure random bytes for HMAC key.")
         }
         self.hmacSecret = secret
 
-        // Non-destructive migration of legacy TOTP secret if present across any accounts
-        for (key, rec) in self.records {
-            if let legacySecret = rec.legacyTotpSecretBase32 {
-                do {
-                    try Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
-                    let readBack = try Self.loadTOTPSecretFromKeychain(username: rec.username)
-                    if readBack == legacySecret {
-                        var updated = rec
-                        updated.legacyTotpSecretBase32 = nil
-                        updated.isTotpInKeychain = true
-                        self.records[key] = updated
-                        try Self.persistRecords(self.records, to: registryURL, in: dataDirectory)
+        // Non-destructive migration of legacy TOTP secret if present across any accounts, only if registry is healthy
+        if self.registryLoadError == nil {
+            for (key, rec) in self.records {
+                if let legacySecret = rec.legacyTotpSecretBase32 {
+                    do {
+                        try Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
+                        let readBack = try Self.loadTOTPSecretFromKeychain(username: rec.username)
+                        if readBack == legacySecret {
+                            var updated = rec
+                            updated.legacyTotpSecretBase32 = nil
+                            updated.isTotpInKeychain = true
+                            self.records[key] = updated
+                            try Self.persistRecords(self.records, to: registryURL, in: dataDirectory)
+                        }
+                    } catch {
+                        // If Keychain write or read-back verification fails, preserve legacyTotpSecretBase32
+                        // on disk so the operator is never locked out from their credentials.
                     }
-                } catch {
-                    // If Keychain write or read-back verification fails, preserve legacyTotpSecretBase32
-                    // on disk so the operator is never locked out from their credentials.
                 }
             }
         }
@@ -324,8 +365,19 @@ public actor WalletAuthCoordinator {
         !records.isEmpty
     }
 
-    public func reloadRecordsFromDisk() {
-        self.records = Self.loadRecords(from: registryURL)
+    public func reloadRecordsFromDisk() throws {
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            throw err
+        } catch {
+            let err = AuthRegistryStorageError.unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = err
+            throw err
+        }
     }
 
     /// Backwards compatibility property returning the primary/first enrolled record.
@@ -415,6 +467,19 @@ public actor WalletAuthCoordinator {
         guard !cleanUser.isEmpty else {
             throw WalletAuthError.invalidCredentials
         }
+
+        // Ensure registry is readable and uncorrupted before enrolling
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is damaged or unreadable (\(err.localizedDescription)). Aborting enrollment to protect existing credentials.")
+        } catch {
+            throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is unreadable (\(error.localizedDescription)). Aborting enrollment to protect existing credentials.")
+        }
+
         let userKey = cleanUser.lowercased()
         guard records[userKey] == nil else {
             throw WalletAuthError.alreadyEnrolled
@@ -494,7 +559,18 @@ public actor WalletAuthCoordinator {
         }
 
         // Authoritatively reload records from disk before validating credentials
-        self.records = Self.loadRecords(from: registryURL)
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            throw WalletAuthError.registryStorageError(err)
+        } catch {
+            let err = AuthRegistryStorageError.unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = err
+            throw WalletAuthError.registryStorageError(err)
+        }
 
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
@@ -675,7 +751,18 @@ public actor WalletAuthCoordinator {
         }
 
         // Authoritatively reload records from disk before validating credentials
-        self.records = Self.loadRecords(from: registryURL)
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            throw WalletAuthError.registryStorageError(err)
+        } catch {
+            let err = AuthRegistryStorageError.unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = err
+            throw WalletAuthError.registryStorageError(err)
+        }
 
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
@@ -1320,9 +1407,6 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.storageError("Failed to load TOTP secret from Keychain: status \(status)")
         }
 
-        // Seamless migration: re-save with WhenUnlockedThisDeviceOnly so future reads never fail on -25293
-        try? saveTOTPSecretToKeychain(username: username, secretBase32: str)
-
         return str
     }
 
@@ -1443,18 +1527,73 @@ public actor WalletAuthCoordinator {
 
     // MARK: - Registry Storage
 
-    private static func loadRecords(from url: URL) -> [String: AuthRegistryRecord] {
-        guard let data = try? Data(contentsOf: url) else { return [:] }
+    public static func loadRecordsStrict(from url: URL) throws -> [String: AuthRegistryRecord] {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return [:]
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw AuthRegistryStorageError.unreadableFile(
+                path: url.path,
+                underlyingError: error.localizedDescription
+            )
+        }
+
+        guard !data.isEmpty else {
+            throw AuthRegistryStorageError.malformedJSON(
+                path: url.path,
+                underlyingError: "File is empty (0 bytes)."
+            )
+        }
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+
+        // 1. Try decoding MultiAuthRegistry (version 2)
         if let multi = try? decoder.decode(MultiAuthRegistry.self, from: data) {
+            guard multi.version >= 1 && multi.version <= 2 else {
+                throw AuthRegistryStorageError.versionIncompatible(
+                    version: multi.version,
+                    supportedVersions: [1, 2]
+                )
+            }
             return multi.users
         }
+
+        // 2. Try decoding single AuthRegistryRecord (legacy version 1)
         if let single = try? decoder.decode(AuthRegistryRecord.self, from: data) {
             let key = single.username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return [key: single]
         }
-        return [:]
+
+        // 3. Neither schema matched. Determine if JSON is syntactically invalid or schema-incompatible.
+        do {
+            let json = try JSONSerialization.jsonObject(with: data, options: [])
+            if let dict = json as? [String: Any], let ver = dict["version"] as? Int, ver > 2 {
+                throw AuthRegistryStorageError.versionIncompatible(
+                    version: ver,
+                    supportedVersions: [1, 2]
+                )
+            }
+            throw AuthRegistryStorageError.malformedJSON(
+                path: url.path,
+                underlyingError: "Schema validation failed: root object does not match MultiAuthRegistry or AuthRegistryRecord."
+            )
+        } catch let storageErr as AuthRegistryStorageError {
+            throw storageErr
+        } catch {
+            throw AuthRegistryStorageError.malformedJSON(
+                path: url.path,
+                underlyingError: error.localizedDescription
+            )
+        }
+    }
+
+    private static func loadRecords(from url: URL) -> [String: AuthRegistryRecord] {
+        (try? loadRecordsStrict(from: url)) ?? [:]
     }
 
     private static func persistRecords(
@@ -1470,7 +1609,10 @@ public actor WalletAuthCoordinator {
         do {
             data = try encoder.encode(registry)
         } catch {
-            throw WalletAuthError.storageError("JSON encoding failed: \(error.localizedDescription)")
+            throw AuthRegistryStorageError.writeFailed(
+                path: registryURL.path,
+                underlyingError: "JSON encoding failed: \(error.localizedDescription)"
+            )
         }
 
         do {
@@ -1478,7 +1620,10 @@ public actor WalletAuthCoordinator {
             try data.write(to: registryURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registryURL.path)
         } catch {
-            throw WalletAuthError.storageError("Writing auth_registry.json failed: \(error.localizedDescription)")
+            throw AuthRegistryStorageError.writeFailed(
+                path: registryURL.path,
+                underlyingError: error.localizedDescription
+            )
         }
     }
 

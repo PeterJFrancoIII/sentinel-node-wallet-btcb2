@@ -826,6 +826,23 @@ public struct WalletView: View {
                     .stroke(Color.blue.opacity(0.3), lineWidth: 1)
             )
 
+            if let regErr = state.authRegistryError {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auth Registry Storage Notice").bold().font(.caption)
+                        Text(regErr).font(.caption2)
+                        Text("Existing accounts remain protected on disk. Do not reinstall or re-enroll.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.1)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+            }
+
             if !showRecoveryLogin {
                 if state.enrolledUsernames.count > 1 {
                     VStack(alignment: .leading, spacing: 8) {
@@ -890,12 +907,12 @@ public struct WalletView: View {
                 .accessibilityIdentifier("user-login-apple-passwords")
                 .disabled(isAuthActionInProgress)
 
-                if isApplePasswordSaved || !loginPassword.isEmpty {
+                if isApplePasswordSaved {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.shield.fill")
                             .foregroundColor(.green)
                             .font(.caption)
-                        Text("Credentials authenticated and loaded from Keychain")
+                        Text("Credentials authenticated and loaded from Keychain / Apple Passwords")
                             .font(.caption2)
                             .foregroundColor(.green)
                     }
