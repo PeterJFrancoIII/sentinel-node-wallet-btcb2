@@ -23,7 +23,8 @@ data/
 rpc_credentials.json
 
 # Binaries and archives
-dist/
+dist/*
+!dist/appcast.xml
 .cache/
 *.dmg
 *.app

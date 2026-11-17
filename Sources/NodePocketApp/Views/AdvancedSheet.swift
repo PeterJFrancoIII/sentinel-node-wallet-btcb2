@@ -17,7 +17,7 @@ public struct AdvancedSheet: View {
     @State private var enableInboundP2P: Bool = false
 
     // Clean Uninstall & Data Wipe States
-    @State private var settingsTab: Int = 0 // 0 = Node & Storage, 1 = Full Uninstallation
+    @State private var settingsTab: Int = 0 // 0 = Node & Storage, 1 = Software Updates, 2 = Full Uninstallation
     @State private var showWipeConfirmation: Bool = false
     @State private var isWipingData: Bool = false
     @State private var wipeCompleted: Bool = false
@@ -46,7 +46,8 @@ public struct AdvancedSheet: View {
 
             Picker("Settings Section", selection: $settingsTab) {
                 Label("Node & Storage", systemImage: "server.rack").tag(0)
-                Label("Full Uninstallation", systemImage: "trash.fill").tag(1)
+                Label("Software Updates", systemImage: "arrow.triangle.2.circlepath").tag(1)
+                Label("Full Uninstallation", systemImage: "trash.fill").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(.bottom, 2)
@@ -261,7 +262,7 @@ public struct AdvancedSheet: View {
                         }
                         Spacer()
                         Button("Go to Full Uninstall") {
-                            settingsTab = 1
+                            settingsTab = 2
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -270,6 +271,8 @@ public struct AdvancedSheet: View {
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.08)))
                 }
             }
+        } else if settingsTab == 1 {
+            SoftwareUpdatesSettingsView(coordinator: state.updateCoordinator)
         } else {
             fullUninstallationTab
         }

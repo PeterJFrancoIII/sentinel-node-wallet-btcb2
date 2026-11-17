@@ -19,6 +19,47 @@ public struct NodeView: View {
     public var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                // Software Update Available Banner
+                if state.updateCoordinator.showUpdateBanner, let release = state.updateCoordinator.discoveredRelease {
+                    HStack(spacing: 12) {
+                        Image(systemName: "sparkles")
+                            .font(.title3)
+                            .foregroundColor(.blue)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Software Update Available: \(release.name)")
+                                .font(.headline)
+                            Text("Version \(release.version.shortDescription) is available for your Mac.")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+
+                        Spacer()
+
+                        Button("View Update…") {
+                            showAdvancedSheet = true
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        Button(action: {
+                            state.updateCoordinator.remindMeLater()
+                        }) {
+                            Image(systemName: "xmark")
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundColor(.secondary)
+                        .help("Remind me later")
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.12)))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(Color.blue.opacity(0.3), lineWidth: 1)
+                    )
+                }
+
                 // Top Status Header
                 HStack(alignment: .center) {
                     VStack(alignment: .leading, spacing: 4) {

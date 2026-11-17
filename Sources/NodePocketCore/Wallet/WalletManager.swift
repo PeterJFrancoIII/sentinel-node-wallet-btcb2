@@ -286,7 +286,7 @@ public actor WalletManager {
     public let walletInventory: WalletInventory
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
-    private var isCreatingWallet = false
+    public private(set) var isCreatingWallet = false
     private var activeStagingSessionIDs = Set<String>()
 
     public func resetActiveWallet() {
