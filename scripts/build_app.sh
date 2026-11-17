@@ -103,6 +103,11 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 </plist>
 EOF
 
+if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+    echo "Injecting SUPublicEDKey into Info.plist..."
+    /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_PUBLIC_ED_KEY}" "${APP_BUNDLE}/Contents/Info.plist" 2>/dev/null || true
+fi
+
 # Code sign with Apple Development identity or ad-hoc fallback
 DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
 if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then

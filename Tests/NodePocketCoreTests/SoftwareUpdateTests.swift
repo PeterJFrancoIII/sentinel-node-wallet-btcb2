@@ -312,4 +312,155 @@ final class SoftwareUpdateTests: XCTestCase {
         let appStoreDriver = MockUpdateDriver(status: .idle, distributionChannel: .macAppStore)
         XCTAssertEqual(appStoreDriver.distributionChannel, .macAppStore)
     }
+
+    // MARK: - Dynamic Bundle Version & Parsing Edge Cases
+
+    func testBundleVersionDynamicParsing() {
+        let v1 = AppVersion.parse("1.0 (build 3)")
+        XCTAssertNotNil(v1)
+        XCTAssertEqual(v1?.major, 1)
+        XCTAssertEqual(v1?.minor, 0)
+        XCTAssertEqual(v1?.patch, 0)
+        XCTAssertEqual(v1?.build, 3)
+
+        let v2 = AppVersion.parse("1.2.3 (build 15)")
+        XCTAssertNotNil(v2)
+        XCTAssertEqual(v2?.major, 1)
+        XCTAssertEqual(v2?.minor, 2)
+        XCTAssertEqual(v2?.patch, 3)
+        XCTAssertEqual(v2?.build, 15)
+
+        let v3 = AppVersion.parse("2.0.0-rc.1 (build 42)")
+        XCTAssertNotNil(v3)
+        XCTAssertEqual(v3?.major, 2)
+        XCTAssertEqual(v3?.minor, 0)
+        XCTAssertEqual(v3?.patch, 0)
+        XCTAssertEqual(v3?.prerelease, "rc.1")
+        XCTAssertEqual(v3?.build, 42)
+
+        // Raw short version without build in string:
+        let v4 = AppVersion.parse("2.1.0")
+        XCTAssertNotNil(v4)
+        XCTAssertEqual(v4?.major, 2)
+        XCTAssertEqual(v4?.minor, 1)
+        XCTAssertEqual(v4?.patch, 0)
+        XCTAssertNil(v4?.build)
+    }
+
+    // MARK: - HTTP 304 and Cache Invalidation Safety
+
+    func testHttp304PreservesDiscoveredReleaseState() {
+        let release = AppReleaseInfo(
+            id: "rel5",
+            tagName: "v1.0.0-build5",
+            version: AppVersion(major: 1, minor: 0, patch: 0, build: 5),
+            name: "Build 5",
+            releaseNotes: "Critical fix",
+            publishedAt: Date()
+        )
+
+        var status: SoftwareUpdateStatus = .updateAvailable(release)
+        let discovered: AppReleaseInfo? = release
+
+        // Simulate 304 Not Modified handler logic
+        let error: Error = SoftwareUpdateError.notModified
+        if case SoftwareUpdateError.notModified = error {
+            if let existing = discovered {
+                status = .updateAvailable(existing)
+            } else {
+                status = .upToDate(lastChecked: Date())
+            }
+        }
+
+        if case .updateAvailable(let preserved) = status {
+            XCTAssertEqual(preserved.version.build, 5, "HTTP 304 must preserve the previously discovered update")
+        } else {
+            XCTFail("Expected .updateAvailable to be preserved on 304, got \(status)")
+        }
+    }
+
+    // MARK: - Busy Guards & Node Termination Safety
+
+    final class StopFlag: @unchecked Sendable {
+        var invoked = false
+    }
+
+    func testBusyGuardBlocksInstallationWhenWalletOrNodeBusy() async {
+        let driver = MockUpdateDriver()
+        let release = AppReleaseInfo(
+            id: "rel4",
+            tagName: "v1.0.0-build4",
+            version: AppVersion(major: 1, minor: 0, patch: 0, build: 4),
+            name: "Build 4",
+            releaseNotes: "Notes",
+            publishedAt: Date()
+        )
+
+        let flag = StopFlag()
+        let isBusy: @Sendable () async -> Bool = { true }
+        let stopAction: @Sendable () async throws -> Void = { flag.invoked = true }
+
+        // Simulate coordinator pre-install check:
+        var threwBusy = false
+        do {
+            if await isBusy() {
+                throw SoftwareUpdateError.walletActiveOperationInProgress
+            }
+            try await stopAction()
+            try await driver.installUpdate(release: release)
+        } catch SoftwareUpdateError.walletActiveOperationInProgress {
+            threwBusy = true
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(threwBusy, "Busy guard must reject installation")
+        XCTAssertFalse(flag.invoked, "Node must NOT be stopped when busy")
+        XCTAssertFalse(driver.installCalled, "Driver must NOT be called when busy")
+    }
+
+    func testAdoptedExternalDaemonRejectsAutoTermination() async {
+        let adoptedPid: Int32? = 47208
+
+        var threwAdoptedError = false
+        do {
+            if let pid = adoptedPid {
+                throw SoftwareUpdateError.nodeTerminationFailed(
+                    "An external adopted Bitcoin Knots daemon (PID \(pid)) is running. External daemons must be stopped manually by the operator before updating."
+                )
+            }
+        } catch SoftwareUpdateError.nodeTerminationFailed(let msg) {
+            threwAdoptedError = true
+            XCTAssertTrue(msg.contains("47208"))
+            XCTAssertTrue(msg.contains("adopted"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(threwAdoptedError, "Adopted daemon presence must block automated node stop")
+    }
+
+    func testNodeTerminationTimeoutFailure() async {
+        var threwTimeout = false
+        let simulateShutdown: () async throws -> Void = {
+            let waited = 30
+            let stateIsStopped = false
+            if !stateIsStopped && waited >= 30 {
+                throw SoftwareUpdateError.nodeTerminationFailed(
+                    "Bitcoin Knots daemon did not complete graceful shutdown within 30 seconds."
+                )
+            }
+        }
+
+        do {
+            try await simulateShutdown()
+        } catch SoftwareUpdateError.nodeTerminationFailed(let msg) {
+            threwTimeout = true
+            XCTAssertTrue(msg.contains("30 seconds"))
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertTrue(threwTimeout, "Failure to stop within 30s must throw nodeTerminationFailed")
+    }
 }

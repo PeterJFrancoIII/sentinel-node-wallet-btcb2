@@ -107,18 +107,36 @@ public final class AppState: ObservableObject {
 
         updateCoord.isWalletOrNodeBusy = { [weak self] in
             guard let self = self else { return false }
-            if self.nodeState == .starting { return true }
+            if self.nodeState == .starting || self.nodeState == .stopping { return true }
+            if self.isStartingUp { return true }
+            if self.isApplyingNodeSettings { return true }
+            if self.blockchainInfo?.initialblockdownload == true { return true }
+            if self.isRefreshingInventory { return true }
             let creating = await self.walletManager.isCreatingWallet
             return creating
         }
 
         updateCoord.gracefullyStopNode = { [weak self] in
             guard let self = self else { return }
+
+            // Guard adopted external Knots daemon: never stop an adopted external process automatically
+            if let adoptedPid = self.nodeManager.adoptedPid {
+                throw SoftwareUpdateError.nodeTerminationFailed(
+                    "An external adopted Bitcoin Knots daemon (PID \(adoptedPid)) is running. External daemons must be stopped manually by the operator before updating."
+                )
+            }
+
             await self.nodeManager.stop()
             var waited = 0
             while self.nodeState != .stopped && waited < 30 {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 waited += 1
+            }
+
+            guard self.nodeState == .stopped else {
+                throw SoftwareUpdateError.nodeTerminationFailed(
+                    "Bitcoin Knots daemon did not complete graceful shutdown within 30 seconds."
+                )
             }
         }
 

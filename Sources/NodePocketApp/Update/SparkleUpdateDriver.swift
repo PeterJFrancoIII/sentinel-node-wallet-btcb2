@@ -12,6 +12,15 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public private(set) var updaterController: SPUStandardUpdaterController?
 
+    /// Target release explicitly requested by the operator for installation.
+    public var selectedRelease: AppReleaseInfo?
+
+    /// Safety callback: checks whether wallet operations, IBD sync, or node state transitions are active.
+    public var isBusyCheck: (@MainActor () async -> Bool)?
+
+    /// Safety callback: performs graceful Bitcoin Knots daemon shutdown before relaunch.
+    public var onGracefulShutdownRequested: (@MainActor () async throws -> Void)?
+
     public init(startingUpdater: Bool = true) {
         super.init()
         #if os(macOS)
@@ -35,9 +44,55 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     }
 
     public func installUpdate(release: AppReleaseInfo) async throws {
+        self.selectedRelease = release
         await MainActor.run {
             updaterController?.checkForUpdates(nil)
         }
+    }
+
+    // MARK: - SPUUpdaterDelegate
+
+    public func bestValidUpdate(in appcast: SUAppcast, for updater: SPUUpdater) -> SUAppcastItem? {
+        guard let target = selectedRelease else { return nil }
+        for item in appcast.items {
+            if item.versionString == target.version.rawString ||
+               item.displayVersionString == target.version.shortDescription ||
+               (target.downloadUrl != nil && item.fileURL?.lastPathComponent == target.downloadUrl?.lastPathComponent) {
+                return item
+            }
+        }
+        return nil
+    }
+
+    public func updater(
+        _ updater: SPUUpdater,
+        shouldPostponeRelaunchForUpdate item: SUAppcastItem,
+        untilInvokingBlock installHandler: @escaping () -> Void
+    ) -> Bool {
+        Task { @MainActor in
+            // Safety Check: if wallet or node operations are busy, postpone and do not stop
+            if let isBusy = self.isBusyCheck, await isBusy() {
+                return
+            }
+
+            // Graceful Bitcoin Knots daemon shutdown before relaunch
+            if let shutdown = self.onGracefulShutdownRequested {
+                do {
+                    try await shutdown()
+                } catch {
+                    // Do not invoke installHandler if node shutdown failed or timed out
+                    return
+                }
+            }
+
+            // Clean daemon shutdown confirmed: proceed with app relaunch
+            installHandler()
+        }
+        return true
+    }
+
+    public func updaterShouldRelaunchApplication(_ updater: SPUUpdater) -> Bool {
+        return true
     }
 }
 #endif

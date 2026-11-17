@@ -114,11 +114,9 @@ public struct SoftwareUpdatesSettingsView: View {
                         }
                         .pickerStyle(.segmented)
 
-                        Toggle("Automatically download new updates in the background", isOn: Binding(
-                            get: { coordinator.config.autoDownload },
-                            set: { coordinator.config.autoDownload = $0 }
-                        ))
-                        .font(.caption)
+                        Toggle("Automatically download new updates in the background (Not Implemented - Manual Confirmation Required)", isOn: .constant(false))
+                            .font(.caption)
+                            .disabled(true)
 
                         Text("Silent automatic restart is strictly disabled. You will always be prompted to review and confirm installation before any update is applied.")
                             .font(.caption2)

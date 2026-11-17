@@ -27,15 +27,36 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     /// Safety callback: determines if wallet writes or blockchain sync are currently active.
-    public var isWalletOrNodeBusy: (() async -> Bool)?
+    public var isWalletOrNodeBusy: (() async -> Bool)? {
+        didSet {
+            #if canImport(Sparkle) && !APP_STORE
+            if let sparkle = driver as? SparkleUpdateDriver {
+                sparkle.isBusyCheck = isWalletOrNodeBusy
+            }
+            #endif
+        }
+    }
 
     /// Safety callback: triggers graceful node shutdown before update installation.
-    public var gracefullyStopNode: (() async throws -> Void)?
+    public var gracefullyStopNode: (() async throws -> Void)? {
+        didSet {
+            #if canImport(Sparkle) && !APP_STORE
+            if let sparkle = driver as? SparkleUpdateDriver {
+                sparkle.onGracefulShutdownRequested = gracefullyStopNode
+            }
+            #endif
+        }
+    }
 
     public var installedVersion: AppVersion {
         let bundle = Bundle.main
         let shortVer = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        let buildNum = Int(bundle.infoDictionary?["CFBundleVersion"] as? String ?? "3")
+        let buildStr = bundle.infoDictionary?["CFBundleVersion"] as? String ?? "3"
+        let combined = "\(shortVer) (build \(buildStr))"
+        if let parsed = AppVersion.parse(combined) {
+            return parsed
+        }
+        let buildNum = Int(buildStr)
         return AppVersion(
             major: 1,
             minor: 0,
@@ -65,6 +86,13 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         self.resolver = resolver
         self.appcastUrl = appcastUrl
         self.config = config
+
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = self.driver as? SparkleUpdateDriver {
+            sparkle.isBusyCheck = self.isWalletOrNodeBusy
+            sparkle.onGracefulShutdownRequested = self.gracefullyStopNode
+        }
+        #endif
 
         startScheduledChecks()
     }
@@ -161,7 +189,11 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
             }
         } catch SoftwareUpdateError.notModified {
             config.lastCheckDate = Date()
-            status = .upToDate(lastChecked: Date())
+            if let existing = discoveredRelease {
+                status = .updateAvailable(existing)
+            } else {
+                status = .upToDate(lastChecked: Date())
+            }
         } catch let updateErr as SoftwareUpdateError {
             status = .error(updateErr.localizedDescription)
             errorMessage = updateErr.localizedDescription
@@ -188,12 +220,29 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     }
 
     public func confirmAndInstallUpdate(release: AppReleaseInfo) async throws {
+        // If Mac App Store distribution, binary self-updates from GitHub are forbidden.
+        // Delegate directly to driver (opens App Store product page) without stopping node.
+        if distributionChannel == .macAppStore {
+            try await driver.installUpdate(release: release)
+            return
+        }
+
         // P0 Wallet Safety Check:
         if let isBusy = isWalletOrNodeBusy, await isBusy() {
             throw SoftwareUpdateError.walletActiveOperationInProgress
         }
 
-        // P0 Graceful Node Termination:
+        // For SparkleUpdateDriver, graceful node termination is hooked to Sparkle's
+        // actual relaunch lifecycle (`updater(_:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)`),
+        // ensuring the Bitcoin Knots daemon is NEVER prematurely killed if download fails or user cancels.
+        #if canImport(Sparkle) && !APP_STORE
+        if driver is SparkleUpdateDriver {
+            try await driver.installUpdate(release: release)
+            return
+        }
+        #endif
+
+        // For non-Sparkle drivers (e.g. MockUpdateDriver in tests), stop node cleanly before install
         if let stopAction = gracefullyStopNode {
             do {
                 try await stopAction()
