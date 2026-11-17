@@ -24,6 +24,7 @@ public final class AppState: ObservableObject {
             }
         }
     }
+    @Published public var storageBreakdown: StorageBreakdownSnapshot?
     @Published public var walletSnapshot: WalletSnapshot?
     @Published public var transactions: [TransactionRecord] = []
     @Published public var coinbaseRewards: [CoinbaseRewardDetail] = []
@@ -52,6 +53,10 @@ public final class AppState: ObservableObject {
     @Published public var userPreferredProfile: SyncProfileType = .balanced
     private var lastPowerTransitionTime: Date = Date()
     private var isEvaluatingPower: Bool = false
+
+    // Dynamic Storage Telemetry
+    private var lastStorageMeasurementTime: Date?
+    private var isMeasuringStorage: Bool = false
 
     // Navigation Tab
     @Published public var selectedTab: AppViewTab = .node
@@ -195,6 +200,12 @@ public final class AppState: ObservableObject {
                 self?.networkInfo = netInfo
                 self?.adaptiveETA = eta
                 self?.refreshRollingCoverageIfNeeded(blockchain: binfo)
+                if let datadir = self?.nodeManager.config.dataDirectory {
+                    self?.triggerStorageMeasurementIfNeeded(
+                        dataDirectory: datadir,
+                        rpcSizeOnDisk: binfo.size_on_disk
+                    )
+                }
 
                 // Refresh transactions and wallet snapshot periodically if logged in
                 if let self = self, self.isWalletTabUnlocked, let session = self.authSession {
@@ -273,6 +284,10 @@ public final class AppState: ObservableObject {
             let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
             self.systemHealth = snapshot
             self.evaluatePowerStateAndUltraPolicy(snapshot: snapshot)
+            self.triggerStorageMeasurementIfNeeded(
+                dataDirectory: self.nodeManager.config.dataDirectory,
+                rpcSizeOnDisk: self.blockchainInfo?.size_on_disk
+            )
 
             // Storage safety guard: graceful pause if free space <= 10GB
             if snapshot.freeDiskGB <= 10.0 && self.nodeState != .stopped {
@@ -284,7 +299,31 @@ public final class AppState: ObservableObject {
         }
         let initial = SystemHealthMonitor.shared.checkHealth(dataDirectory: self.nodeManager.config.dataDirectory)
         self.systemHealth = initial
+        triggerStorageMeasurementIfNeeded(
+            dataDirectory: self.nodeManager.config.dataDirectory,
+            rpcSizeOnDisk: nil
+        )
         self.evaluatePowerStateAndUltraPolicy(snapshot: initial)
+    }
+
+    private func triggerStorageMeasurementIfNeeded(dataDirectory: URL, rpcSizeOnDisk: Int64?) {
+        let now = Date()
+        if isMeasuringStorage { return }
+        if let last = lastStorageMeasurementTime, now.timeIntervalSince(last) < 30 {
+            return
+        }
+        isMeasuringStorage = true
+        lastStorageMeasurementTime = now
+        Task { [weak self] in
+            let snapshot = await StorageBreakdownSnapshot.measureAsync(
+                dataDirectory: dataDirectory,
+                rpcSizeOnDisk: rpcSizeOnDisk
+            )
+            await MainActor.run {
+                self?.storageBreakdown = snapshot
+                self?.isMeasuringStorage = false
+            }
+        }
     }
 
     public func evaluatePowerStateAndUltraPolicy(snapshot: SystemHealthSnapshot) {
@@ -735,7 +774,7 @@ public final class AppState: ObservableObject {
         let datadir = nodeManager.config.dataDirectory
         var wipedData = false
 
-        // 2. Remove canonical datadir (~18 GB)
+        // 2. Remove canonical datadir
         if fm.fileExists(atPath: datadir.path) {
             try fm.removeItem(at: datadir)
             wipedData = true
@@ -809,13 +848,14 @@ public final class AppState: ObservableObject {
             try? process.run()
         }
 
+        let totalStorageStr = storageBreakdown?.formattedTotalSize ?? "blockchain"
         return UninstallResult(
             dataWiped: wipedData,
             appBundleTrashed: trashedApp,
             appBundlePath: appBundleURL.path,
             details: trashedApp
-                ? "Sentinel Node Wallet and all 18 GB of blockchain data and supporting files have been completely uninstalled and moved to the Trash."
-                : "All 18 GB of blockchain data and configuration files have been completely erased from your Mac."
+                ? "Sentinel Node Wallet and all \(totalStorageStr) of blockchain data, UTXO state, and supporting files have been completely uninstalled and moved to the Trash."
+                : "All \(totalStorageStr) of blockchain data, UTXO state, and configuration files have been completely erased from your Mac."
         )
     }
 
