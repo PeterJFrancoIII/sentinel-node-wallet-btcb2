@@ -59,7 +59,7 @@ public final class NodeManager: @unchecked Sendable {
             port: config.rpcPort,
             user: config.rpcUser,
             password: config.rpcPassword,
-            isBroadcastRestricted: false
+            isBroadcastRestricted: true
         )
         self.hashrateTracker = HashrateTracker(windowSize: 30)
         self.etaEngine = AdaptiveETAEngine()
