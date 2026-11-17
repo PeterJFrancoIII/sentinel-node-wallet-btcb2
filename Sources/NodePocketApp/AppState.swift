@@ -58,6 +58,7 @@ public final class AppState: ObservableObject {
 
     // V13 Authentication State
     public let authCoordinator: WalletAuthCoordinator
+    public let updateCoordinator: SoftwareUpdateCoordinator
     @Published public var authSession: WalletAuthCapability? = nil
     @Published public var isAuthEnrolled: Bool = false
     @Published public var enrolledUsername: String? = nil
@@ -66,6 +67,7 @@ public final class AppState: ObservableObject {
     @Published public var isMigrationPending: Bool = false
     @Published public var authErrorMessage: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
+    @Published public var showSoftwareUpdatesSheet: Bool = false
 
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
@@ -87,6 +89,8 @@ public final class AppState: ObservableObject {
         let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.walletInventory = inv
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
+        let updateCoord = SoftwareUpdateCoordinator()
+        self.updateCoordinator = updateCoord
         self.storageMode = config.storageMode
         self.selectedProfileType = config.profile.type
         self.userPreferredProfile = config.profile.type
@@ -100,6 +104,41 @@ public final class AppState: ObservableObject {
         setupBindings()
         startHealthMonitoring()
         refreshAuthState()
+
+        updateCoord.isWalletOrNodeBusy = { [weak self] in
+            guard let self = self else { return false }
+            if self.nodeState == .starting || self.nodeState == .stopping { return true }
+            if self.isStartingUp { return true }
+            if self.isApplyingNodeSettings { return true }
+            if self.blockchainInfo?.initialblockdownload == true { return true }
+            if self.isRefreshingInventory { return true }
+            let creating = await self.walletManager.isCreatingWallet
+            return creating
+        }
+
+        updateCoord.gracefullyStopNode = { [weak self] in
+            guard let self = self else { return }
+
+            // Guard adopted external Knots daemon: never stop an adopted external process automatically
+            if let adoptedPid = self.nodeManager.adoptedPid {
+                throw SoftwareUpdateError.nodeTerminationFailed(
+                    "An external adopted Bitcoin Knots daemon (PID \(adoptedPid)) is running. External daemons must be stopped manually by the operator before updating."
+                )
+            }
+
+            await self.nodeManager.stop()
+            var waited = 0
+            while self.nodeState != .stopped && waited < 30 {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                waited += 1
+            }
+
+            guard self.nodeState == .stopped else {
+                throw SoftwareUpdateError.nodeTerminationFailed(
+                    "Bitcoin Knots daemon did not complete graceful shutdown within 30 seconds."
+                )
+            }
+        }
 
         Task {
             await self.refreshPrice()

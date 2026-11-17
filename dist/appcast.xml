@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>Sentinel Node Wallet Updates</title>
+        <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+        <description>Official updates and security notices for Sentinel Node Wallet BTCB2 / XBT.</description>
+        <language>en</language>
+        <item>
+            <title>Sentinel Node Wallet 1.0 (Build 3)</title>
+            <pubDate>Sun, 15 Nov 2026 00:00:00 +0000</pubDate>
+            <sparkle:releaseNotesLink>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3</sparkle:releaseNotesLink>
+            <description>Sentinel Node Wallet v1.0 (Build 3): Direct-download production release for Apple Silicon (arm64). Pinned Bitcoin Knots v29.4.3.knots20260508 consensus validator.</description>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg"
+                sparkle:version="3"
+                sparkle:shortVersionString="1.0"
+                sparkle:os="macos"
+                sparkle:cpu="arm64"
+                length="12429514"
+                type="application/octet-stream" />
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+        </item>
+    </channel>
+</rss>
