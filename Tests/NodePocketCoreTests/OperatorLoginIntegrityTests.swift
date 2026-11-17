@@ -341,8 +341,10 @@ final class OperatorLoginIntegrityTests: XCTestCase {
 
         // Attempting to read should throw unreadableFile
         do {
-            _ = try WalletAuthCoordinator.loadRecordsStrict(from: registryURL)
-            // Note: root user may bypass posix permissions in some environments
+            _ = try WalletAuthCoordinator.loadRecordsStrict(from: registryURL, in: tempDir)
+            if getuid() != 0 {
+                XCTFail("loadRecordsStrict must throw on unreadable file")
+            }
         } catch let err as AuthRegistryStorageError {
             if case .unreadableFile = err {
                 // Expected
@@ -351,6 +353,106 @@ final class OperatorLoginIntegrityTests: XCTestCase {
             }
         } catch {
             XCTFail("Expected AuthRegistryStorageError, got \(error)")
+        }
+    }
+
+    func testLoadRecordsStrictFailClosedOnDirectoryAtPath() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_dir_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        try FileManager.default.createDirectory(at: registryURL, withIntermediateDirectories: true)
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryURL, in: tempDir)) { error in
+            guard let storageErr = error as? AuthRegistryStorageError else {
+                return XCTFail("Expected AuthRegistryStorageError, got \(error)")
+            }
+            if case .unreadableFile(_, let reason) = storageErr {
+                XCTAssertTrue(reason.contains("directory") || reason.contains("Is a directory") || reason.contains("expected a regular file"))
+            } else {
+                XCTFail("Expected unreadableFile, got \(storageErr)")
+            }
+        }
+    }
+
+    func testMissingRegistryInEstablishedNodeFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_est_node_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Create an established node marker: bitcoin.conf
+        let confURL = tempDir.appendingPathComponent("bitcoin.conf")
+        try "server=1\n".write(to: confURL, atomically: true, encoding: .utf8)
+
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryURL, in: tempDir)) { error in
+            guard let storageErr = error as? AuthRegistryStorageError else {
+                return XCTFail("Expected AuthRegistryStorageError, got \(error)")
+            }
+            if case .missingRegistryInEstablishedNode(let path) = storageErr {
+                XCTAssertEqual(path, registryURL.path)
+            } else {
+                XCTFail("Expected missingRegistryInEstablishedNode, got \(storageErr)")
+            }
+        }
+    }
+
+    func testMissingRegistryWithCompletedEnrollmentFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_enrolled_marker_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        UserDefaults.standard.set(true, forKey: "hasCompletedInitialEnrollment")
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryURL, in: tempDir)) { error in
+            guard let storageErr = error as? AuthRegistryStorageError else {
+                return XCTFail("Expected AuthRegistryStorageError, got \(error)")
+            }
+            if case .missingRegistryInEstablishedNode(let path) = storageErr {
+                XCTAssertEqual(path, registryURL.path)
+            } else {
+                XCTFail("Expected missingRegistryInEstablishedNode, got \(storageErr)")
+            }
+        }
+    }
+
+    func testPristineEmptyDirectoryReturnsEmptyDict() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_pristine_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+
+        let records = try WalletAuthCoordinator.loadRecordsStrict(from: registryURL, in: tempDir)
+        XCTAssertTrue(records.isEmpty, "Empty directory with no markers must return empty dictionary for initial setup")
+    }
+
+    func testSymlinkRegistryRejected() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_symlink_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let targetURL = tempDir.appendingPathComponent("real_registry.json")
+        try "{ \"version\": 2, \"users\": {} }".write(to: targetURL, atomically: true, encoding: .utf8)
+
+        let linkURL = tempDir.appendingPathComponent("auth_registry.json")
+        try FileManager.default.createSymbolicLink(at: linkURL, withDestinationURL: targetURL)
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: linkURL, in: tempDir)) { error in
+            guard let storageErr = error as? AuthRegistryStorageError else {
+                return XCTFail("Expected AuthRegistryStorageError, got \(error)")
+            }
+            if case .unreadableFile(_, let reason) = storageErr {
+                XCTAssertTrue(reason.contains("Symbolic links are not permitted"))
+            } else {
+                XCTFail("Expected unreadableFile for symlink, got \(storageErr)")
+            }
         }
     }
 
@@ -425,5 +527,110 @@ final class OperatorLoginIntegrityTests: XCTestCase {
 
         let (v4, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: complex, time: now)
         XCTAssertTrue(v4, "Complex formatted TOTP code must verify")
+    }
+
+    // MARK: - Task (e): Diagnostic Auth Failure Stage Categorization
+
+    func testAuthFailureStageCategorization() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_auth_stage_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let username = "AuditOperator"
+        let password = "AuditPassword123!@#"
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: username)
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        _ = try await coordinator.enroll(
+            username: username,
+            password: password,
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Initial success resets failure stage to nil
+        let stage0 = await coordinator.lastFailureStage
+        XCTAssertNil(stage0, "lastFailureStage must be nil after enrollment/success")
+
+        // 1. Empty username
+        do {
+            _ = try await coordinator.login(username: "", password: password, totpCode: "123456")
+            XCTFail("Must fail on empty username")
+        } catch {}
+        let stage1 = await coordinator.lastFailureStage
+        XCTAssertEqual(stage1, .emptyUsername)
+
+        // 2. Unknown operator
+        do {
+            _ = try await coordinator.login(username: "NonExistentUser", password: password, totpCode: "123456")
+            XCTFail("Must fail on unknown operator")
+        } catch {}
+        let stage2 = await coordinator.lastFailureStage
+        XCTAssertEqual(stage2, .unknownOperator)
+
+        // 3. Password mismatch
+        let now: TimeInterval = 1700000000
+        let validTotp = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: now)
+        do {
+            _ = try await coordinator.login(username: username, password: "WrongPassword!@#", totpCode: validTotp, time: now)
+            XCTFail("Must fail on wrong password")
+        } catch {}
+        let stage3 = await coordinator.lastFailureStage
+        XCTAssertEqual(stage3, .passwordMismatch)
+
+        // 4. Invalid TOTP code
+        do {
+            _ = try await coordinator.login(username: username, password: password, totpCode: "000000", time: now + 30)
+            XCTFail("Must fail on invalid TOTP")
+        } catch {}
+        let stage4 = await coordinator.lastFailureStage
+        XCTAssertEqual(stage4, .totpCodeInvalid)
+
+        // 5. 5-failure lockout triggers accountLockedOut on subsequent attempt
+        for i in 1...3 {
+            do {
+                _ = try await coordinator.login(username: username, password: "WrongPassword!@#", totpCode: validTotp, time: now + Double(i * 30 + 60))
+            } catch {}
+        }
+        // Attempt while locked out
+        do {
+            _ = try await coordinator.login(username: username, password: password, totpCode: validTotp, time: now + 300)
+            XCTFail("Must fail on locked out account")
+        } catch let err as WalletAuthError {
+            if case .rateLimited = err {
+                // Expected
+            } else {
+                XCTFail("Expected rateLimited, got \(err)")
+            }
+        }
+        let stage5 = await coordinator.lastFailureStage
+        XCTAssertEqual(stage5, .accountLockedOut)
+
+        // 6. Successful login clears lastFailureStage
+        let userB = "AuditOperatorB"
+        let passB = "AuditPassword456!@#"
+        let enrollB = try await coordinator.generateEnrollmentSecret(username: userB)
+        let enrollCodeB = WalletAuthCoordinator.generateTOTP(secret: enrollB.secretBase32)
+        _ = try await coordinator.enroll(
+            username: userB,
+            password: passB,
+            secretBase32: enrollB.secretBase32,
+            totpCode: enrollCodeB,
+            recoveryCodes: enrollB.recoveryCodes
+        )
+        let loginTime = Date().timeIntervalSince1970 + 30
+        let successTotp = WalletAuthCoordinator.generateTOTP(secret: enrollB.secretBase32, time: loginTime)
+        _ = try await coordinator.login(username: userB, password: passB, totpCode: successTotp, time: loginTime)
+        let stageSuccess = await coordinator.lastFailureStage
+        XCTAssertNil(stageSuccess, "lastFailureStage must be cleared on successful authentication")
+
+        // 7. Replayed TOTP code triggers totpTimestepReplayed
+        do {
+            _ = try await coordinator.login(username: userB, password: passB, totpCode: successTotp, time: loginTime)
+            XCTFail("Must fail on replayed TOTP timestep")
+        } catch {}
+        let stageReplayed = await coordinator.lastFailureStage
+        XCTAssertEqual(stageReplayed, .totpTimestepReplayed)
     }
 }

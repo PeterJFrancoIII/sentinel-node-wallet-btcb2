@@ -578,7 +578,9 @@ public struct WalletView: View {
                 .frame(maxWidth: 480)
             }
 
-            if !state.isAuthEnrolled || showEnrollmentCard {
+            if let registryError = state.authRegistryError {
+                registryErrorCard(error: registryError)
+            } else if !state.isAuthEnrolled || showEnrollmentCard {
                 enrollmentCard
             } else {
                 loginCard
@@ -586,6 +588,47 @@ public struct WalletView: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity)
+    }
+
+    private func registryErrorCard(error: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.octagon.fill")
+                    .foregroundColor(.red)
+                    .font(.title2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Authentication Registry Error")
+                        .font(.headline)
+                        .foregroundColor(.red)
+                    Text("The authentication registry cannot be loaded securely. Setup and login are blocked to protect existing operator credentials.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Error Details").font(.caption).bold()
+                Text(error)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.textBackgroundColor)))
+            }
+
+            HStack {
+                Button("Retry Reloading Registry") {
+                    state.refreshAuthState()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+        )
+        .frame(maxWidth: 480)
     }
 
     private var enrollmentCard: some View {
