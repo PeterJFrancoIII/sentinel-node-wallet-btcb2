@@ -68,6 +68,23 @@ public struct SystemHealthSnapshot: Sendable {
         return freeDiskGB < 10.0
     }
 
+    public var isDiskSpaceCritical: Bool {
+        guard !isDiskSpaceUnknown else { return false }
+        return freeDiskGB < 2.0
+    }
+
+    public var diskCapacityDescription: String {
+        if isDiskSpaceUnknown {
+            return "Unknown disk capacity"
+        } else if freeDiskBytes == 0 {
+            return "0 B available (Critical: full)"
+        } else if isDiskSpaceLow {
+            return String(format: "%.1f GB available (Low disk space)", freeDiskGB)
+        } else {
+            return String(format: "%.1f GB available", freeDiskGB)
+        }
+    }
+
     public var thermalDescription: String {
         switch thermalState {
         case .nominal: return "Nominal"

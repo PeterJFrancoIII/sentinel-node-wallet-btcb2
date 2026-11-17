@@ -51,6 +51,7 @@ PY
 [ -d "${APP}" ] || fail "Missing built macOS app."
 plutil -lint "${APP}/Contents/Info.plist" >/dev/null
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist" 2>/dev/null || echo "${BUNDLE_ID}")"
+[ "${ACTUAL_BUNDLE_ID}" = "${BUNDLE_ID}" ] || fail "CFBundleIdentifier in Info.plist (${ACTUAL_BUNDLE_ID}) does not match expected BUNDLE_ID (${BUNDLE_ID})"
 
 ENTITLEMENTS="${DIST}/Production.entitlements.plist"
 cat > "${ENTITLEMENTS}" <<EOF
@@ -102,7 +103,7 @@ cat > "${DIST}/BUILD_MANIFEST.json" <<EOF
   "build_type": "developer_id_notarized_candidate",
   "git_commit": "$(git -C "${ROOT_DIR}" rev-parse HEAD)",
   "team_id": "${SENTINEL_APPLE_TEAM_ID}",
-  "bundle_id": "${BUNDLE_ID}",
+  "bundle_id": "${ACTUAL_BUNDLE_ID}",
   "associated_domain": "${DOMAIN}",
   "artifacts": {
     "SentinelNodeWallet_sha256": "${APP_SHA}",

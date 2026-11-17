@@ -8,6 +8,8 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${ROOT_DIR}"
 
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-app.nodepocket.btcb2}"
+
 # Build release configuration with Swift Package Manager
 swift build -c release --arch arm64
 
@@ -74,7 +76,7 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundleExecutable</key>
     <string>SentinelNodeWallet</string>
     <key>CFBundleIdentifier</key>
-    <string>pool.sentineldefensetechnologies.co.za</string>
+    <string>${BUNDLE_ID}</string>
     <key>CFBundleName</key>
     <string>Sentinel Node Wallet</string>
     <key>CFBundleDisplayName</key>
@@ -109,14 +111,29 @@ if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
 fi
 
 # Code sign with Apple Development identity or ad-hoc fallback
-DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
+DEV_IDENTITY="${SENTINEL_DEVELOPER_IDENTITY:-Apple Development: Peter Franco (89V8F6QJC2)}"
 ENTITLEMENTS_FLAG=()
-if [ -f "${ROOT_DIR}/Resources/Development.entitlements.plist" ]; then
-    ENTITLEMENTS_FLAG=(--entitlements "${ROOT_DIR}/Resources/Development.entitlements.plist")
-fi
 
-if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "${DEV_IDENTITY}"; then
     echo "Signing with Developer Identity: ${DEV_IDENTITY}"
+    DEV_TEAM_ID="${SENTINEL_APPLE_TEAM_ID:-S8QMQZA656}"
+    
+    # WO-23: Expand $(TeamIdentifierPrefix) into actual concrete Team ID so codesign embeds valid access group
+    DEV_ENTITLEMENTS="${ROOT_DIR}/dist/Development.entitlements.plist"
+    cat <<EOF > "${DEV_ENTITLEMENTS}"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>${DEV_TEAM_ID}.${BUNDLE_ID}</string>
+    </array>
+</dict>
+</plist>
+EOF
+    ENTITLEMENTS_FLAG=(--entitlements "${DEV_ENTITLEMENTS}")
+
     if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
         find "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" -type f -perm +111 -exec \
             codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" {} +
@@ -128,7 +145,7 @@ else
     if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
         codesign --force --sign - "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
     fi
-    codesign --force --deep --sign - "${ENTITLEMENTS_FLAG[@]}" "${APP_BUNDLE}"
+    codesign --force --deep --sign - "${APP_BUNDLE}"
 fi
 
 # Generate reproducible Build Manifest

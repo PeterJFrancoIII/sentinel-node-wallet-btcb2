@@ -186,6 +186,201 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertTrue(migratedRecord.isTotpInKeychain)
     }
 
+    func testTOTPKeychainUpdateFailureNeverDeletesExistingCredential() throws {
+        defer {
+            WalletAuthCoordinator.resetKeychainCallCounters()
+            WalletAuthCoordinator.clearTestOverrides()
+        }
+
+        let failureStatuses: [OSStatus] = [
+            errSecMissingEntitlement, // -34018
+            errSecAuthFailed,          // -25293
+            errSecInteractionNotAllowed, // -25308
+            errSecUserCanceled,        // -128
+            errSecItemNotFound,        // -25300
+            errSecIO                   // -36
+        ]
+
+        for failureStatus in failureStatuses {
+            WalletAuthCoordinator.resetKeychainCallCounters()
+            WalletAuthCoordinator.clearTestOverrides()
+
+            // SecItemAdd returns duplicate item, forcing an update
+            WalletAuthCoordinator.secItemAddHook = { _, _ in errSecDuplicateItem }
+            // SecItemUpdate fails with the simulated error
+            WalletAuthCoordinator.secItemUpdateHook = { _, _ in failureStatus }
+
+            XCTAssertThrowsError(try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: "operator_synthetic", secretBase32: "JBSWY3DPEHPK3PXP")) { error in
+                guard let authErr = error as? WalletAuthError,
+                      case .storageError(let msg) = authErr else {
+                    XCTFail("Expected storageError but got \(error)")
+                    return
+                }
+                XCTAssertTrue(msg.contains("\(failureStatus)"), "Error must contain status code: \(msg)")
+            }
+
+            // CRITICAL WO-22 ASSERTION: Exactly ZERO calls to SecItemDelete!
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.addItemCount, 1)
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.updateItemCount, 1)
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0,
+                           "Under NO circumstances may SecItemDelete be called when SecItemUpdate fails!")
+        }
+    }
+
+    func testTwoSyntheticLegacyOperatorsWithKeychainMigrationFailureAndRecovery() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_two_user_migration_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            WalletAuthCoordinator.resetKeychainCallCounters()
+            WalletAuthCoordinator.clearTestOverrides()
+        }
+
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+
+        // 1. Create two synthetic operators with unmigrated legacy TOTP secrets
+        let salt1 = try WalletAuthCoordinator.randomBytes(count: 32)
+        let passHash1 = try WalletAuthCoordinator.deriveKey(password: "SyntheticPassword1!#", salt: salt1)
+        let record1 = AuthRegistryRecord(
+            username: "synthetic_alpha",
+            saltHex: salt1.map { String(format: "%02x", $0) }.joined(),
+            passwordHashHex: passHash1.map { String(format: "%02x", $0) }.joined(),
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: "JBSWY3DPEHPK3PXP",
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+
+        let salt2 = try WalletAuthCoordinator.randomBytes(count: 32)
+        let passHash2 = try WalletAuthCoordinator.deriveKey(password: "SyntheticPassword2!#", salt: salt2)
+        let record2 = AuthRegistryRecord(
+            username: "synthetic_beta",
+            saltHex: salt2.map { String(format: "%02x", $0) }.joined(),
+            passwordHashHex: passHash2.map { String(format: "%02x", $0) }.joined(),
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: "KRUGS4ZANFZSAYJA",
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+
+        let records = ["synthetic_alpha": record1, "synthetic_beta": record2]
+        let multiRegistry = MultiAuthRegistry(version: 2, users: records)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(multiRegistry)
+        try data.write(to: registryURL)
+
+        // 2. Stage A: Simulate missing entitlement (-34018)
+        WalletAuthCoordinator.resetKeychainCallCounters()
+        WalletAuthCoordinator.secItemAddHook = { _, _ in errSecDuplicateItem }
+        WalletAuthCoordinator.secItemUpdateHook = { _, _ in errSecMissingEntitlement }
+
+        _ = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Assert zero SecItemDelete was invoked across both operators
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0,
+                       "SecItemDelete must NOT be called on failed entitlement!")
+
+        // Read registry from disk and verify both accounts are completely intact
+        let diskDataA = try Data(contentsOf: registryURL)
+        let diskRecordsA = try JSONDecoder().decode(MultiAuthRegistry.self, from: diskDataA).users
+        XCTAssertEqual(diskRecordsA.count, 2)
+        XCTAssertEqual(diskRecordsA["synthetic_alpha"]?.legacyTotpSecretBase32, "JBSWY3DPEHPK3PXP")
+        XCTAssertFalse(diskRecordsA["synthetic_alpha"]?.isTotpInKeychain ?? true)
+        XCTAssertEqual(diskRecordsA["synthetic_alpha"]?.failedAttempts, 0)
+
+        XCTAssertEqual(diskRecordsA["synthetic_beta"]?.legacyTotpSecretBase32, "KRUGS4ZANFZSAYJA")
+        XCTAssertFalse(diskRecordsA["synthetic_beta"]?.isTotpInKeychain ?? true)
+        XCTAssertEqual(diskRecordsA["synthetic_beta"]?.failedAttempts, 0)
+
+        // 3. Stage B: Simulate compatible signed migration succeeding
+        WalletAuthCoordinator.resetKeychainCallCounters()
+        final class MockStorage: @unchecked Sendable {
+            private let lock = NSLock()
+            private var dict: [String: String] = [:]
+            func set(_ val: String, for k: String) { lock.lock(); defer { lock.unlock() }; dict[k] = val }
+            func get(_ k: String) -> String? { lock.lock(); defer { lock.unlock() }; return dict[k] }
+        }
+        let mockStorage = MockStorage()
+
+        WalletAuthCoordinator.secItemAddHook = { query, _ in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let data = q[kSecValueData as String] as? Data,
+                  let secret = String(data: data, encoding: .utf8) else {
+                return errSecParam
+            }
+            mockStorage.set(secret, for: account)
+            return errSecSuccess
+        }
+        WalletAuthCoordinator.secItemUpdateHook = { query, attrs in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let a = attrs as? [String: Any],
+                  let data = a[kSecValueData as String] as? Data,
+                  let secret = String(data: data, encoding: .utf8) else {
+                return errSecParam
+            }
+            mockStorage.set(secret, for: account)
+            return errSecSuccess
+        }
+        WalletAuthCoordinator.secItemCopyMatchingHook = { query, result in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let secret = mockStorage.get(account) else {
+                return errSecItemNotFound
+            }
+            if let res = result {
+                let data = secret.data(using: .utf8)! as CFData
+                res.pointee = data
+            }
+            return errSecSuccess
+        }
+
+        // Re-initialize coordinator with working Keychain
+        let workingCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Verify on-disk registry now safely migrated both accounts
+        let diskDataB = try Data(contentsOf: registryURL)
+        let diskRecordsB = try JSONDecoder().decode(MultiAuthRegistry.self, from: diskDataB).users
+        XCTAssertEqual(diskRecordsB.count, 2)
+
+        XCTAssertNil(diskRecordsB["synthetic_alpha"]?.legacyTotpSecretBase32, "Alpha legacy secret safely removed")
+        XCTAssertTrue(diskRecordsB["synthetic_alpha"]?.isTotpInKeychain ?? false)
+        XCTAssertEqual(diskRecordsB["synthetic_alpha"]?.failedAttempts, 0)
+
+        XCTAssertNil(diskRecordsB["synthetic_beta"]?.legacyTotpSecretBase32, "Beta legacy secret safely removed")
+        XCTAssertTrue(diskRecordsB["synthetic_beta"]?.isTotpInKeychain ?? false)
+        XCTAssertEqual(diskRecordsB["synthetic_beta"]?.failedAttempts, 0)
+
+        // Both accounts can authenticate cleanly with their password and correct TOTP
+        let time = Date().timeIntervalSince1970
+        let codeAlpha = WalletAuthCoordinator.generateTOTP(secret: "JBSWY3DPEHPK3PXP", time: time)
+        let capAlpha = try await workingCoordinator.login(
+            username: "synthetic_alpha",
+            password: "SyntheticPassword1!#",
+            totpCode: codeAlpha
+        )
+        XCTAssertEqual(capAlpha.username, "synthetic_alpha")
+
+        let codeBeta = WalletAuthCoordinator.generateTOTP(secret: "KRUGS4ZANFZSAYJA", time: time)
+        let capBeta = try await workingCoordinator.login(
+            username: "synthetic_beta",
+            password: "SyntheticPassword2!#",
+            totpCode: codeBeta
+        )
+        XCTAssertEqual(capBeta.username, "synthetic_beta")
+    }
+
     func testLoginWithLegacyFallbackRequiresDeviceOwnerAndPurgesPlaintext() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_login_fallback_\(UUID().uuidString)")

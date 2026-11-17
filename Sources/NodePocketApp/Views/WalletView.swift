@@ -1129,12 +1129,33 @@ public struct WalletView: View {
                 if !credentialsFound || loginPassword.isEmpty {
                     let picker = AppleSavedPasswordCoordinator()
                     picker.onCredential = { user, pass in
-                        loginUsername = user
+                        let cleanReturnedUser = user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        let cleanTarget = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+                        // WO-23: Prevent cross-user autofill; verify returned user against selected operator
+                        if !cleanTarget.isEmpty && !cleanReturnedUser.isEmpty && cleanReturnedUser != cleanTarget {
+                            if state.enrolledUsernames.contains(cleanReturnedUser) {
+                                loginUsername = cleanReturnedUser
+                            } else {
+                                authLocalError = "Autofill returned credentials for '\(user)', which does not match selected operator '\(target)'."
+                                appleSavedPasswordCoordinator = nil
+                                return
+                            }
+                        } else if !cleanReturnedUser.isEmpty {
+                            loginUsername = cleanReturnedUser
+                        }
+
                         loginPassword = pass
-                        isApplePasswordSaved = true
                         authLocalError = nil
                         appleSavedPasswordCoordinator = nil
-                        try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: pass)
+
+                        // WO-22 & WO-23: Set isApplePasswordSaved only if persistence succeeds; prevent false green state
+                        do {
+                            try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: loginUsername, password: pass)
+                            isApplePasswordSaved = true
+                        } catch {
+                            isApplePasswordSaved = false
+                        }
                         Task { @MainActor in
                             if let refreshed = try? await state.retrieveOperatorCredentialsWithBiometrics(username: user),
                                let c = refreshed.totpCode {

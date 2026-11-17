@@ -1,10 +1,52 @@
 import Foundation
 import NodePocketCore
 
+final class BroadcastLockSpyURLProtocol: URLProtocol {
+    static var outboundRequestCount: Int = 0
+    static var interceptedRequests: [URLRequest] = []
+
+    static func reset() {
+        outboundRequestCount = 0
+        interceptedRequests = []
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        outboundRequestCount += 1
+        interceptedRequests.append(request)
+        return true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "http://127.0.0.1:59999")!,
+            statusCode: 200,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Content-Type": "application/json"]
+        )!
+        let responseData = """
+        {"result":{"chain":"main","blocks":900000,"headers":900000,"bestblockhash":"0000000000000000000000000000000000000000000000000000000000000000","verificationprogress":0.99999,"initialblockdownload":false,"pruned":false},"error":null,"id":"1"}
+        """.data(using: .utf8)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: responseData)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 @main
 struct ReleaseLockVerifier {
     static func main() async {
-        print("=== Sentinel Node Wallet BTCB2: Release Mode Broadcast Gate Verifier ===")
+        print("=== Sentinel Node Wallet BTCB2: Release Mode Broadcast Gate Verifier (WO-25 CI) ===")
+
+        BroadcastLockSpyURLProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BroadcastLockSpyURLProtocol.self]
+        let spySession = URLSession(configuration: config)
 
         // 1. Instantiate with isBroadcastRestricted: false
         let client = BitcoinRPCClient(
@@ -12,6 +54,7 @@ struct ReleaseLockVerifier {
             port: 59999,
             user: "testuser",
             password: "testpassword",
+            urlSession: spySession,
             isBroadcastRestricted: false
         )
 
@@ -85,21 +128,24 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: bumpFee helper threw unexpected error: \(error)")
         }
 
-        // 6. Verify read-only RPC is NOT blocked by broadcast restriction
-        do {
-            _ = try await client.getBlockchainInfo()
-            fatalError("Unexpected success on closed port")
-        } catch let err as RPCClientError {
-            if case .transactionBroadcastDisabled = err {
-                fatalError("FAILURE: Read-only getBlockchainInfo was incorrectly blocked by broadcast restriction!")
-            } else if case .networkError = err {
-                print("✓ Verified: Read-only getBlockchainInfo passed broadcast gate (expected network error on closed port: \(err)).")
-            } else {
-                print("✓ Verified: Read-only getBlockchainInfo passed broadcast gate (error: \(err)).")
-            }
-        } catch {
-            print("✓ Verified: Read-only getBlockchainInfo passed broadcast gate (error: \(error)).")
+        // 6. Assert Spy URLProtocol intercepted EXACTLY ZERO outbound network requests for blocked RPCs
+        guard BroadcastLockSpyURLProtocol.outboundRequestCount == 0 else {
+            fatalError("FAILURE: Spy URLProtocol intercepted \(BroadcastLockSpyURLProtocol.outboundRequestCount) outbound requests! Expected exactly 0 for blocked spend RPCs.")
         }
+        print("✓ Verified: Spy URLProtocol intercepted exactly ZERO outbound requests for blocked spend RPC methods.")
+
+        // 7. Verify read-only RPC is NOT blocked by broadcast restriction and successfully reaches URLSession transport
+        do {
+            let info = try await client.getBlockchainInfo()
+            print("✓ Verified: Read-only getBlockchainInfo passed broadcast gate and reached transport (chain: \(info.chain), blocks: \(info.blocks)).")
+        } catch {
+            fatalError("FAILURE: Read-only getBlockchainInfo unexpectedly failed: \(error)")
+        }
+
+        guard BroadcastLockSpyURLProtocol.outboundRequestCount == 1 else {
+            fatalError("FAILURE: Expected exactly 1 outbound request for read-only getBlockchainInfo, got \(BroadcastLockSpyURLProtocol.outboundRequestCount)")
+        }
+        print("✓ Verified: Read-only RPC successfully executed exactly 1 outbound transport request.")
 
         print("=== RELEASE BROADCAST GATE VERIFICATION: 100% SUCCESS ===")
     }

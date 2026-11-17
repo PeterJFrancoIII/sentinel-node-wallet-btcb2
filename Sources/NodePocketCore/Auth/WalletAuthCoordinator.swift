@@ -1388,6 +1388,85 @@ public actor WalletAuthCoordinator {
 
     // MARK: - Keychain TOTP Storage (P0-1 & P0-5 Hardened)
 
+    #if DEBUG
+    public struct KeychainCallCounters: Sendable {
+        public var addItemCount: Int = 0
+        public var updateItemCount: Int = 0
+        public var deleteItemCount: Int = 0
+        public var copyMatchingCount: Int = 0
+
+        public init(addItemCount: Int = 0, updateItemCount: Int = 0, deleteItemCount: Int = 0, copyMatchingCount: Int = 0) {
+            self.addItemCount = addItemCount
+            self.updateItemCount = updateItemCount
+            self.deleteItemCount = deleteItemCount
+            self.copyMatchingCount = copyMatchingCount
+        }
+    }
+
+    public typealias SecItemAddHook = @Sendable (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
+    public typealias SecItemUpdateHook = @Sendable (CFDictionary, CFDictionary) -> OSStatus
+    public typealias SecItemDeleteHook = @Sendable (CFDictionary) -> OSStatus
+    public typealias SecItemCopyMatchingHook = @Sendable (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
+
+    public static var keychainCounters = KeychainCallCounters()
+    public static var secItemAddHook: SecItemAddHook?
+    public static var secItemUpdateHook: SecItemUpdateHook?
+    public static var secItemDeleteHook: SecItemDeleteHook?
+    public static var secItemCopyMatchingHook: SecItemCopyMatchingHook?
+
+    public static func resetKeychainCallCounters() {
+        keychainCounters = KeychainCallCounters()
+        secItemAddHook = nil
+        secItemUpdateHook = nil
+        secItemDeleteHook = nil
+        secItemCopyMatchingHook = nil
+    }
+    #endif
+
+    @discardableResult
+    private static func secItemAdd(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>? = nil) -> OSStatus {
+        #if DEBUG
+        keychainCounters.addItemCount += 1
+        if let hook = secItemAddHook {
+            return hook(query, result)
+        }
+        #endif
+        return SecItemAdd(query, result)
+    }
+
+    @discardableResult
+    private static func secItemUpdate(_ query: CFDictionary, _ attributesToUpdate: CFDictionary) -> OSStatus {
+        #if DEBUG
+        keychainCounters.updateItemCount += 1
+        if let hook = secItemUpdateHook {
+            return hook(query, attributesToUpdate)
+        }
+        #endif
+        return SecItemUpdate(query, attributesToUpdate)
+    }
+
+    @discardableResult
+    private static func secItemDelete(_ query: CFDictionary) -> OSStatus {
+        #if DEBUG
+        keychainCounters.deleteItemCount += 1
+        if let hook = secItemDeleteHook {
+            return hook(query)
+        }
+        #endif
+        return SecItemDelete(query)
+    }
+
+    @discardableResult
+    private static func secItemCopyMatching(_ query: CFDictionary, _ result: UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus {
+        #if DEBUG
+        keychainCounters.copyMatchingCount += 1
+        if let hook = secItemCopyMatchingHook {
+            return hook(query, result)
+        }
+        #endif
+        return SecItemCopyMatching(query, result)
+    }
+
     public static func saveTOTPSecretToKeychain(username: String, secretBase32: String) throws {
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let data = secretBase32.data(using: .utf8) else {
@@ -1410,9 +1489,11 @@ public actor WalletAuthCoordinator {
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
 
-        // Atomic write: attempt SecItemAdd first; if item exists, update it.
-        // Never delete an existing credential before replacement is confirmed.
-        var status = SecItemAdd(query as CFDictionary, nil)
+        // Atomic write: attempt secItemAdd first; if item exists, update it via secItemUpdate.
+        // WO-22 Non-Destructive Keychain Migration: Under NO circumstances may an existing credential
+        // be deleted on update failure. If secItemUpdate fails, retain existing item bytes and ACL
+        // completely untouched, propagate typed failure, and do NOT mark TOTP migration complete.
+        var status = secItemAdd(query as CFDictionary, nil)
         if status == errSecDuplicateItem {
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -1423,12 +1504,7 @@ public actor WalletAuthCoordinator {
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
-            status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
-            if status != errSecSuccess {
-                // If update failed (e.g. migrating away from an item with legacy SecAccessControl), delete and re-add
-                SecItemDelete(updateQuery as CFDictionary)
-                status = SecItemAdd(query as CFDictionary, nil)
-            }
+            status = secItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
         }
 
         #if DEBUG
@@ -1470,14 +1546,14 @@ public actor WalletAuthCoordinator {
         ]
 
         var dataTypeRef: AnyObject?
-        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = secItemCopyMatching(query as CFDictionary, &dataTypeRef)
 
         if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
             // Supply authentication context with localized reason for items with .userPresence ACL
             let context = LAContext()
             context.localizedReason = "Authenticate to unlock Sentinel Node Wallet 2FA secret"
             query[kSecUseAuthenticationContext as String] = context
-            status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+            status = secItemCopyMatching(query as CFDictionary, &dataTypeRef)
         }
 
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
@@ -1498,7 +1574,7 @@ public actor WalletAuthCoordinator {
             kSecAttrService as String: "app.nodepocket.btcb2.auth",
             kSecAttrAccount as String: account
         ]
-        SecItemDelete(query as CFDictionary)
+        secItemDelete(query as CFDictionary)
     }
 
     // MARK: - Operator Login Password Keychain & Apple Passwords Storage
@@ -1522,7 +1598,7 @@ public actor WalletAuthCoordinator {
             kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         ]
 
-        var status = SecItemAdd(query as CFDictionary, nil)
+        var status = secItemAdd(query as CFDictionary, nil)
         if status == errSecDuplicateItem {
             let updateQuery: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
@@ -1533,7 +1609,7 @@ public actor WalletAuthCoordinator {
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
             ]
-            status = SecItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
+            status = secItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
         }
 
         #if DEBUG
@@ -1574,13 +1650,13 @@ public actor WalletAuthCoordinator {
         ]
 
         var dataTypeRef: AnyObject?
-        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = secItemCopyMatching(query as CFDictionary, &dataTypeRef)
         if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
             let context = LAContext()
             context.localizedReason = "Authenticate to unlock Sentinel Node Wallet saved password"
             var interactiveQuery = query
             interactiveQuery[kSecUseAuthenticationContext as String] = context
-            status = SecItemCopyMatching(interactiveQuery as CFDictionary, &dataTypeRef)
+            status = secItemCopyMatching(interactiveQuery as CFDictionary, &dataTypeRef)
         }
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
             throw WalletAuthError.storageError("Failed to load operator password from Keychain: status \(status)")
@@ -1599,7 +1675,7 @@ public actor WalletAuthCoordinator {
             kSecAttrService as String: "app.nodepocket.btcb2.auth",
             kSecAttrAccount as String: account
         ]
-        SecItemDelete(query as CFDictionary)
+        secItemDelete(query as CFDictionary)
     }
 
     // MARK: - Registry Storage
