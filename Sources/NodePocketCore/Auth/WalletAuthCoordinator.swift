@@ -347,8 +347,63 @@ public actor WalletAuthCoordinator {
         simulatedKeychainFailureStatus = nil
         resetKeychainCallCounters()
         UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let defaults = UserDefaults.standard.dictionaryRepresentation()
+        for key in defaults.keys where key.hasPrefix("nodepocket_auth_lockout_fallback_") {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
     }
 #endif
+
+    // MARK: - WO-33 Durable Lockout & Rate-Limit Fallback Persistence
+
+    public static func fallbackLockoutKey(username: String) -> String {
+        return "nodepocket_auth_lockout_fallback_" + username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    public static func saveDurableLockoutFallback(username: String, failedAttempts: Int, lockedUntil: Date?) {
+        let key = fallbackLockoutKey(username: username)
+        var dict: [String: Any] = [
+            "failedAttempts": failedAttempts
+        ]
+        if let lock = lockedUntil {
+            dict["lockedUntil"] = lock.timeIntervalSince1970
+        }
+        UserDefaults.standard.set(dict, forKey: key)
+    }
+
+    public static func loadDurableLockoutFallback(username: String) -> (failedAttempts: Int, lockedUntil: Date?)? {
+        let key = fallbackLockoutKey(username: username)
+        guard let dict = UserDefaults.standard.dictionary(forKey: key),
+              let attempts = dict["failedAttempts"] as? Int else {
+            return nil
+        }
+        var lockDate: Date? = nil
+        if let ts = dict["lockedUntil"] as? TimeInterval {
+            lockDate = Date(timeIntervalSince1970: ts)
+        }
+        return (failedAttempts: attempts, lockedUntil: lockDate)
+    }
+
+    public static func clearDurableLockoutFallback(username: String) {
+        let key = fallbackLockoutKey(username: username)
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    public static func mergeDurableLockoutFallback(into records: inout [String: AuthRegistryRecord]) {
+        for (key, var rec) in records {
+            if let fallback = loadDurableLockoutFallback(username: key) {
+                if fallback.failedAttempts > rec.failedAttempts {
+                    rec.failedAttempts = fallback.failedAttempts
+                }
+                if let lock = fallback.lockedUntil {
+                    if rec.lockedUntil == nil || lock > (rec.lockedUntil ?? .distantPast) {
+                        rec.lockedUntil = lock
+                    }
+                }
+                records[key] = rec
+            }
+        }
+    }
 
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
@@ -356,6 +411,7 @@ public actor WalletAuthCoordinator {
         do {
             self.records = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
             self.registryLoadError = nil
+            Self.mergeDurableLockoutFallback(into: &self.records)
         } catch let err as AuthRegistryStorageError {
             self.records = [:]
             self.registryLoadError = err
@@ -398,7 +454,8 @@ public actor WalletAuthCoordinator {
 
     public func reloadRecordsFromDisk() throws {
         do {
-            let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            var reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            Self.mergeDurableLockoutFallback(into: &reloaded)
             self.records = reloaded
             self.registryLoadError = nil
         } catch let err as AuthRegistryStorageError {
@@ -415,6 +472,12 @@ public actor WalletAuthCoordinator {
     public var record: AuthRegistryRecord? {
         records.values.first
     }
+
+    #if DEBUG
+    public func getRecordForTesting(username: String) -> AuthRegistryRecord? {
+        records[username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()]
+    }
+    #endif
 
     /// Indicates whether a legacy plaintext credential is still awaiting verified Keychain migration.
     public var isMigrationPending: Bool {
@@ -614,6 +677,7 @@ public actor WalletAuthCoordinator {
                     merged[key] = diskRec
                 }
             }
+            Self.mergeDurableLockoutFallback(into: &merged)
             self.records = merged
             self.registryLoadError = nil
         } catch let err as AuthRegistryStorageError {
@@ -802,6 +866,7 @@ public actor WalletAuthCoordinator {
         freshRec.lockedUntil = nil
         self.records[userKey] = freshRec
         try saveRecords()
+        Self.clearDurableLockoutFallback(username: userKey)
 
         // Automatically update/save operator login password in macOS Keychain / Apple Passwords
         do {
@@ -857,6 +922,7 @@ public actor WalletAuthCoordinator {
                     merged[key] = diskRec
                 }
             }
+            Self.mergeDurableLockoutFallback(into: &merged)
             self.records = merged
             self.registryLoadError = nil
         } catch let err as AuthRegistryStorageError {
@@ -1024,6 +1090,7 @@ public actor WalletAuthCoordinator {
         freshRec.lockedUntil = nil
         self.records[userKey] = freshRec
         try saveRecords()
+        Self.clearDurableLockoutFallback(username: userKey)
 
         recordAuthSuccess()
         let session = WalletAuthCapability(
@@ -1226,12 +1293,20 @@ public actor WalletAuthCoordinator {
         self.records[userKey] = rec
         do {
             try saveRecords()
+            Self.clearDurableLockoutFallback(username: userKey)
         } catch let storageErr as AuthRegistryStorageError {
             self.registryLoadError = storageErr
             recordAuthFailure(.registryUnavailable)
+            // WO-33 Durable Lockout & Fail-Closed Policy: Persist fallback lockout in UserDefaults
+            // so counter cannot be reset by process crash / reboot, and fail closed immediately.
+            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: rec.failedAttempts, lockedUntil: rec.lockedUntil)
+            return WalletAuthError.registryStorageError(storageErr)
         } catch {
-            self.registryLoadError = .writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
+            let writeErr = AuthRegistryStorageError.writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = writeErr
             recordAuthFailure(.registryUnavailable)
+            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: rec.failedAttempts, lockedUntil: rec.lockedUntil)
+            return WalletAuthError.registryStorageError(writeErr)
         }
         if isLockedOut {
             return WalletAuthError.rateLimited(secondsRemaining: penaltySeconds)

@@ -799,4 +799,154 @@ final class OperatorLoginIntegrityTests: XCTestCase {
         XCTAssertEqual(activePassword, "SecondaryPass456!")
         XCTAssertEqual(activeTotp, "654321")
     }
+
+    // MARK: - WO-32: Native AppleSavedPasswordCoordinator Lifecycle & Cancellation Tests
+
+    @MainActor
+    func testAppleSavedPasswordCoordinatorCancelInvokesOnCancelAndResetsTerminalState() {
+        let mockExecutor = MockAppleSavedPasswordRequestExecutor()
+        let coordinator = AppleSavedPasswordCoordinator(executor: mockExecutor)
+
+        var cancelCount = 0
+        var failureCount = 0
+        var credentialCount = 0
+
+        coordinator.onCancel = { cancelCount += 1 }
+        coordinator.onFailure = { _ in failureCount += 1 }
+        coordinator.onCredential = { _, _ in credentialCount += 1 }
+
+        coordinator.requestSavedLogin(isInteractive: true)
+        XCTAssertTrue(mockExecutor.isExecuteCalled)
+
+        // Trigger native cancel from system credential picker
+        mockExecutor.triggerCancel?()
+
+        XCTAssertEqual(cancelCount, 1, "onCancel must be invoked exactly once on picker cancellation")
+        XCTAssertEqual(failureCount, 0, "onFailure must not be invoked on cancellation")
+        XCTAssertEqual(credentialCount, 0, "onCredential must not be invoked on cancellation")
+
+        // Terminal state check: subsequent late invocations on old closure must be no-op
+        mockExecutor.triggerCancel?()
+        XCTAssertEqual(cancelCount, 1, "Late cancellation trigger must be discarded by terminal state")
+
+        // Verify coordinator can immediately initiate another request cleanly
+        var secondCancelCount = 0
+        coordinator.onCancel = { secondCancelCount += 1 }
+        coordinator.requestSavedLogin(isInteractive: true)
+        mockExecutor.triggerCancel?()
+        XCTAssertEqual(secondCancelCount, 1, "Subsequent request must function cleanly without getting stuck")
+    }
+
+    @MainActor
+    func testAppleSavedPasswordCoordinatorFailureInvokesOnFailureExactlyOnce() {
+        let mockExecutor = MockAppleSavedPasswordRequestExecutor()
+        let coordinator = AppleSavedPasswordCoordinator(executor: mockExecutor)
+
+        var cancelCount = 0
+        var receivedError: String? = nil
+        var credentialCount = 0
+
+        coordinator.onCancel = { cancelCount += 1 }
+        coordinator.onFailure = { err in receivedError = err }
+        coordinator.onCredential = { _, _ in credentialCount += 1 }
+
+        coordinator.requestSavedLogin(isInteractive: true)
+        mockExecutor.triggerFailure?("System authentication service unavailable.")
+
+        XCTAssertEqual(receivedError, "System authentication service unavailable.")
+        XCTAssertEqual(cancelCount, 0)
+        XCTAssertEqual(credentialCount, 0)
+
+        // Stale callback discarded
+        mockExecutor.triggerFailure?("Second error")
+        XCTAssertEqual(receivedError, "System authentication service unavailable.")
+    }
+
+    @MainActor
+    func testAppleSavedPasswordCoordinatorSuccessInvokesOnCredentialExactlyOnce() {
+        let mockExecutor = MockAppleSavedPasswordRequestExecutor()
+        let coordinator = AppleSavedPasswordCoordinator(executor: mockExecutor)
+
+        var returnedUser: String? = nil
+        var returnedPass: String? = nil
+        var cancelCount = 0
+        var failureCount = 0
+
+        coordinator.onCancel = { cancelCount += 1 }
+        coordinator.onFailure = { _ in failureCount += 1 }
+        coordinator.onCredential = { user, pass in
+            returnedUser = user
+            returnedPass = pass
+        }
+
+        coordinator.requestSavedLogin(isInteractive: true)
+        mockExecutor.triggerSuccess?("operator_verified", "VerifiedStrongPass123!@#")
+
+        XCTAssertEqual(returnedUser, "operator_verified")
+        XCTAssertEqual(returnedPass, "VerifiedStrongPass123!@#")
+        XCTAssertEqual(cancelCount, 0)
+        XCTAssertEqual(failureCount, 0)
+
+        // Late callback discarded
+        mockExecutor.triggerSuccess?("other_user", "OtherPass")
+        XCTAssertEqual(returnedUser, "operator_verified")
+    }
+
+    @MainActor
+    func testAppleSavedPasswordCoordinatorInFlightCancellationDropsLateCallbacks() {
+        let mockExecutor = MockAppleSavedPasswordRequestExecutor()
+        let coordinator = AppleSavedPasswordCoordinator(executor: mockExecutor)
+
+        var cancelCount = 0
+        var failureCount = 0
+        var credentialCount = 0
+
+        coordinator.onCancel = { cancelCount += 1 }
+        coordinator.onFailure = { _ in failureCount += 1 }
+        coordinator.onCredential = { _, _ in credentialCount += 1 }
+
+        coordinator.requestSavedLogin(isInteractive: true)
+        // User switches operator or dismisses before callback arrives
+        coordinator.cancel()
+        XCTAssertTrue(mockExecutor.isCancelCalled)
+
+        // Stale late response arrives from OS
+        mockExecutor.triggerSuccess?("stale_operator", "StalePassword123")
+        mockExecutor.triggerFailure?("Stale failure")
+        mockExecutor.triggerCancel?()
+
+        XCTAssertEqual(credentialCount, 0, "No credentials delivered after explicit cancellation")
+        XCTAssertEqual(failureCount, 0, "No failure delivered after explicit cancellation")
+        XCTAssertEqual(cancelCount, 0, "No cancel callback delivered after explicit cancellation")
+    }
+}
+
+final class MockAppleSavedPasswordRequestExecutor: AppleSavedPasswordRequestExecuting {
+    var isExecuteCalled: Bool = false
+    var isCancelCalled: Bool = false
+    var lastInteractive: Bool = true
+
+    var triggerSuccess: ((String, String) -> Void)?
+    var triggerFailure: ((String) -> Void)?
+    var triggerCancel: (() -> Void)?
+
+    func executeRequest(
+        isInteractive: Bool,
+        onSuccess: @escaping (String, String) -> Void,
+        onFailure: @escaping (String) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.isExecuteCalled = true
+        self.lastInteractive = isInteractive
+        self.triggerSuccess = onSuccess
+        self.triggerFailure = onFailure
+        self.triggerCancel = onCancel
+    }
+
+    func cancel() {
+        self.isCancelCalled = true
+        self.triggerSuccess = nil
+        self.triggerFailure = nil
+        self.triggerCancel = nil
+    }
 }

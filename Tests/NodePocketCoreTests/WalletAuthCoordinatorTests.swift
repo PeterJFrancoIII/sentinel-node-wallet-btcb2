@@ -142,7 +142,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_migration_fault_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         // Write an initial registry record with legacy plaintext TOTP
         let initialRecord = AuthRegistryRecord(
@@ -385,7 +388,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_login_fallback_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let salt = try WalletAuthCoordinator.randomBytes(count: 32)
         let hash = try WalletAuthCoordinator.deriveKey(password: "MigratePassword123!@#", salt: salt)
@@ -454,7 +460,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         let isEnrolledInitially = await coordinator.isEnrolled
@@ -546,7 +555,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_rate_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator")
@@ -589,7 +601,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_rec_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -631,7 +646,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_approval_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -719,7 +737,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_concurrent_login_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         WalletAuthCoordinator.clearTestOverrides()
         WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
@@ -794,7 +815,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_abort_prompt_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let salt = try WalletAuthCoordinator.randomBytes(count: 32)
         let hash = try WalletAuthCoordinator.deriveKey(password: "TestPassword123!@#", salt: salt)
@@ -867,7 +891,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_abort_recovery_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         WalletAuthCoordinator.clearTestOverrides()
         WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
@@ -929,7 +956,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_backup_auth_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -1024,7 +1054,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_backup_overwrite_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -1306,7 +1339,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_pipeline_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1393,7 +1429,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_rpc_fail_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1471,7 +1510,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_empty_staged_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1546,7 +1588,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
     func testPurgeStaleStagingDirectoriesRemovesOldSessions() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_purge_stale_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1585,7 +1630,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_bio_autofill_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
 
@@ -1634,7 +1682,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_totp_oracle_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         let enrollment = try await coordinator.generateEnrollmentSecret(username: "totp_operator")
@@ -1689,7 +1740,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_reload_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         let enrollment = try await coordinator.generateEnrollmentSecret(username: "reload_user")
@@ -1825,7 +1879,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
     func testFailedAttemptPersistenceErrorRecordsFailureWithoutCorruptingLockout() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_auth_fail_persist_" + UUID().uuidString)
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
         defer { WalletAuthCoordinator.clearTestOverrides() }
@@ -1847,18 +1904,15 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         // Make the containing dataDirectory non-writable (mode 0555) to trigger storage write failure during registerFailedAttempt
         try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: tempDir.path)
-        defer {
-            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
-        }
 
-        // Attempt 1: bad password
+        // Attempt 1: bad password with non-writable storage
         let badPassword = validPassword + "_wrong"
         do {
             _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
-            XCTFail("Login with bad password must throw")
+            XCTFail("Login with bad password under broken storage must throw")
         } catch let error as WalletAuthError {
-            guard case .invalidCredentials = error else {
-                XCTFail("Expected invalidCredentials error, got \(error)")
+            guard case .registryStorageError = error else {
+                XCTFail("Expected registryStorageError on disk write failure (WO-33 fail-closed policy), got \(error)")
                 return
             }
         }
@@ -1872,27 +1926,28 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let storageError = await coordinator.registryLoadError
         XCTAssertNotNil(storageError, "Must capture typed storage error on disk write failure")
 
-        // Attempts 2, 3, 4: still invalidCredentials
-        for _ in 2...4 {
-            do {
-                _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
-                XCTFail("Must fail")
-            } catch let error as WalletAuthError {
-                XCTAssertEqual(error, .invalidCredentials)
-            }
-        }
+        // 3. Fallback lockout in UserDefaults was written
+        let fallback = WalletAuthCoordinator.loadDurableLockoutFallback(username: username)
+        XCTAssertNotNil(fallback, "Must persist fallback lockout to UserDefaults when file write fails")
+        XCTAssertEqual(fallback?.failedAttempts, 1)
 
-        // Attempt 5: triggers rate limiting / lockout even when disk write fails
-        do {
-            _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
-            XCTFail("Attempt 5 must trigger rate limiting")
-        } catch let error as WalletAuthError {
-            if case .rateLimited = error {
-                // Expected
-            } else {
-                XCTFail("Expected rateLimited error on attempt 5, got \(error)")
-            }
-        }
+        // 4. WO-33 Crash/Restart Simulation:
+        // Spawn a brand new coordinator instance simulating app termination and relaunch
+        let restartedCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let record = await restartedCoordinator.getRecordForTesting(username: username)
+        let reloadedUser = try XCTUnwrap(record)
+        XCTAssertEqual(reloadedUser.failedAttempts, 1, "Restarted coordinator must merge fallback failedAttempts from UserDefaults")
+
+        // 5. Restore filesystem permissions
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+
+        // 6. Valid operator login works once filesystem is restored, persists cleanly, and clears fallback
+        let loginTime = time + 60
+        let loginTotp = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: loginTime)
+        let session = try await restartedCoordinator.login(username: username, password: validPassword, totpCode: loginTotp, time: loginTime)
+        XCTAssertEqual(session.username, username)
+        let clearedFallback = WalletAuthCoordinator.loadDurableLockoutFallback(username: username)
+        XCTAssertNil(clearedFallback, "Fallback lockout must be cleared after successful persisted login")
     }
 }
 

@@ -167,6 +167,7 @@ public struct WalletView: View {
             autofillSessionToken &+= 1
             appleSavedPasswordCoordinator?.cancel()
             appleSavedPasswordCoordinator = nil
+            isAuthActionInProgress = false
             loginPassword = ""
             loginTotpCode = ""
             isApplePasswordSaved = false
@@ -1199,6 +1200,12 @@ public struct WalletView: View {
                                 }
                             }
                         }
+                    }
+                    picker.onCancel = {
+                        guard autofillSessionToken == currentSessionToken else { return }
+                        appleSavedPasswordCoordinator?.cancel()
+                        appleSavedPasswordCoordinator = nil
+                        isAuthActionInProgress = false
                     }
                     picker.onFailure = { err in
                         guard autofillSessionToken == currentSessionToken else { return }
