@@ -158,5 +158,25 @@ final class ConsensusSecurityDefaultsTests: XCTestCase {
                 return
             }
         }
+
+        do {
+            _ = try await manager.bumpFee(txid: "0000000000000000000000000000000000000000000000000000000000000000")
+            XCTFail("WalletManager.bumpFee must fail closed when isBroadcastRestricted is true")
+        } catch let error as WalletSecurityError {
+            guard case .signingPathUnverified = error else {
+                XCTFail("Expected .signingPathUnverified, got: \(error)")
+                return
+            }
+        }
+
+        // 5. Verify legitimate read-only RPC methods are unaffected by spend gate
+        do {
+            let _: String = try await defaultRPC.call(method: "getblockchaininfo")
+        } catch let error as RPCClientError {
+            // Must NOT throw transactionBroadcastDisabled
+            if case .transactionBroadcastDisabled = error {
+                XCTFail("Legitimate read-only RPC method 'getblockchaininfo' must not be blocked by spend gate")
+            }
+        } catch {}
     }
 }
