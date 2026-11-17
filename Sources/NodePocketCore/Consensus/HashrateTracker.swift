@@ -108,11 +108,44 @@ public struct HashrateReport: Sendable {
     }
 
     public var macdReport: MACDReport {
-        MACDCalculator.calculate(history: history, fastPeriod: 12, slowPeriod: 30, signalPeriod: 9)
+        macdReport(window: .blocks30, fast: 12, slow: 30, signal: 9)
     }
 
     public func macdReport(fast: Int, slow: Int, signal: Int) -> MACDReport {
-        MACDCalculator.calculate(history: history, fastPeriod: fast, slowPeriod: slow, signalPeriod: signal)
+        macdReport(window: .blocks30, fast: fast, slow: slow, signal: signal)
+    }
+
+    /// Computes MACD points across the full history for continuous EMA warm-up,
+    /// then slices the resulting points to the requested display window.
+    public func macdReport(
+        window: RollingHistoryWindow = .blocks30,
+        fast: Int = 12,
+        slow: Int = 30,
+        signal: Int = 9
+    ) -> MACDReport {
+        let fullReport = MACDCalculator.calculate(
+            history: history,
+            fastPeriod: fast,
+            slowPeriod: slow,
+            signalPeriod: signal
+        )
+        let count = window.rawValue
+        let slicedPoints = Array(fullReport.points.suffix(count))
+        return MACDReport(
+            points: slicedPoints,
+            fastPeriod: fast,
+            slowPeriod: slow,
+            signalPeriod: signal,
+            currentMACD: fullReport.currentMACD,
+            currentSignal: fullReport.currentSignal,
+            currentHistogram: fullReport.currentHistogram,
+            trend: fullReport.trend
+        )
+    }
+
+    /// Slices the history points to the requested rolling display window.
+    public func history(for window: RollingHistoryWindow) -> [HashrateHistoryPoint] {
+        Array(history.suffix(window.rawValue))
     }
 
     private func formatRate(_ ph: Double) -> String {
@@ -132,11 +165,22 @@ public final class HashrateTracker: @unchecked Sendable {
     private let lock = NSLock()
     private var samples: [BlockSample] = []
     private var historyPoints: [HashrateHistoryPoint] = []
-    public let windowSize: Int
+    public let canonicalWindowSize: Int
+    public let smoothedWindowSize: Int
+    public let maxCapacity: Int
     public let maxTelemetryAgeSeconds: TimeInterval
 
-    public init(windowSize: Int = 30, maxTelemetryAgeSeconds: TimeInterval = 300.0) {
-        self.windowSize = windowSize
+    /// Backward-compatible window size referring to the canonical rate window.
+    public var windowSize: Int { canonicalWindowSize }
+
+    public init(
+        windowSize: Int = 30,
+        maxCapacity: Int = RollingHistoryWindow.maxCapacity,
+        maxTelemetryAgeSeconds: TimeInterval = 300.0
+    ) {
+        self.canonicalWindowSize = windowSize
+        self.smoothedWindowSize = max(windowSize * 4, 120)
+        self.maxCapacity = max(maxCapacity, windowSize * 4)
         self.maxTelemetryAgeSeconds = maxTelemetryAgeSeconds
     }
 
@@ -152,6 +196,7 @@ public final class HashrateTracker: @unchecked Sendable {
         // Handle reorgs: prune invalid branches when a block at height <= current tip arrives with a different hash
         if let last = samples.last, height <= last.height {
             samples.removeAll(where: { $0.height >= height })
+            historyPoints.removeAll(where: { $0.height >= height })
         }
 
         let isContiguous = (samples.last == nil) || (height == (samples.last!.height + 1))
@@ -166,9 +211,38 @@ public final class HashrateTracker: @unchecked Sendable {
         )
 
         samples.append(sample)
-        if samples.count > windowSize * 4 {
-            samples.removeFirst(samples.count - (windowSize * 2))
+        if samples.count > maxCapacity {
+            samples.removeFirst(samples.count - maxCapacity)
         }
+    }
+
+    /// Bulk populates block samples from contiguous block headers in ascending order.
+    public func seedBlocks(headers: [BlockHeader]) {
+        lock.lock()
+        defer { lock.unlock() }
+
+        guard !headers.isEmpty else { return }
+        let sorted = headers.sorted(by: { $0.height < $1.height })
+
+        var newSamples: [BlockSample] = []
+        for (idx, header) in sorted.enumerated() {
+            guard let target = TargetConverter.targetHexFromBits(UInt32(header.bits, radix: 16) ?? 0) else { continue }
+            let prevTime: TimeInterval? = (idx > 0 && sorted[idx - 1].height + 1 == header.height) ? TimeInterval(sorted[idx - 1].time) : nil
+            let sample = BlockSample(
+                height: header.height,
+                hash: header.hash,
+                timestamp: TimeInterval(header.time),
+                targetHex: target,
+                previousTimestamp: prevTime
+            )
+            newSamples.append(sample)
+        }
+
+        if newSamples.count > maxCapacity {
+            newSamples.removeFirst(newSamples.count - maxCapacity)
+        }
+        self.samples = newSamples
+        self.historyPoints.removeAll()
     }
 
     public var sampleCount: Int {
@@ -222,8 +296,8 @@ public final class HashrateTracker: @unchecked Sendable {
         let isStale = (age > maxTelemetryAgeSeconds)
         let nominalPH = TargetConverter.nominalHashratePH(expectedHashes: latest.expectedHashes)
 
-        // Short trend (last windowSize samples, e.g. 30 blocks)
-        let shortSamples = Array(samples.suffix(windowSize))
+        // Short trend (canonical 30 blocks for network rate)
+        let shortSamples = Array(samples.suffix(canonicalWindowSize))
         var totalExpectedHashes = 0.0
         var totalValidSeconds = 0.0
         var validIntervals = 0
@@ -253,8 +327,8 @@ public final class HashrateTracker: @unchecked Sendable {
 
         let networkPH = calculatedHps / 1e15
 
-        // Smoothed trend (up to 4x windowSize samples, e.g. 120 blocks)
-        let longSamples = Array(samples.suffix(windowSize * 4))
+        // Smoothed trend (canonical 120 blocks for smoothed rate)
+        let longSamples = Array(samples.suffix(smoothedWindowSize))
         var longExpectedHashes = 0.0
         var longValidSeconds = 0.0
         var longIntervals = 0
@@ -287,11 +361,11 @@ public final class HashrateTracker: @unchecked Sendable {
         }
 
         // Seed/backfill history points if history is incomplete relative to available samples
-        if historyPoints.count < min(30, max(0, samples.count - 1)) {
+        if historyPoints.count < max(0, samples.count - 1) {
             backfillHistoryPoints(nominalPH: nominalPH)
         }
 
-        // Maintain history points (max 30 points)
+        // Maintain history points (up to maxCapacity points)
         if let lastIdx = historyPoints.indices.last, historyPoints[lastIdx].height == latest.height {
             historyPoints[lastIdx] = HashrateHistoryPoint(
                 height: latest.height,
@@ -306,8 +380,8 @@ public final class HashrateTracker: @unchecked Sendable {
                 hashratePH: networkPH,
                 difficulty: latest.difficulty
             ))
-            if historyPoints.count > 30 {
-                historyPoints.removeFirst(historyPoints.count - 30)
+            if historyPoints.count > maxCapacity {
+                historyPoints.removeFirst(historyPoints.count - maxCapacity)
             }
         }
 
@@ -331,13 +405,11 @@ public final class HashrateTracker: @unchecked Sendable {
 
     private func backfillHistoryPoints(nominalPH: Double) {
         guard samples.count >= 2 else { return }
-        let count = min(30, samples.count - 1)
-        let startIndex = samples.count - count
         var newHistory: [HashrateHistoryPoint] = []
 
-        for i in startIndex..<samples.count {
+        for i in 1..<samples.count {
             let sample = samples[i]
-            let windowStart = max(0, i - windowSize + 1)
+            let windowStart = max(0, i - canonicalWindowSize + 1)
             var winHashes = 0.0
             var winSeconds = 0.0
             var winIntervals = 0
@@ -363,6 +435,10 @@ public final class HashrateTracker: @unchecked Sendable {
                 hashratePH: ratePH,
                 difficulty: sample.difficulty
             ))
+        }
+
+        if newHistory.count > maxCapacity {
+            newHistory.removeFirst(newHistory.count - maxCapacity)
         }
 
         self.historyPoints = newHistory

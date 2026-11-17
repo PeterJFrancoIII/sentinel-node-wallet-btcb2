@@ -13,6 +13,17 @@ public final class AppState: ObservableObject {
     @Published public var adaptiveETA: (state: ETAState, display: String) = (.calibrating, "Calibrating...")
     @Published public var rollingHistoryCoverage: RollingHistoryCoverage?
     @Published public var rollingHistoryStatus: String = "Measuring retained block history…"
+    @Published public var selectedRollingWindow: RollingHistoryWindow = .blocks30 {
+        didSet {
+            UserDefaults.standard.set(selectedRollingWindow.rawValue, forKey: "selectedRollingWindowBlocks")
+            nodeManager.targetRollingWindow = selectedRollingWindow
+            Task {
+                if let tip = blockchainInfo?.bestblockhash, !tip.isEmpty {
+                    await nodeManager.ensureHeadersAvailable(tipHash: tip)
+                }
+            }
+        }
+    }
     @Published public var walletSnapshot: WalletSnapshot?
     @Published public var transactions: [TransactionRecord] = []
     @Published public var coinbaseRewards: [CoinbaseRewardDetail] = []
@@ -92,6 +103,11 @@ public final class AppState: ObservableObject {
         self.userPreferredProfile = config.profile.type
         self.ultraStatusTitle = "\(config.profile.type.rawValue) Profile Active"
         self.ultraStatusSubtitle = "\(config.profile.parThreads) threads, \(config.profile.dbCacheMB) MiB dbcache, max \(config.profile.maxConnections) peers"
+
+        let savedWindow = UserDefaults.standard.integer(forKey: "selectedRollingWindowBlocks")
+        let initialWindow = RollingHistoryWindow(rawValue: savedWindow) ?? .blocks30
+        self.selectedRollingWindow = initialWindow
+        self.nodeManager.targetRollingWindow = initialWindow
 
         let tf = DateFormatter()
         tf.dateFormat = "HH:mm:ss"
