@@ -110,18 +110,25 @@ fi
 
 # Code sign with Apple Development identity or ad-hoc fallback
 DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
+ENTITLEMENTS_FLAG=()
+if [ -f "${ROOT_DIR}/Resources/Development.entitlements.plist" ]; then
+    ENTITLEMENTS_FLAG=(--entitlements "${ROOT_DIR}/Resources/Development.entitlements.plist")
+fi
+
 if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then
     echo "Signing with Developer Identity: ${DEV_IDENTITY}"
     if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
+        find "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" -type f -perm +111 -exec \
+            codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" {} +
         codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
     fi
-    codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
+    codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${ENTITLEMENTS_FLAG[@]}" "${APP_BUNDLE}"
 else
     echo "Signing with ad-hoc identity"
     if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
         codesign --force --sign - "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
     fi
-    codesign --force --deep --sign - "${APP_BUNDLE}"
+    codesign --force --deep --sign - "${ENTITLEMENTS_FLAG[@]}" "${APP_BUNDLE}"
 fi
 
 # Generate reproducible Build Manifest

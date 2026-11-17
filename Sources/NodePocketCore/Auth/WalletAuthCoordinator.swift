@@ -1629,14 +1629,35 @@ public actor WalletAuthCoordinator {
                 "wallets",
                 "blocks",
                 "chainstate",
-                "indexes"
+                "indexes",
+                "settings.json",
+                "peers.dat",
+                "fee_estimates.dat",
+                "mempool.dat",
+                ".lock"
             ]
             let hasNodeMarkers = establishedMarkers.contains { marker in
                 FileManager.default.fileExists(atPath: parentDir.appendingPathComponent(marker).path)
             }
             let hasCompletedEnrollment = UserDefaults.standard.bool(forKey: "hasCompletedInitialEnrollment")
 
-            if hasNodeMarkers || hasCompletedEnrollment {
+            var hasWalletFolder = false
+            if let contents = try? FileManager.default.contentsOfDirectory(atPath: parentDir.path) {
+                for item in contents {
+                    let itemLower = item.lowercased()
+                    if itemLower.contains("wallet") {
+                        hasWalletFolder = true
+                        break
+                    }
+                    let subPath = parentDir.appendingPathComponent(item).appendingPathComponent("wallet.dat").path
+                    if FileManager.default.fileExists(atPath: subPath) {
+                        hasWalletFolder = true
+                        break
+                    }
+                }
+            }
+
+            if hasNodeMarkers || hasCompletedEnrollment || hasWalletFolder {
                 throw AuthRegistryStorageError.missingRegistryInEstablishedNode(path: url.path)
             }
             return [:]

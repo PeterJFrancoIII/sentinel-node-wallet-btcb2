@@ -633,4 +633,90 @@ final class OperatorLoginIntegrityTests: XCTestCase {
         let stageReplayed = await coordinator.lastFailureStage
         XCTAssertEqual(stageReplayed, .totpTimestepReplayed)
     }
+
+    func testEstablishedNodeWithCustomWalletSubdirectoryFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Create a custom wallet directory containing wallet.dat
+        let walletDir = tempDir.appendingPathComponent("CustomWallet_2026")
+        try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
+        let walletFile = walletDir.appendingPathComponent("wallet.dat")
+        try Data("mock_wallet_descriptor_data".utf8).write(to: walletFile)
+
+        let registryFile = tempDir.appendingPathComponent("auth_registry.json")
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryFile, in: tempDir)) { error in
+            guard let storageError = error as? AuthRegistryStorageError,
+                  case .missingRegistryInEstablishedNode = storageError else {
+                XCTFail("Expected missingRegistryInEstablishedNode when custom wallet directory exists, got: \(error)")
+                return
+            }
+        }
+    }
+
+    func testEstablishedNodeWithKnotsSettingsOrLockFileFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Create .lock and settings.json
+        try Data().write(to: tempDir.appendingPathComponent(".lock"))
+        try Data("{\"prune\": 550}".utf8).write(to: tempDir.appendingPathComponent("settings.json"))
+
+        let registryFile = tempDir.appendingPathComponent("auth_registry.json")
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryFile, in: tempDir)) { error in
+            guard let storageError = error as? AuthRegistryStorageError,
+                  case .missingRegistryInEstablishedNode = storageError else {
+                XCTFail("Expected missingRegistryInEstablishedNode when .lock/settings.json exists, got: \(error)")
+                return
+            }
+        }
+    }
+
+    func testPreferenceResetWithEstablishedNodeFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Simulate preference reset by clearing UserDefaults
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+
+        // Node markers exist
+        try Data("prune=2048\n".utf8).write(to: tempDir.appendingPathComponent("bitcoin.conf"))
+
+        let registryFile = tempDir.appendingPathComponent("auth_registry.json")
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryFile, in: tempDir)) { error in
+            guard let storageError = error as? AuthRegistryStorageError,
+                  case .missingRegistryInEstablishedNode = storageError else {
+                XCTFail("Expected missingRegistryInEstablishedNode on preference reset with established datadir, got: \(error)")
+                return
+            }
+        }
+    }
+
+    func testDatadirSwapWithPreservedUserDefaultsEnrollmentFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        }
+
+        // Empty datadir, but UserDefaults indicates enrollment previously completed on this Mac
+        UserDefaults.standard.set(true, forKey: "hasCompletedInitialEnrollment")
+
+        let registryFile = tempDir.appendingPathComponent("auth_registry.json")
+
+        XCTAssertThrowsError(try WalletAuthCoordinator.loadRecordsStrict(from: registryFile, in: tempDir)) { error in
+            guard let storageError = error as? AuthRegistryStorageError,
+                  case .missingRegistryInEstablishedNode = storageError else {
+                XCTFail("Expected missingRegistryInEstablishedNode when UserDefaults enrollment flag is set, got: \(error)")
+                return
+            }
+        }
+    }
 }

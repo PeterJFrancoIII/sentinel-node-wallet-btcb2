@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 DIST="${ROOT_DIR}/dist"
-BUNDLE_ID="app.nodepocket.btcb2"
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-app.nodepocket.btcb2}"
 fail() { printf "RELEASE BLOCKED: %s\n" "$*" >&2; exit 1; }
 require() { local key="$1"; [ -n "${!key:-}" ] || fail "Missing required setting ${key}"; }
 
@@ -50,6 +50,8 @@ PY
 "${SCRIPT_DIR}/build_app.sh"
 [ -d "${APP}" ] || fail "Missing built macOS app."
 plutil -lint "${APP}/Contents/Info.plist" >/dev/null
+ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist" 2>/dev/null || echo "${BUNDLE_ID}")"
+
 ENTITLEMENTS="${DIST}/Production.entitlements.plist"
 cat > "${ENTITLEMENTS}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,9 +60,21 @@ cat > "${ENTITLEMENTS}" <<EOF
 <plist version="1.0"><dict>
 <key>com.apple.developer.associated-domains</key>
 <array><string>webcredentials:${DOMAIN}</string></array>
+<key>keychain-access-groups</key>
+<array><string>${SENTINEL_APPLE_TEAM_ID}.${ACTUAL_BUNDLE_ID}</string></array>
 </dict></plist>
 EOF
 plutil -lint "${ENTITLEMENTS}" >/dev/null
+
+# Sign nested frameworks inside-out before signing the outer application bundle
+if [ -d "${APP}/Contents/Frameworks/Sparkle.framework" ]; then
+    find "${APP}/Contents/Frameworks/Sparkle.framework" -type f -perm +111 -exec \
+        codesign --force --options runtime --timestamp \
+        --sign "${SENTINEL_DEVELOPER_ID_APPLICATION}" {} +
+    codesign --force --options runtime --timestamp \
+        --sign "${SENTINEL_DEVELOPER_ID_APPLICATION}" "${APP}/Contents/Frameworks/Sparkle.framework"
+fi
+
 for binary in bitcoind bitcoin-cli; do
     codesign --force --options runtime --timestamp \
         --sign "${SENTINEL_DEVELOPER_ID_APPLICATION}" "${APP}/Contents/MacOS/${binary}"
