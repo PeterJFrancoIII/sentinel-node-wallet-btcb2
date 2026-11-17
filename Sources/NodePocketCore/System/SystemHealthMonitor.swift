@@ -91,11 +91,16 @@ public final class SystemHealthMonitor: @unchecked Sendable {
         // Disk space
         let freeBytes: Int64
         if let values = try? dataDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-           let avail = values.volumeAvailableCapacityForImportantUsage {
+           let avail = values.volumeAvailableCapacityForImportantUsage,
+           avail > 0 {
             freeBytes = avail
         } else if let values = try? dataDirectory.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
-                  let avail = values.volumeAvailableCapacity {
+                  let avail = values.volumeAvailableCapacity,
+                  avail > 0 {
             freeBytes = Int64(avail)
+        } else if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: dataDirectory.path),
+                  let fsAvail = attrs[.systemFreeSize] as? NSNumber {
+            freeBytes = fsAvail.int64Value
         } else {
             freeBytes = -1 // Unknown / unmeasured - do not invent fallback
         }

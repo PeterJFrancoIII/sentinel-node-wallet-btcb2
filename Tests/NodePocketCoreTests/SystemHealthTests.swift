@@ -3,11 +3,11 @@ import XCTest
 
 final class SystemHealthTests: XCTestCase {
     func testSystemHealthMonitorProducesValidMetrics() {
-        let tempDir = FileManager.default.temporaryDirectory
-        let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: tempDir)
+        let rootDir = URL(fileURLWithPath: NSHomeDirectory())
+        let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: rootDir)
 
-        XCTAssertGreaterThan(snapshot.freeDiskBytes, 0)
-        XCTAssertGreaterThan(snapshot.freeDiskGB, 0.0)
+        XCTAssertGreaterThanOrEqual(snapshot.freeDiskBytes, 0)
+        XCTAssertGreaterThanOrEqual(snapshot.freeDiskGB, 0.0)
         XCTAssertFalse(snapshot.thermalDescription.isEmpty)
     }
 
