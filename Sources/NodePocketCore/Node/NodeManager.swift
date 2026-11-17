@@ -660,6 +660,7 @@ public final class NodeManager: @unchecked Sendable {
         }
 
         // Backfill older headers if chain is shorter than needed
+        var backfillBatchCount = 0
         while chain.count < needed, let nextPrev = currHash, !nextPrev.isEmpty {
             if Task.isCancelled { break }
             do {
@@ -667,9 +668,13 @@ public final class NodeManager: @unchecked Sendable {
                 cachedHeaders[nextPrev] = hdr
                 chain.append(hdr)
                 currHash = hdr.previousblockhash
-                // Yield periodically to prevent starving RPC client or blocking task cooperative scheduling
-                if chain.count % 25 == 0 {
+                backfillBatchCount += 1
+
+                // Explicit RPC-rate budget: yield and micro-pause every 25 sequential requests
+                // to prevent starving health polling or monopolizing the RPC socket
+                if backfillBatchCount % 25 == 0 {
                     await Task.yield()
+                    try? await Task.sleep(nanoseconds: 5_000_000) // 5ms micro-pause
                 }
             } catch {
                 break
