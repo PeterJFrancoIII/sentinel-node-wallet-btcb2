@@ -21,6 +21,31 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     /// Safety callback: performs graceful Bitcoin Knots daemon shutdown before relaunch.
     public var onGracefulShutdownRequested: (@MainActor () async throws -> Void)?
 
+    /// Current postponed relaunch handler if an update was postponed due to active node/wallet operations.
+    public private(set) var postponedInstallHandler: (() -> Void)?
+    public private(set) var isRelaunchPostponed: Bool = false
+
+    public func cancelPostponedRelaunch() {
+        self.postponedInstallHandler = nil
+        self.isRelaunchPostponed = false
+        self.status = .idle
+    }
+
+    public func retryPostponedRelaunch() async throws {
+        guard let handler = self.postponedInstallHandler else {
+            throw SoftwareUpdateError.installationFailed("No postponed update relaunch handler is pending.")
+        }
+        if let isBusy = self.isBusyCheck, await isBusy() {
+            throw SoftwareUpdateError.walletActiveOperationInProgress
+        }
+        if let shutdown = self.onGracefulShutdownRequested {
+            try await shutdown()
+        }
+        self.postponedInstallHandler = nil
+        self.isRelaunchPostponed = false
+        handler()
+    }
+
     public init(startingUpdater: Bool = true) {
         super.init()
         #if os(macOS)
@@ -56,8 +81,7 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
         guard let target = selectedRelease else { return nil }
         for item in appcast.items {
             if item.versionString == target.version.rawString ||
-               item.displayVersionString == target.version.shortDescription ||
-               (target.downloadUrl != nil && item.fileURL?.lastPathComponent == target.downloadUrl?.lastPathComponent) {
+               item.displayVersionString == target.version.shortDescription {
                 return item
             }
         }
@@ -69,9 +93,13 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
         shouldPostponeRelaunchForUpdate item: SUAppcastItem,
         untilInvokingBlock installHandler: @escaping () -> Void
     ) -> Bool {
+        self.postponedInstallHandler = installHandler
+        self.isRelaunchPostponed = true
+
         Task { @MainActor in
-            // Safety Check: if wallet or node operations are busy, postpone and do not stop
+            // Safety Check: if wallet or node operations are busy, keep postponed and inform driver
             if let isBusy = self.isBusyCheck, await isBusy() {
+                self.status = .error("Update postponement active: node or wallet operation in progress. Cancel or retry when operations complete.")
                 return
             }
 
@@ -80,12 +108,14 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
                 do {
                     try await shutdown()
                 } catch {
-                    // Do not invoke installHandler if node shutdown failed or timed out
+                    self.status = .error("Graceful node shutdown failed: \(error.localizedDescription). Update relaunch aborted.")
                     return
                 }
             }
 
             // Clean daemon shutdown confirmed: proceed with app relaunch
+            self.postponedInstallHandler = nil
+            self.isRelaunchPostponed = false
             installHandler()
         }
         return true

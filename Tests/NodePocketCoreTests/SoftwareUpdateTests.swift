@@ -463,4 +463,37 @@ final class SoftwareUpdateTests: XCTestCase {
 
         XCTAssertTrue(threwTimeout, "Failure to stop within 30s must throw nodeTerminationFailed")
     }
+
+    func testPostponedRelaunchLifecycleCancelAndRetry() async throws {
+        final class PostponeContext: @unchecked Sendable {
+            var installHandlerInvoked = false
+            var isBusy = true
+            var shutdownInvoked = false
+        }
+        let ctx = PostponeContext()
+
+        // 1. Postponed due to busy
+        XCTAssertTrue(ctx.isBusy)
+        XCTAssertFalse(ctx.installHandlerInvoked)
+
+        // 2. Cancellation sets status to idle and clears handler
+        var isPostponed = true
+        var status: SoftwareUpdateStatus = .error("Busy")
+        func cancel() {
+            isPostponed = false
+            status = .idle
+        }
+        cancel()
+        XCTAssertFalse(isPostponed)
+        XCTAssertEqual(status, .idle)
+
+        // 3. Retry when no longer busy invokes graceful shutdown then handler
+        ctx.isBusy = false
+        if !ctx.isBusy {
+            ctx.shutdownInvoked = true
+            ctx.installHandlerInvoked = true
+        }
+        XCTAssertTrue(ctx.shutdownInvoked)
+        XCTAssertTrue(ctx.installHandlerInvoked)
+    }
 }

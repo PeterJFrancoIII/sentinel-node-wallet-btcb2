@@ -152,6 +152,7 @@ public enum SoftwareUpdateError: Error, LocalizedError, Sendable {
     case verificationFailed(String)
     case walletActiveOperationInProgress
     case nodeTerminationFailed(String)
+    case installationFailed(String)
 
     public var errorDescription: String? {
         switch self {
@@ -174,6 +175,8 @@ public enum SoftwareUpdateError: Error, LocalizedError, Sendable {
             return "Cannot install update while wallet transactions or block sync are active. Wait for operation to complete."
         case .nodeTerminationFailed(let msg):
             return "Failed to stop Bitcoin Knots daemon gracefully before update: \(msg)"
+        case .installationFailed(let msg):
+            return "Software update installation failed: \(msg)"
         }
     }
 }
