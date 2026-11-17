@@ -25,6 +25,16 @@ final class AppleSavedPasswordCoordinator: NSObject,
         controller.performRequests()
     }
 
+    /// Explicitly cancels any active or in-flight credential picker request, nullifying delegates
+    /// and callbacks to prevent stale credential delivery across operator changes.
+    func cancel() {
+        authorizationController?.delegate = nil
+        authorizationController?.presentationContextProvider = nil
+        authorizationController = nil
+        onCredential = nil
+        onFailure = nil
+    }
+
     func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
         NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first ?? NSWindow()
     }

@@ -1722,6 +1722,178 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let names = await coordinator.enrolledUsernames
         XCTAssertTrue(names.contains("reload_user"))
     }
+
+    func testValueDataOnlyKeychainUpdatePreservesExistingACLAndAccessGroup() throws {
+        WalletAuthCoordinator.setupMockKeychainStore()
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let user = "operator_gamma"
+        let initialSecret = "JBSWY3DPEHPK3PXP"
+        let initialData = initialSecret.data(using: .utf8)!
+        let totpAccount = "totp_" + user
+        let legacyAclDesc = "kSecAccessControlUserPresence"
+        let legacyGroup = "group.app.nodepocket.btcb2.auth"
+        let legacyAccessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
+
+        // Seed mock Keychain with legacy item having .userPresence ACL and access group
+        WalletAuthCoordinator.mockKeychainStore[totpAccount] = WalletAuthCoordinator.MockKeychainItemRecord(
+            service: "app.nodepocket.btcb2.auth",
+            account: totpAccount,
+            valueData: initialData,
+            accessControlDescription: legacyAclDesc,
+            accessibleAttribute: legacyAccessible,
+            accessGroup: legacyGroup,
+            label: "Sentinel Node Wallet - BTCB2 TOTP: \(user)"
+        )
+
+        // Perform saveTOTPSecretToKeychain update
+        let updatedSecret = "KRSXG5CTMVRXEZLU"
+        try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: user, secretBase32: updatedSecret)
+
+        // Verify that update was called and ONLY kSecValueData was updated
+        XCTAssertGreaterThanOrEqual(WalletAuthCoordinator.keychainCounters.updateItemCount, 1)
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.lastUpdateAttrsKeys, [kSecValueData as String])
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0, "WO-22 / WO-27 Invariant: Zero deletes on update")
+
+        // Verify that ACL, accessGroup, and accessibleAttribute were preserved untouched
+        let updatedRecord = try XCTUnwrap(WalletAuthCoordinator.mockKeychainStore[totpAccount])
+        XCTAssertEqual(String(data: updatedRecord.valueData, encoding: .utf8), updatedSecret)
+        XCTAssertEqual(updatedRecord.accessControlDescription, legacyAclDesc, "Preserves SecAccessControl userPresence ACL")
+        XCTAssertEqual(updatedRecord.accessGroup, legacyGroup, "Preserves access group")
+        XCTAssertEqual(updatedRecord.accessibleAttribute, legacyAccessible, "Preserves accessible attribute")
+
+        // Now test saveOperatorPasswordToKeychain value-data-only update
+        let pwAccount = "operator_login_" + user
+        let initialPw = "InitialStrongPass123!@#"
+        let initialPwData = initialPw.data(using: .utf8)!
+        WalletAuthCoordinator.mockKeychainStore[pwAccount] = WalletAuthCoordinator.MockKeychainItemRecord(
+            service: "app.nodepocket.btcb2.auth",
+            account: pwAccount,
+            valueData: initialPwData,
+            accessControlDescription: legacyAclDesc,
+            accessibleAttribute: legacyAccessible,
+            accessGroup: legacyGroup,
+            label: "Sentinel Node Wallet (Apple Passwords): \(user)"
+        )
+
+        let updatedPw = "UpdatedStrongPass456$%^"
+        try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: updatedPw)
+
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.lastUpdateAttrsKeys, [kSecValueData as String])
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0, "Zero deletes on password update")
+        let updatedPwRecord = try XCTUnwrap(WalletAuthCoordinator.mockKeychainStore[pwAccount])
+        XCTAssertEqual(String(data: updatedPwRecord.valueData, encoding: .utf8), updatedPw)
+        XCTAssertEqual(updatedPwRecord.accessControlDescription, legacyAclDesc)
+        XCTAssertEqual(updatedPwRecord.accessGroup, legacyGroup)
+        XCTAssertEqual(updatedPwRecord.accessibleAttribute, legacyAccessible)
+
+        // Now test update failures (-34018, -25308, -25293, -128):
+        // Under all failure codes, existing item bytes and ACL must remain completely untouched with ZERO deletes
+        let failureStatuses: [OSStatus] = [
+            errSecMissingEntitlement, // -34018
+            errSecInteractionNotAllowed, // -25308
+            errSecAuthFailed, // -25293
+            errSecUserCanceled // -128
+        ]
+
+        for status in failureStatuses {
+            WalletAuthCoordinator.setupMockKeychainStore(simulatedUpdateStatus: status)
+            // Re-seed item
+            WalletAuthCoordinator.mockKeychainStore[totpAccount] = WalletAuthCoordinator.MockKeychainItemRecord(
+                service: "app.nodepocket.btcb2.auth",
+                account: totpAccount,
+                valueData: initialData,
+                accessControlDescription: legacyAclDesc,
+                accessibleAttribute: legacyAccessible,
+                accessGroup: legacyGroup,
+                label: "Sentinel Node Wallet - BTCB2 TOTP: \(user)"
+            )
+
+            XCTAssertThrowsError(
+                try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: user, secretBase32: "NEWSECRETFAILED12"),
+                "Must throw typed error on failure status \(status)"
+            )
+
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0, "Zero deletes on update failure for status \(status)")
+            let preservedRecord = try XCTUnwrap(WalletAuthCoordinator.mockKeychainStore[totpAccount])
+            XCTAssertEqual(preservedRecord.valueData, initialData, "Original data preserved on failure status \(status)")
+            XCTAssertEqual(preservedRecord.accessControlDescription, legacyAclDesc, "Original ACL preserved on failure status \(status)")
+            XCTAssertEqual(preservedRecord.accessGroup, legacyGroup, "Original group preserved on failure status \(status)")
+        }
+    }
+
+    func testFailedAttemptPersistenceErrorRecordsFailureWithoutCorruptingLockout() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_auth_fail_persist_" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let username = "persist_fail_operator"
+        let validPassword = try WalletAuthCoordinator.generateStrongOperatorPassword()
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: username)
+        let time = Date().timeIntervalSince1970
+        let validTotp = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: time)
+        _ = try await coordinator.enroll(
+            username: username,
+            password: validPassword,
+            secretBase32: enrollment.secretBase32,
+            totpCode: validTotp,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Make the containing dataDirectory non-writable (mode 0555) to trigger storage write failure during registerFailedAttempt
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: tempDir.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+        }
+
+        // Attempt 1: bad password
+        let badPassword = validPassword + "_wrong"
+        do {
+            _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
+            XCTFail("Login with bad password must throw")
+        } catch let error as WalletAuthError {
+            guard case .invalidCredentials = error else {
+                XCTFail("Expected invalidCredentials error, got \(error)")
+                return
+            }
+        }
+
+        // Verify fail-closed durable record error handling:
+        // 1. Coordinator recorded .registryUnavailable failure stage
+        let failureStage = await coordinator.lastFailureStage
+        XCTAssertEqual(failureStage, .registryUnavailable, "Must record .registryUnavailable on disk write failure")
+
+        // 2. Coordinator captured registryLoadError
+        let storageError = await coordinator.registryLoadError
+        XCTAssertNotNil(storageError, "Must capture typed storage error on disk write failure")
+
+        // Attempts 2, 3, 4: still invalidCredentials
+        for _ in 2...4 {
+            do {
+                _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
+                XCTFail("Must fail")
+            } catch let error as WalletAuthError {
+                XCTAssertEqual(error, .invalidCredentials)
+            }
+        }
+
+        // Attempt 5: triggers rate limiting / lockout even when disk write fails
+        do {
+            _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
+            XCTFail("Attempt 5 must trigger rate limiting")
+        } catch let error as WalletAuthError {
+            if case .rateLimited = error {
+                // Expected
+            } else {
+                XCTFail("Expected rateLimited error on attempt 5, got \(error)")
+            }
+        }
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

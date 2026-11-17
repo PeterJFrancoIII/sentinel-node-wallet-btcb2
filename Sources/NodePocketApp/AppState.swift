@@ -580,6 +580,13 @@ public final class AppState: ObservableObject {
         return try await authCoordinator.retrieveOperatorCredentialsWithBiometrics(username: username, reason: reason)
     }
 
+    /// Indicates whether the last operator password save to Keychain / Apple Passwords succeeded.
+    public var isLastPasswordSavedToKeychain: Bool {
+        get async {
+            await authCoordinator.isLastPasswordSavedToKeychain
+        }
+    }
+
     /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
     /// and encrypted descriptor wallet onboarding in a single integrated workflow.
     public func startNode() {

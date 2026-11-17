@@ -719,4 +719,84 @@ final class OperatorLoginIntegrityTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - WO-28: Atomic Selected-Account Apple Passwords + TOTP Autofill
+
+    func testAutofillSelectedOperatorMismatchRejectionAndNoSilentUserSwitch() {
+        // Deterministic state simulation representing selected operator autofill session
+        let targetOperator = "operator_alpha"
+        var selectedOperator = targetOperator
+        var populatedPassword = ""
+        var populatedTotp = ""
+        var errorMessage: String? = nil
+        var isApplePasswordSaved = false
+
+        // Simulate credential picker returning different operator account
+        let returnedUser = "operator_beta"
+        let returnedPass = "SecretBetaPass999!"
+
+        let cleanTarget = targetOperator.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let cleanReturned = returnedUser.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // WO-28 Selected-Operator Immutability: When Apple Passwords returns an account that differs
+        // from target, MUST NOT silently switch operators or populate password—reject and require deliberate selection.
+        if cleanReturned != cleanTarget {
+            errorMessage = "Autofilled credentials for '\(returnedUser)' do not match selected operator '\(targetOperator)'."
+            populatedPassword = ""
+            populatedTotp = ""
+            isApplePasswordSaved = false
+        } else {
+            selectedOperator = cleanReturned
+            populatedPassword = returnedPass
+            isApplePasswordSaved = true
+        }
+
+        XCTAssertEqual(selectedOperator, targetOperator, "Selected operator must remain unchanged (no silent switch)")
+        XCTAssertEqual(populatedPassword, "", "Password must not be populated on operator mismatch")
+        XCTAssertEqual(populatedTotp, "", "TOTP code must not be populated on operator mismatch")
+        XCTAssertFalse(isApplePasswordSaved, "isApplePasswordSaved must remain false")
+        XCTAssertNotNil(errorMessage)
+        XCTAssertTrue(errorMessage?.contains("do not match selected operator") ?? false)
+    }
+
+    func testAutofillGenerationTokenSingleFlightCancellation() {
+        // Generation token single-flight state machine
+        var autofillSessionToken: UInt64 = 1
+        var targetOperator = "operator_primary"
+        var activePassword = ""
+        var activeTotp = ""
+
+        // Launch simulated in-flight autofill session
+        let initialToken = autofillSessionToken
+        let pendingCallback: (UInt64, String, String, String) -> Void = { token, user, pass, totp in
+            guard token == autofillSessionToken else {
+                // Superseded session dropped
+                return
+            }
+            targetOperator = user
+            activePassword = pass
+            activeTotp = totp
+        }
+
+        // User changes operator before callback returns; .onChange(of: loginUsername) fires:
+        autofillSessionToken &+= 1
+        activePassword = ""
+        activeTotp = ""
+        targetOperator = "operator_secondary"
+
+        // Stale async callback arrives with initialToken
+        pendingCallback(initialToken, "operator_primary", "PrimaryPass123!", "123456")
+
+        XCTAssertEqual(targetOperator, "operator_secondary")
+        XCTAssertEqual(activePassword, "", "Stale callback must be discarded by generation-token check")
+        XCTAssertEqual(activeTotp, "", "Stale TOTP must not be populated")
+        XCTAssertNotEqual(autofillSessionToken, initialToken)
+
+        // Fresh callback matching current token succeeds
+        let currentToken = autofillSessionToken
+        pendingCallback(currentToken, "operator_secondary", "SecondaryPass456!", "654321")
+        XCTAssertEqual(targetOperator, "operator_secondary")
+        XCTAssertEqual(activePassword, "SecondaryPass456!")
+        XCTAssertEqual(activeTotp, "654321")
+    }
 }

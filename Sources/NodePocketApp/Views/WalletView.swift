@@ -78,6 +78,7 @@ public struct WalletView: View {
     @State private var loginUsername: String = ""
     @State private var loginPassword: String = ""
     @State private var appleSavedPasswordCoordinator: AppleSavedPasswordCoordinator? = nil
+    @State private var autofillSessionToken: UInt64 = 0
     @State private var isApplePasswordSaved: Bool = false
     @State private var loginTotpCode: String = ""
     @State private var loginRecoveryCode: String = ""
@@ -163,6 +164,9 @@ public struct WalletView: View {
             if !newUser.isEmpty {
                 lastOperatorUsername = newUser
             }
+            autofillSessionToken &+= 1
+            appleSavedPasswordCoordinator?.cancel()
+            appleSavedPasswordCoordinator = nil
             loginPassword = ""
             loginTotpCode = ""
             isApplePasswordSaved = false
@@ -790,10 +794,8 @@ public struct WalletView: View {
                     authLocalError = nil
                     defer { isAuthActionInProgress = false }
                     do {
-                        let enrolledName = enrollUsername
-                        let passToSave = enrollPassword
                         try await state.enrollUser(password: enrollPassword, totpCode: enrollTotpCode)
-                        try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: enrolledName, password: passToSave)
+                        isApplePasswordSaved = await state.isLastPasswordSavedToKeychain
                         enrollUsername = ""
                         enrollPassword = ""
                         enrollTotpCode = ""
@@ -978,11 +980,9 @@ public struct WalletView: View {
                             authLocalError = nil
                             defer { isAuthActionInProgress = false }
                             do {
-                                let userToSave = loginUsername
-                                let passToSave = loginPassword
                                 try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: cleanLoginTotp)
                                 lastOperatorUsername = loginUsername
-                                try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: userToSave, password: passToSave)
+                                isApplePasswordSaved = await state.isLastPasswordSavedToKeychain
                                 loginPassword = ""
                                 loginTotpCode = ""
                             } catch {
@@ -1105,14 +1105,30 @@ public struct WalletView: View {
             loginUsername = target
         }
 
+        // Cancel any previous in-flight credential picker to avoid race conditions
+        appleSavedPasswordCoordinator?.cancel()
+        appleSavedPasswordCoordinator = nil
+
+        // WO-28 Generation-token single-flight state machine:
+        // Invalidate any previously launched async requests or callbacks
+        autofillSessionToken &+= 1
+        let currentSessionToken = autofillSessionToken
+        let cleanTarget = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
         isAuthActionInProgress = true
         authLocalError = nil
 
         Task { @MainActor in
-            defer { isAuthActionInProgress = false }
+            defer {
+                if autofillSessionToken == currentSessionToken && appleSavedPasswordCoordinator == nil {
+                    isAuthActionInProgress = false
+                }
+            }
             do {
                 // Prompt user for fingerprint (Touch ID) or Mac password
-                let creds = try await state.retrieveOperatorCredentialsWithBiometrics(username: target)
+                let creds = try await state.retrieveOperatorCredentialsWithBiometrics(username: cleanTarget)
+                guard autofillSessionToken == currentSessionToken else { return }
+
                 var credentialsFound = false
 
                 if let pass = creds.password, !pass.isEmpty {
@@ -1129,42 +1145,53 @@ public struct WalletView: View {
                 if !credentialsFound || loginPassword.isEmpty {
                     let picker = AppleSavedPasswordCoordinator()
                     picker.onCredential = { user, pass in
+                        guard autofillSessionToken == currentSessionToken else { return }
                         let cleanReturnedUser = user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                        let cleanTarget = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-                        // WO-23: Prevent cross-user autofill; verify returned user against selected operator
-                        if !cleanTarget.isEmpty && !cleanReturnedUser.isEmpty && cleanReturnedUser != cleanTarget {
-                            if state.enrolledUsernames.contains(cleanReturnedUser) {
-                                loginUsername = cleanReturnedUser
-                            } else {
-                                authLocalError = "Autofill returned credentials for '\(user)', which does not match selected operator '\(target)'."
-                                appleSavedPasswordCoordinator = nil
-                                return
-                            }
-                        } else if !cleanReturnedUser.isEmpty {
-                            loginUsername = cleanReturnedUser
+                        // WO-28 Selected-Operator Immutability: When Apple Passwords returns an account that differs
+                        // from target, MUST NOT silently switch operators or populate password—reject and require
+                        // deliberate operator selection.
+                        if cleanReturnedUser != cleanTarget {
+                            authLocalError = "Autofilled credentials for '\(user)' do not match selected operator '\(target)'. Please select operator '\(user)' directly or choose the matching account in Apple Passwords."
+                            loginPassword = ""
+                            loginTotpCode = ""
+                            isApplePasswordSaved = false
+                            appleSavedPasswordCoordinator?.cancel()
+                            appleSavedPasswordCoordinator = nil
+                            isAuthActionInProgress = false
+                            return
                         }
 
+                        // Bind to cleanTarget without mutating loginUsername (avoids triggering .onChange wipe)
                         loginPassword = pass
                         authLocalError = nil
+                        appleSavedPasswordCoordinator?.cancel()
                         appleSavedPasswordCoordinator = nil
 
-                        // WO-22 & WO-23: Set isApplePasswordSaved only if persistence succeeds; prevent false green state
+                        // WO-28: Set isApplePasswordSaved only on verified save; zero secrets in logs
                         do {
-                            try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: loginUsername, password: pass)
+                            try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: cleanTarget, password: pass)
                             isApplePasswordSaved = true
                         } catch {
                             isApplePasswordSaved = false
                         }
+
                         Task { @MainActor in
-                            if let refreshed = try? await state.retrieveOperatorCredentialsWithBiometrics(username: user),
-                               let c = refreshed.totpCode {
+                            defer { isAuthActionInProgress = false }
+                            guard autofillSessionToken == currentSessionToken else { return }
+                            if let refreshed = try? await state.retrieveOperatorCredentialsWithBiometrics(username: cleanTarget),
+                               let c = refreshed.totpCode, !c.isEmpty {
+                                guard autofillSessionToken == currentSessionToken else { return }
                                 loginTotpCode = c
                             }
-                            if andLogin && !loginPassword.isEmpty && cleanLoginTotp.count == 6 {
+                            if andLogin {
+                                guard autofillSessionToken == currentSessionToken else { return }
+                                let passToLogin = loginPassword
+                                let codeToLogin = cleanLoginTotp
+                                guard !passToLogin.isEmpty && codeToLogin.count == 6 else { return }
                                 do {
-                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: cleanLoginTotp)
-                                    lastOperatorUsername = loginUsername
+                                    try await state.loginUser(username: cleanTarget, password: passToLogin, totpCode: codeToLogin)
+                                    lastOperatorUsername = cleanTarget
                                     loginPassword = ""
                                     loginTotpCode = ""
                                 } catch {
@@ -1174,10 +1201,13 @@ public struct WalletView: View {
                         }
                     }
                     picker.onFailure = { err in
+                        guard autofillSessionToken == currentSessionToken else { return }
                         if loginPassword.isEmpty {
                             authLocalError = err
                         }
+                        appleSavedPasswordCoordinator?.cancel()
                         appleSavedPasswordCoordinator = nil
+                        isAuthActionInProgress = false
                     }
                     appleSavedPasswordCoordinator = picker
                     picker.requestSavedLogin(isInteractive: true)
@@ -1185,17 +1215,18 @@ public struct WalletView: View {
                 }
 
                 if andLogin {
-                    if !loginUsername.isEmpty && !loginPassword.isEmpty && cleanLoginTotp.count == 6 {
-                        let userToLogin = loginUsername
-                        let passToLogin = loginPassword
-                        let codeToLogin = cleanLoginTotp
-                        try await state.loginUser(username: userToLogin, password: passToLogin, totpCode: codeToLogin)
-                        lastOperatorUsername = userToLogin
+                    guard autofillSessionToken == currentSessionToken else { return }
+                    let passToLogin = loginPassword
+                    let codeToLogin = cleanLoginTotp
+                    if !passToLogin.isEmpty && codeToLogin.count == 6 {
+                        try await state.loginUser(username: cleanTarget, password: passToLogin, totpCode: codeToLogin)
+                        lastOperatorUsername = cleanTarget
                         loginPassword = ""
                         loginTotpCode = ""
                     }
                 }
             } catch {
+                guard autofillSessionToken == currentSessionToken else { return }
                 if case WalletAuthError.deviceOwnerAuthCanceled = error {
                     authLocalError = "Autofill canceled: Fingerprint (Touch ID) or Mac password required."
                 } else {

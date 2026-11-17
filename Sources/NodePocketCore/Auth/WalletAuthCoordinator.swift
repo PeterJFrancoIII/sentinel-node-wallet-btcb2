@@ -277,6 +277,7 @@ public actor WalletAuthCoordinator {
     private var currentAuthEpoch: UInt64 = 0
     public private(set) var registryLoadError: AuthRegistryStorageError? = nil
     public private(set) var lastFailureStage: AuthFailureStage? = nil
+    public private(set) var isLastPasswordSavedToKeychain: Bool = false
 
     private func recordAuthFailure(_ stage: AuthFailureStage) {
         self.lastFailureStage = stage
@@ -344,6 +345,7 @@ public actor WalletAuthCoordinator {
         inMemoryPasswordsForTesting.removeAll()
         allowInMemoryMockForTesting = false
         simulatedKeychainFailureStatus = nil
+        resetKeychainCallCounters()
         UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
     }
 #endif
@@ -523,7 +525,12 @@ public actor WalletAuthCoordinator {
         // P0-1: Save TOTP secret in Keychain, not in plaintext json
         try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
         // Automatically save operator login password in macOS Keychain / Apple Passwords
-        try? Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
+        do {
+            try Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
+            self.isLastPasswordSavedToKeychain = true
+        } catch {
+            self.isLastPasswordSavedToKeychain = false
+        }
 
         let salt = try Self.randomBytes(count: 32)
         let hash = try Self.deriveKey(password: password, salt: salt)
@@ -591,7 +598,23 @@ public actor WalletAuthCoordinator {
         // Authoritatively reload records from disk before validating credentials
         do {
             let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
-            self.records = reloaded
+            // WO-27: Preserve in-memory lockout and failed attempt counters so disk write failures
+            // cannot downgrade or corrupt lockout protection.
+            var merged = reloaded
+            for (key, existingRec) in self.records {
+                if var diskRec = merged[key] {
+                    if existingRec.failedAttempts > diskRec.failedAttempts {
+                        diskRec.failedAttempts = existingRec.failedAttempts
+                    }
+                    if let existingLock = existingRec.lockedUntil {
+                        if diskRec.lockedUntil == nil || existingLock > (diskRec.lockedUntil ?? .distantPast) {
+                            diskRec.lockedUntil = existingLock
+                        }
+                    }
+                    merged[key] = diskRec
+                }
+            }
+            self.records = merged
             self.registryLoadError = nil
         } catch let err as AuthRegistryStorageError {
             self.registryLoadError = err
@@ -760,11 +783,16 @@ public actor WalletAuthCoordinator {
 
         // Audit 033 / 035: If login used unmigrated legacy secret, attempt immediate protected Keychain save and purge plaintext
         if freshRec.legacyTotpSecretBase32 != nil {
-            if (try? Self.saveTOTPSecretToKeychain(username: freshRec.username, secretBase32: secret)) != nil {
-                if let verified = try? Self.loadTOTPSecretFromKeychain(username: freshRec.username), verified == secret {
+            do {
+                try Self.saveTOTPSecretToKeychain(username: freshRec.username, secretBase32: secret)
+                let verified = try Self.loadTOTPSecretFromKeychain(username: freshRec.username)
+                if verified == secret {
                     freshRec.legacyTotpSecretBase32 = nil
                     freshRec.isTotpInKeychain = true
                 }
+            } catch {
+                // Non-destructive: if Keychain migration fails, retain legacy fallback secret on disk
+                // do NOT purge plaintext secret and do NOT mark isTotpInKeychain
             }
         }
 
@@ -776,7 +804,12 @@ public actor WalletAuthCoordinator {
         try saveRecords()
 
         // Automatically update/save operator login password in macOS Keychain / Apple Passwords
-        try? Self.saveOperatorPasswordToKeychain(username: freshRec.username, password: password)
+        do {
+            try Self.saveOperatorPasswordToKeychain(username: freshRec.username, password: password)
+            self.isLastPasswordSavedToKeychain = true
+        } catch {
+            self.isLastPasswordSavedToKeychain = false
+        }
 
         recordAuthSuccess()
         let session = WalletAuthCapability(
@@ -808,7 +841,23 @@ public actor WalletAuthCoordinator {
         // Authoritatively reload records from disk before validating credentials
         do {
             let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
-            self.records = reloaded
+            // WO-27: Preserve in-memory lockout and failed attempt counters so disk write failures
+            // cannot downgrade or corrupt lockout protection.
+            var merged = reloaded
+            for (key, existingRec) in self.records {
+                if var diskRec = merged[key] {
+                    if existingRec.failedAttempts > diskRec.failedAttempts {
+                        diskRec.failedAttempts = existingRec.failedAttempts
+                    }
+                    if let existingLock = existingRec.lockedUntil {
+                        if diskRec.lockedUntil == nil || existingLock > (diskRec.lockedUntil ?? .distantPast) {
+                            diskRec.lockedUntil = existingLock
+                        }
+                    }
+                    merged[key] = diskRec
+                }
+            }
+            self.records = merged
             self.registryLoadError = nil
         } catch let err as AuthRegistryStorageError {
             self.registryLoadError = err
@@ -1169,15 +1218,24 @@ public actor WalletAuthCoordinator {
         self.recordGeneration += 1
         rec.failedAttempts += 1
         let userKey = rec.username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if rec.failedAttempts >= 5 {
-            let penaltySeconds = min(300, Int(pow(2.0, Double(rec.failedAttempts - 4))) * 10)
+        let isLockedOut = rec.failedAttempts >= 5
+        let penaltySeconds = min(300, Int(pow(2.0, Double(rec.failedAttempts - 4))) * 10)
+        if isLockedOut {
             rec.lockedUntil = Date().addingTimeInterval(TimeInterval(penaltySeconds))
-            self.records[userKey] = rec
-            try? saveRecords()
-            return WalletAuthError.rateLimited(secondsRemaining: penaltySeconds)
         }
         self.records[userKey] = rec
-        try? saveRecords()
+        do {
+            try saveRecords()
+        } catch let storageErr as AuthRegistryStorageError {
+            self.registryLoadError = storageErr
+            recordAuthFailure(.registryUnavailable)
+        } catch {
+            self.registryLoadError = .writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
+            recordAuthFailure(.registryUnavailable)
+        }
+        if isLockedOut {
+            return WalletAuthError.rateLimited(secondsRemaining: penaltySeconds)
+        }
         return WalletAuthError.invalidCredentials
     }
 
@@ -1394,12 +1452,48 @@ public actor WalletAuthCoordinator {
         public var updateItemCount: Int = 0
         public var deleteItemCount: Int = 0
         public var copyMatchingCount: Int = 0
+        public var lastUpdateAttrsKeys: [String] = []
 
-        public init(addItemCount: Int = 0, updateItemCount: Int = 0, deleteItemCount: Int = 0, copyMatchingCount: Int = 0) {
+        public init(
+            addItemCount: Int = 0,
+            updateItemCount: Int = 0,
+            deleteItemCount: Int = 0,
+            copyMatchingCount: Int = 0,
+            lastUpdateAttrsKeys: [String] = []
+        ) {
             self.addItemCount = addItemCount
             self.updateItemCount = updateItemCount
             self.deleteItemCount = deleteItemCount
             self.copyMatchingCount = copyMatchingCount
+            self.lastUpdateAttrsKeys = lastUpdateAttrsKeys
+        }
+    }
+
+    public struct MockKeychainItemRecord: Sendable, Equatable {
+        public var service: String
+        public var account: String
+        public var valueData: Data
+        public var accessControlDescription: String?
+        public var accessibleAttribute: String?
+        public var accessGroup: String?
+        public var label: String?
+
+        public init(
+            service: String,
+            account: String,
+            valueData: Data,
+            accessControlDescription: String? = nil,
+            accessibleAttribute: String? = nil,
+            accessGroup: String? = nil,
+            label: String? = nil
+        ) {
+            self.service = service
+            self.account = account
+            self.valueData = valueData
+            self.accessControlDescription = accessControlDescription
+            self.accessibleAttribute = accessibleAttribute
+            self.accessGroup = accessGroup
+            self.label = label
         }
     }
 
@@ -1408,6 +1502,7 @@ public actor WalletAuthCoordinator {
     public typealias SecItemDeleteHook = @Sendable (CFDictionary) -> OSStatus
     public typealias SecItemCopyMatchingHook = @Sendable (CFDictionary, UnsafeMutablePointer<CFTypeRef?>?) -> OSStatus
 
+    public static var mockKeychainStore: [String: MockKeychainItemRecord] = [:]
     public static var keychainCounters = KeychainCallCounters()
     public static var secItemAddHook: SecItemAddHook?
     public static var secItemUpdateHook: SecItemUpdateHook?
@@ -1420,6 +1515,96 @@ public actor WalletAuthCoordinator {
         secItemUpdateHook = nil
         secItemDeleteHook = nil
         secItemCopyMatchingHook = nil
+        mockKeychainStore = [:]
+    }
+
+    public static func setupMockKeychainStore(
+        simulatedUpdateStatus: OSStatus = errSecSuccess,
+        simulatedAddStatus: OSStatus = errSecSuccess
+    ) {
+        resetKeychainCallCounters()
+        secItemAddHook = { query, _ in
+            guard simulatedAddStatus == errSecSuccess else { return simulatedAddStatus }
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let service = q[kSecAttrService as String] as? String,
+                  let data = q[kSecValueData as String] as? Data else {
+                return errSecParam
+            }
+            if mockKeychainStore[account] != nil {
+                return errSecDuplicateItem
+            }
+            var aclDesc: String? = nil
+            if let acl = q[kSecAttrAccessControl as String] {
+                aclDesc = String(describing: acl)
+            }
+            let accessible = q[kSecAttrAccessible as String] as? String
+            let group = q[kSecAttrAccessGroup as String] as? String
+            let label = q[kSecAttrLabel as String] as? String
+            mockKeychainStore[account] = MockKeychainItemRecord(
+                service: service,
+                account: account,
+                valueData: data,
+                accessControlDescription: aclDesc,
+                accessibleAttribute: accessible,
+                accessGroup: group,
+                label: label
+            )
+            return errSecSuccess
+        }
+
+        secItemUpdateHook = { query, attrs in
+            guard simulatedUpdateStatus == errSecSuccess else { return simulatedUpdateStatus }
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String else {
+                return errSecParam
+            }
+            guard var existing = mockKeychainStore[account] else {
+                return errSecItemNotFound
+            }
+            guard let a = attrs as? [String: Any] else {
+                return errSecParam
+            }
+            if let data = a[kSecValueData as String] as? Data {
+                existing.valueData = data
+            }
+            if let acl = a[kSecAttrAccessControl as String] {
+                existing.accessControlDescription = String(describing: acl)
+            }
+            if let accessible = a[kSecAttrAccessible as String] as? String {
+                existing.accessibleAttribute = accessible
+            }
+            if let group = a[kSecAttrAccessGroup as String] as? String {
+                existing.accessGroup = group
+            }
+            if let label = a[kSecAttrLabel as String] as? String {
+                existing.label = label
+            }
+            mockKeychainStore[account] = existing
+            return errSecSuccess
+        }
+
+        secItemDeleteHook = { query in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String else {
+                return errSecParam
+            }
+            mockKeychainStore.removeValue(forKey: account)
+            return errSecSuccess
+        }
+
+        secItemCopyMatchingHook = { query, result in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let record = mockKeychainStore[account] else {
+                return errSecItemNotFound
+            }
+            if let res = result {
+                let cfData = record.valueData as CFData
+                res.pointee = cfData
+            }
+            return errSecSuccess
+        }
     }
     #endif
 
@@ -1438,6 +1623,9 @@ public actor WalletAuthCoordinator {
     private static func secItemUpdate(_ query: CFDictionary, _ attributesToUpdate: CFDictionary) -> OSStatus {
         #if DEBUG
         keychainCounters.updateItemCount += 1
+        if let dict = attributesToUpdate as? [String: Any] {
+            keychainCounters.lastUpdateAttrsKeys = Array(dict.keys).sorted()
+        }
         if let hook = secItemUpdateHook {
             return hook(query, attributesToUpdate)
         }
@@ -1500,9 +1688,10 @@ public actor WalletAuthCoordinator {
                 kSecAttrService as String: "app.nodepocket.btcb2.auth",
                 kSecAttrAccount as String: account
             ]
+            // WO-27 Safe Update Invariant: Value-data-only update preserves existing SecAccessControl (.userPresence ACL),
+            // accessibility, and access group untouched.
             let updateAttrs: [String: Any] = [
-                kSecValueData as String: data,
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                kSecValueData as String: data
             ]
             status = secItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
         }
@@ -1605,9 +1794,10 @@ public actor WalletAuthCoordinator {
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account
             ]
+            // WO-27 Safe Update Invariant: Value-data-only update preserves existing SecAccessControl (.userPresence ACL),
+            // accessibility, and access group untouched.
             let updateAttrs: [String: Any] = [
-                kSecValueData as String: data,
-                kSecAttrAccessible as String: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+                kSecValueData as String: data
             ]
             status = secItemUpdate(updateQuery as CFDictionary, updateAttrs as CFDictionary)
         }
