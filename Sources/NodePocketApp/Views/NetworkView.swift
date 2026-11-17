@@ -166,42 +166,74 @@ public struct NetworkView: View {
     // MARK: - Rolling Hashrate Dot Plot & MACD Card
 
     private var rollingHashrateDotPlotAndMACDCard: some View {
-        let history = state.hashrateReport?.history ?? []
+        let window = state.selectedRollingWindow
+        let history = state.hashrateReport?.history(for: window) ?? []
         let macdReport = state.hashrateReport?.macdReport(
+            window: window,
             fast: selectedPreset.fast,
             slow: selectedPreset.slow,
             signal: selectedPreset.signal
         ) ?? MACDReport(points: [])
 
         return VStack(alignment: .leading, spacing: 14) {
-            // Header Row
+            // Header Row: Title, Badge, Sample Count, and Window Selector
             HStack(alignment: .center) {
                 HStack(spacing: 8) {
                     Image(systemName: "chart.dots.scatter")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.cyan)
-                    Text("Rolling Hashrate History (30-Block Dot Plot)")
+                    Text("Rolling Hashrate History (\(window.rawValue)-Block Dot Plot)")
                         .font(.headline)
-                    Text("30-Block MACD Indicator")
+                    Text("\(window.rawValue)-Block MACD Indicator")
                         .font(.caption)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Capsule().fill(Color.cyan.opacity(0.15)))
                         .foregroundColor(.cyan)
+                    if macdReport.points.count < window.rawValue {
+                        Text("(\(macdReport.points.count)/\(window.rawValue) blocks)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
                 }
 
                 Spacer()
 
-                // Parameter Preset Picker
-                Picker("MACD Window", selection: $selectedPreset) {
-                    ForEach(MACDPresetOption.allCases) { opt in
-                        Text(opt.rawValue).tag(opt)
+                // Rolling Window Selector [30, 60, 120, 240, 480, 960]
+                HStack(spacing: 6) {
+                    Text("Range:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("Rolling Window", selection: $state.selectedRollingWindow) {
+                        ForEach(RollingHistoryWindow.allCases) { win in
+                            Text(win.shortName).tag(win)
+                        }
                     }
+                    .pickerStyle(.segmented)
+                    .controlSize(.small)
+                    .frame(maxWidth: 240)
+                    .accessibilityLabel("Select rolling block history range")
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .frame(maxWidth: 380)
+            }
+
+            // Controls Sub-Row: MACD Preset Picker & Descriptions
+            HStack(alignment: .center) {
+                HStack(spacing: 6) {
+                    Text("MACD Parameters:")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Picker("MACD Preset", selection: $selectedPreset) {
+                        ForEach(MACDPresetOption.allCases) { opt in
+                            Text(opt.rawValue).tag(opt)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .controlSize(.small)
+                    .frame(maxWidth: 280)
+                    .accessibilityLabel("Select MACD indicator preset")
+                }
+
+                Spacer()
             }
 
             if !history.isEmpty && !macdReport.points.isEmpty {
@@ -228,10 +260,10 @@ public struct NetworkView: View {
 
                 Divider()
 
-                // The 30-Block MACD Sub-Pane (Lower Pane)
+                // The MACD Sub-Pane (Lower Pane)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text("30-Block Moving Average Convergence Divergence")
+                        Text("\(window.rawValue)-Block Moving Average Convergence Divergence")
                             .font(.system(size: 11, weight: .medium))
                             .foregroundColor(.secondary)
                         Spacer()
@@ -249,7 +281,7 @@ public struct NetworkView: View {
 
                 // X-Axis Sub-Labels & Scrub Hint
                 HStack {
-                    Text("Earlier Blocks (t-29)")
+                    Text("Earlier Blocks (t-\(max(1, macdReport.points.count - 1)))")
                         .font(.caption2)
                         .foregroundColor(.secondary)
                     Spacer()
@@ -269,8 +301,8 @@ public struct NetworkView: View {
                         ProgressView()
                             .controlSize(.small)
                         Text(isSyncing
-                             ? "Node is synchronizing block headers. Dot plot and 30-block MACD activate once sync completes."
-                             : "Gathering 30 contiguous block samples from local Knots daemon...")
+                             ? "Node is synchronizing block headers. Dot plot and MACD activate once sync completes."
+                             : "Gathering \(window.rawValue) contiguous block samples from local Knots daemon...")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -490,6 +522,20 @@ public struct NetworkView: View {
                     .stroke(Color.white.opacity(0.5), style: StrokeStyle(lineWidth: 1.0, dash: [3, 3]))
                 }
 
+                // Subtle drop line from dot to bottom axis (combined in single path for performance)
+                Path { path in
+                    for i in 0..<n {
+                        let cx = xForIndex(i)
+                        let cy = yForRate(points[i].hashratePH)
+                        path.move(to: CGPoint(x: cx, y: cy + 3))
+                        path.addLine(to: CGPoint(x: cx, y: padT + usableH))
+                    }
+                }
+                .stroke(Color.secondary.opacity(0.12), lineWidth: 0.8)
+
+                let dotBaseSize: CGFloat = n > 480 ? 2.5 : (n > 200 ? 4.0 : 6.5)
+                let labelStep = max(5, n / 8)
+
                 // Hashrate Sample Dots (The Dot Plot)
                 ForEach(0..<n, id: \.self) { i in
                     let pt = points[i]
@@ -498,33 +544,26 @@ public struct NetworkView: View {
                     let isHovered = (i == hoveredIndex)
                     let isTip = (i == n - 1)
 
-                    // Subtle drop line from dot to bottom axis
-                    Path { path in
-                        path.move(to: CGPoint(x: cx, y: cy + 4))
-                        path.addLine(to: CGPoint(x: cx, y: padT + usableH))
-                    }
-                    .stroke(Color.secondary.opacity(0.12), lineWidth: 0.8)
-
                     // Outer pulse ring for the live tip dot
                     if isTip && !isHovered {
                         Circle()
                             .stroke(Color.cyan.opacity(0.35), lineWidth: 3.5)
-                            .frame(width: 15, height: 15)
+                            .frame(width: dotBaseSize + 8.5, height: dotBaseSize + 8.5)
                             .position(x: cx, y: cy)
                     }
 
                     // Dot itself
                     Circle()
                         .fill(isHovered ? Color.white : (isTip ? Color.green : Color.cyan))
-                        .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: isHovered ? 2.0 : 1.2))
-                        .shadow(color: Color.cyan.opacity(0.6), radius: isHovered ? 4 : 2)
-                        .frame(width: isHovered ? 11 : (isTip ? 8.5 : 6.5),
-                               height: isHovered ? 11 : (isTip ? 8.5 : 6.5))
+                        .overlay(Circle().stroke(Color.white.opacity(0.9), lineWidth: isHovered ? 2.0 : 1.0))
+                        .shadow(color: Color.cyan.opacity(0.6), radius: isHovered ? 4 : 1.5)
+                        .frame(width: isHovered ? max(10, dotBaseSize + 4) : (isTip ? dotBaseSize + 2 : dotBaseSize),
+                               height: isHovered ? max(10, dotBaseSize + 4) : (isTip ? dotBaseSize + 2 : dotBaseSize))
                         .position(x: cx, y: cy)
 
-                    // X-Axis Block Height Labels (Modulo 100 or Tip)
-                    if (i % 5 == 0) || isTip || isHovered {
-                        Text("\(pt.height % 100)")
+                    // X-Axis Block Height Labels (Step-based or Tip/Hovered)
+                    if (i % labelStep == 0) || isTip || isHovered {
+                        Text("\(pt.height % 1000)")
                             .font(.system(size: 8, weight: isHovered ? .bold : .regular, design: .monospaced))
                             .foregroundColor(isHovered ? .white : .secondary)
                             .position(x: cx, y: padT + usableH + 10)
@@ -577,7 +616,7 @@ public struct NetworkView: View {
                 return zeroY - (CGFloat(norm) * halfH)
             }
 
-            let barWidth: CGFloat = min(9.0, max(2.5, (usableW / CGFloat(max(1, n))) * 0.55))
+            let barWidth: CGFloat = min(9.0, max(1.0, (usableW / CGFloat(max(1, n))) * 0.65))
 
             ZStack(alignment: .topLeading) {
                 // Center Baseline (Zero Line)
@@ -658,23 +697,26 @@ public struct NetworkView: View {
                     .stroke(Color(red: 1.0, green: 0.6, blue: 0.2), lineWidth: 1.5)
                 }
 
-                // Point Dots along MACD and Signal Lines
+                // Point Dots along MACD and Signal Lines (drawn for n <= 120 or tip/hover for large n)
                 ForEach(0..<n, id: \.self) { i in
-                    let pt = points[i]
-                    let cx = xForIndex(i)
-                    let macdY = yForVal(pt.macd)
-                    let sigY = yForVal(pt.signal)
                     let isHovered = (i == hoveredIndex)
+                    let isTip = (i == n - 1)
+                    if n <= 120 || isHovered || isTip {
+                        let pt = points[i]
+                        let cx = xForIndex(i)
+                        let macdY = yForVal(pt.macd)
+                        let sigY = yForVal(pt.signal)
 
-                    Circle()
-                        .fill(Color(red: 0.2, green: 0.85, blue: 1.0))
-                        .frame(width: isHovered ? 6 : 3.5, height: isHovered ? 6 : 3.5)
-                        .position(x: cx, y: macdY)
+                        Circle()
+                            .fill(Color(red: 0.2, green: 0.85, blue: 1.0))
+                            .frame(width: isHovered ? 6 : 3.5, height: isHovered ? 6 : 3.5)
+                            .position(x: cx, y: macdY)
 
-                    Circle()
-                        .fill(Color(red: 1.0, green: 0.6, blue: 0.2))
-                        .frame(width: isHovered ? 6 : 3.5, height: isHovered ? 6 : 3.5)
-                        .position(x: cx, y: sigY)
+                        Circle()
+                            .fill(Color(red: 1.0, green: 0.6, blue: 0.2))
+                            .frame(width: isHovered ? 6 : 3.5, height: isHovered ? 6 : 3.5)
+                            .position(x: cx, y: sigY)
+                    }
                 }
             }
             .contentShape(Rectangle())

@@ -584,21 +584,10 @@ public final class NodeManager: @unchecked Sendable {
                             history: []
                         )
                     } else {
-                        // Node is fully synced: seed the 30-block window if not yet seeded
+                        // Node is fully synced: ensure block headers for target rolling window are available
                         let bhash = binfo.bestblockhash
                         if !bhash.isEmpty {
-                            if self.hashrateTracker.sampleCount < 30 {
-                                await self.seedHashrateWindow(tipHash: bhash, count: 31)
-                            } else if let header = try? await self.rpcClient.getBlockHeader(hash: bhash) {
-                                if let target = TargetConverter.targetHexFromBits(UInt32(header.bits, radix: 16) ?? 0) {
-                                    self.hashrateTracker.addBlock(
-                                        height: header.height,
-                                        hash: header.hash,
-                                        timestamp: TimeInterval(header.time),
-                                        targetHex: target
-                                    )
-                                }
-                            }
+                            await self.ensureHeadersAvailable(tipHash: bhash)
                         }
 
                         // Query consensus hashrate from local Knots daemon
@@ -625,38 +614,88 @@ public final class NodeManager: @unchecked Sendable {
         }
     }
 
-    /// Seeds the hashrate tracker with a contiguous chain of block headers from tip backwards.
-    public func seedHashrateWindow(tipHash: String, count: Int = 31) async {
-        var currentHash = tipHash
-        var fetchedHeaders: [BlockHeader] = []
+    /// Target rolling history window requested by the operator (default: 30 blocks).
+    public var targetRollingWindow: RollingHistoryWindow = .blocks30
 
-        for _ in 0..<count {
-            guard !currentHash.isEmpty else { break }
+    /// Bounded in-memory block header cache to prevent redundant RPC calls across range switches.
+    public private(set) var cachedHeaders: [String: BlockHeader] = [:]
+    private var isBackfillInProgress = false
+
+    /// Ensures block headers are available up to the requested target window, performing lazy,
+    /// throttled, cancelable backwards backfills from local Knots RPC without full block downloads.
+    public func ensureHeadersAvailable(tipHash: String, targetCount: Int? = nil) async {
+        guard !tipHash.isEmpty else { return }
+
+        // Fetch tip header if not yet cached
+        var currentTipHeader = cachedHeaders[tipHash]
+        if currentTipHeader == nil {
+            if let fetched = try? await rpcClient.getBlockHeader(hash: tipHash) {
+                cachedHeaders[tipHash] = fetched
+                currentTipHeader = fetched
+                if let target = TargetConverter.targetHexFromBits(UInt32(fetched.bits, radix: 16) ?? 0) {
+                    hashrateTracker.addBlock(
+                        height: fetched.height,
+                        hash: fetched.hash,
+                        timestamp: TimeInterval(fetched.time),
+                        targetHex: target
+                    )
+                }
+            } else {
+                return
+            }
+        }
+
+        let needed = targetCount ?? min(targetRollingWindow.rawValue + 31, RollingHistoryWindow.maxCapacity)
+        guard hashrateTracker.sampleCount < needed, !isBackfillInProgress else { return }
+
+        isBackfillInProgress = true
+        defer { isBackfillInProgress = false }
+
+        // Trace contiguous chain backwards from tipHash
+        var chain: [BlockHeader] = []
+        var currHash: String? = tipHash
+        while let h = currHash, let hdr = cachedHeaders[h], chain.count < needed {
+            chain.append(hdr)
+            currHash = hdr.previousblockhash
+        }
+
+        // Backfill older headers if chain is shorter than needed
+        var backfillBatchCount = 0
+        while chain.count < needed, let nextPrev = currHash, !nextPrev.isEmpty {
+            if Task.isCancelled { break }
             do {
-                let header = try await rpcClient.getBlockHeader(hash: currentHash)
-                fetchedHeaders.append(header)
-                if let prev = header.previousblockhash, !prev.isEmpty {
-                    currentHash = prev
-                } else {
-                    break
+                let hdr = try await rpcClient.getBlockHeader(hash: nextPrev)
+                cachedHeaders[nextPrev] = hdr
+                chain.append(hdr)
+                currHash = hdr.previousblockhash
+                backfillBatchCount += 1
+
+                // Explicit RPC-rate budget: yield and micro-pause every 25 sequential requests
+                // to prevent starving health polling or monopolizing the RPC socket
+                if backfillBatchCount % 25 == 0 {
+                    await Task.yield()
+                    try? await Task.sleep(nanoseconds: 5_000_000) // 5ms micro-pause
                 }
             } catch {
                 break
             }
         }
 
-        guard !fetchedHeaders.isEmpty else { return }
-        // Reverse so headers are added in ascending chronological order
-        for header in fetchedHeaders.reversed() {
-            if let target = TargetConverter.targetHexFromBits(UInt32(header.bits, radix: 16) ?? 0) {
-                hashrateTracker.addBlock(
-                    height: header.height,
-                    hash: header.hash,
-                    timestamp: TimeInterval(header.time),
-                    targetHex: target
-                )
-            }
+        // Populate tracker with contiguous headers
+        if !chain.isEmpty {
+            hashrateTracker.seedBlocks(headers: chain)
         }
+
+        // Prune cache to avoid unbounded growth beyond maxCapacity + buffer
+        if cachedHeaders.count > RollingHistoryWindow.maxCapacity + 200 {
+            let validHashes = Set(chain.map { $0.hash })
+            cachedHeaders = cachedHeaders.filter { validHashes.contains($0.key) }
+        }
+    }
+
+    /// Seeds the hashrate tracker with a contiguous chain of block headers from tip backwards.
+    public func seedHashrateWindow(tipHash: String, count: Int = 31) async {
+        await ensureHeadersAvailable(tipHash: tipHash, targetCount: count)
     }
 
     public func reloadCredentialsFromDisk() {
