@@ -334,8 +334,8 @@ public actor WalletInventory {
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             try data.write(to: metadataFileURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
             self.metadata = copy
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
         } catch {
             throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
         }
@@ -352,18 +352,31 @@ public actor WalletInventory {
     /// Discovers unowned legacy wallets on disk and marks them quarantined/unassigned.
     /// Strictly avoids heuristic substring guessing (e.g. "kevin" or "peter") and avoids auto-assigning to current caller.
     public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String? = nil) {
+        guard metadataLoadError == nil else { return }
+        var copy = self.metadata
         var didChange = false
         for name in diskNames {
             let key = name.lowercased()
-            if metadata.walletOwners[key] == nil {
-                if !metadata.quarantinedWallets.contains(key) {
-                    metadata.quarantinedWallets.insert(key)
+            if copy.walletOwners[key] == nil {
+                if !copy.quarantinedWallets.contains(key) {
+                    copy.quarantinedWallets.insert(key)
                     didChange = true
                 }
             }
         }
         if didChange {
-            try? saveMetadata()
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            encoder.dateEncodingStrategy = .iso8601
+            if let data = try? encoder.encode(copy) {
+                do {
+                    try data.write(to: metadataFileURL, options: .atomic)
+                    self.metadata = copy
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
+                } catch {
+                    // Do not desync in-memory state on write failure
+                }
+            }
         }
     }
 
@@ -446,8 +459,8 @@ public actor WalletInventory {
         do {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             try data.write(to: metadataFileURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
             self.metadata = copy
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
         } catch {
             throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
         }

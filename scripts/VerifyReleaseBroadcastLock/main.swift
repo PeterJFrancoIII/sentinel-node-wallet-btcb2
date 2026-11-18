@@ -147,11 +147,22 @@ struct ReleaseLockVerifier {
         }
         print("✓ Verified: Read-only RPC successfully executed exactly 1 outbound transport request.")
 
-        // 8. WO-39 Release Gate: Verify OperatorAccountPurgeCoordinator and WalletInventory.deleteWalletFromMac fail closed in release mode
-        print("\n--- Section 8: Permanent Deletion Release Gating (WO-39) ---")
+        // 8. WO-39 & WO-44 Release Gate: Verify OperatorAccountPurgeCoordinator and WalletInventory.deleteWalletFromMac fail closed in release mode
+        print("\n--- Section 8: Permanent Deletion Release Gating (WO-39, WO-44) ---")
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nodepocket_release_purge_test_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Plant sentinel fixture with known byte pattern to measure file integrity
+        let sentinelURL = tempDir.appendingPathComponent("sentinel_wallet_fixture.dat")
+        let sentinelBytes: [UInt8] = [0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x01, 0x02, 0x03, 0x04]
+        let sentinelData = Data(sentinelBytes)
+        do {
+            try sentinelData.write(to: sentinelURL, options: .atomic)
+        } catch {
+            fatalError("FAILURE: Could not create sentinel fixture: \(error)")
+        }
+        let dirContentsBefore = (try? FileManager.default.contentsOfDirectory(atPath: tempDir.path))?.sorted() ?? []
 
         let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
         let inv = WalletInventory(rpcClient: client, dataDirectory: tempDir, authCoordinator: authCoord, allowUnauthenticatedForTesting: true)
@@ -210,8 +221,19 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: deleteWalletFromMac threw unexpected error: \(error)")
         }
 
-        // 8d. Assert zero files were removed in tempDir
-        print("✓ Verified: Release-compiled adversarial test confirmed zero file deletions, zero Keychain mutations, zero RPC calls.")
+        // 8d. Measure and assert zero file deletions or mutations
+        guard FileManager.default.fileExists(atPath: sentinelURL.path) else {
+            fatalError("FAILURE: Sentinel fixture was unexpectedly deleted during release purge attempt!")
+        }
+        let sentinelDataAfter = (try? Data(contentsOf: sentinelURL)) ?? Data()
+        guard sentinelDataAfter == sentinelData else {
+            fatalError("FAILURE: Sentinel fixture content was modified during release purge attempt!")
+        }
+        let dirContentsAfter = (try? FileManager.default.contentsOfDirectory(atPath: tempDir.path))?.sorted() ?? []
+        guard dirContentsAfter == dirContentsBefore else {
+            fatalError("FAILURE: Directory contents changed after failed release purge! Before: \(dirContentsBefore), After: \(dirContentsAfter)")
+        }
+        print("✓ Verified: Measured sentinel fixture (\(sentinelData.count) bytes) and directory contents before and after failed release purge: byte-for-byte identical, zero file deletions, zero file modifications, zero RPC calls.")
 
         print("=== RELEASE BROADCAST & PURGE GATE VERIFICATION: 100% SUCCESS ===")
     }

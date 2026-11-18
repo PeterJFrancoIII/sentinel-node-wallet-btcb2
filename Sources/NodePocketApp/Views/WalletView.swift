@@ -6,6 +6,7 @@ public struct WalletView: View {
 
     // Wallet Lifecycle Sheets
     @State private var showCreateModal = false
+    @State private var createModalToken = UUID()
     @State private var walletNameInput = ""
     @State private var passphraseInput = ""
     @State private var passphraseConfirmInput = ""
@@ -208,12 +209,20 @@ public struct WalletView: View {
         }
         .onChange(of: showCreateModal) { isOpen in
             if isOpen {
+                let token = UUID()
+                self.createModalToken = token
+                let sessionID = state.authSession?.id
                 let currentUser = state.authSession?.username
                 Task { @MainActor in
                     let suggested = await state.generateDefaultWalletName()
-                    if state.authSession?.username == currentUser && walletNameInput.isEmpty {
-                        walletNameInput = suggested
+                    guard self.showCreateModal,
+                          self.createModalToken == token,
+                          state.authSession?.id == sessionID,
+                          state.authSession?.username == currentUser,
+                          walletNameInput.isEmpty else {
+                        return
                     }
+                    walletNameInput = suggested
                 }
             }
         }

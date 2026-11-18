@@ -1288,9 +1288,16 @@ public actor WalletAuthCoordinator {
         time: TimeInterval = Date().timeIntervalSince1970
     ) throws {
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let fallback = Self.loadDurableLockoutFallback(username: userKey) {
+            if let lock = fallback.lockedUntil, lock > Date(timeIntervalSince1970: time) {
+                let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
+                throw WalletAuthError.rateLimited(secondsRemaining: max(1, rem))
+            }
+        }
         guard var rec = records[userKey] else {
             throw WalletAuthError.invalidCredentials
         }
+        let originalRecord = rec
         if let lock = rec.lockedUntil, lock > Date(timeIntervalSince1970: time) {
             let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
             throw WalletAuthError.rateLimited(secondsRemaining: max(1, rem))
@@ -1358,15 +1365,17 @@ public actor WalletAuthCoordinator {
             try saveRecords()
             Self.clearDurableLockoutFallback(username: userKey)
         } catch let storageErr as AuthRegistryStorageError {
+            self.records[userKey] = originalRecord
             self.registryLoadError = storageErr
             recordAuthFailure(.registryUnavailable)
-            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: rec.failedAttempts, lockedUntil: rec.lockedUntil)
+            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: originalRecord.failedAttempts, lockedUntil: originalRecord.lockedUntil)
             throw WalletAuthError.registryStorageError(storageErr)
         } catch {
+            self.records[userKey] = originalRecord
             let writeErr = AuthRegistryStorageError.writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
             self.registryLoadError = writeErr
             recordAuthFailure(.registryUnavailable)
-            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: rec.failedAttempts, lockedUntil: rec.lockedUntil)
+            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: originalRecord.failedAttempts, lockedUntil: originalRecord.lockedUntil)
             throw WalletAuthError.registryStorageError(writeErr)
         }
     }

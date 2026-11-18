@@ -70,6 +70,45 @@ public struct OperatorPurgePreflightInventory: Sendable, Equatable {
     }
 }
 
+public struct PurgeJournalRecord: Codable, Sendable, Equatable {
+    public enum Stage: String, Codable, Sendable {
+        case initiated
+        case walletsUnloaded = "wallets_unloaded"
+        case walletsRemoved = "wallets_removed"
+        case credentialsPurged = "credentials_purged"
+        case completed
+    }
+
+    public let operationId: UUID
+    public let operatorUsername: String
+    public let sessionEpoch: String
+    public let planDigest: String
+    public var stage: Stage
+    public let ownedWallets: [String]
+    public var perWalletStatus: [String: String]
+    public var timestamp: Date
+
+    public init(
+        operationId: UUID,
+        operatorUsername: String,
+        sessionEpoch: String,
+        planDigest: String,
+        stage: Stage,
+        ownedWallets: [String],
+        perWalletStatus: [String: String] = [:],
+        timestamp: Date = Date()
+    ) {
+        self.operationId = operationId
+        self.operatorUsername = operatorUsername
+        self.sessionEpoch = sessionEpoch
+        self.planDigest = planDigest
+        self.stage = stage
+        self.ownedWallets = ownedWallets
+        self.perWalletStatus = perWalletStatus
+        self.timestamp = timestamp
+    }
+}
+
 public actor OperatorAccountPurgeCoordinator {
     private let authCoordinator: WalletAuthCoordinator
     private let walletInventory: WalletInventory
@@ -81,6 +120,11 @@ public actor OperatorAccountPurgeCoordinator {
     private var mockDeviceOwnerSuccessForTesting: Bool = false
     public func setMockDeviceOwnerSuccessForTesting(_ enabled: Bool) {
         self.mockDeviceOwnerSuccessForTesting = enabled
+    }
+
+    private var isIsolatedTestPurgeAuthorized: Bool = false
+    public func authorizeIsolatedTestPurge(_ authorized: Bool) {
+        self.isIsolatedTestPurgeAuthorized = authorized
     }
     #endif
 
@@ -99,19 +143,55 @@ public actor OperatorAccountPurgeCoordinator {
     }
 
     private func verifyPathContainmentAndNoSymlinks(candidateURL: URL) throws -> URL {
-        let standardized = candidateURL.standardizedFileURL.path
-        let datadirStandardized = dataDirectory.standardizedFileURL.path
-        guard standardized.hasPrefix(datadirStandardized) else {
-            throw OperatorAccountPurgeError.pathEscape(standardized)
+        let standardizedCandidate = candidateURL.standardizedFileURL.path
+        let standardizedDataDir = dataDirectory.standardizedFileURL.path
+        guard standardizedCandidate.hasPrefix(standardizedDataDir) else {
+            throw OperatorAccountPurgeError.pathEscape(standardizedCandidate)
         }
+
+        let resolvedCandidate = candidateURL.standardizedFileURL.resolvingSymlinksInPath().path
+        let resolvedDataDir = dataDirectory.standardizedFileURL.resolvingSymlinksInPath().path
+        guard resolvedCandidate.hasPrefix(resolvedDataDir) && resolvedCandidate != resolvedDataDir else {
+            throw OperatorAccountPurgeError.pathEscape(resolvedCandidate)
+        }
+
         var current = candidateURL
-        while current.standardizedFileURL.path.hasPrefix(datadirStandardized) && current.standardizedFileURL.path != datadirStandardized {
+        while current.standardizedFileURL.path.hasPrefix(standardizedDataDir) && current.standardizedFileURL.path != standardizedDataDir {
             if (try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)) != nil {
+                throw OperatorAccountPurgeError.symlinkNotPermitted(current.path)
+            }
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: current.path),
+               let fileType = attrs[.type] as? FileAttributeType,
+               fileType == .typeSymbolicLink {
                 throw OperatorAccountPurgeError.symlinkNotPermitted(current.path)
             }
             current = current.deletingLastPathComponent()
         }
         return candidateURL
+    }
+
+    public func inspectPendingJournal(username: String) -> PurgeJournalRecord? {
+        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
+        guard FileManager.default.fileExists(atPath: journalURL.path),
+              let data = try? Data(contentsOf: journalURL) else {
+            return nil
+        }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try? decoder.decode(PurgeJournalRecord.self, from: data)
+    }
+
+    private func writeDurableJournal(record: PurgeJournalRecord, to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(record)
+        try data.write(to: url, options: .atomic)
+        if let fileHandle = try? FileHandle(forWritingTo: url) {
+            try? fileHandle.synchronize()
+            try? fileHandle.close()
+        }
     }
 
     public func preflight(
@@ -126,8 +206,20 @@ public actor OperatorAccountPurgeCoordinator {
         }
         try await authCoordinator.verifyCapability(session)
 
+        // Strict metadata load check: fail closed if metadata is unreadable or corrupted
+        if let metadataErr = await walletInventory.metadataLoadError {
+            return OperatorPurgePreflightInventory(
+                username: username,
+                ownedWallets: [],
+                receiveAddressCount: 0,
+                totalBalanceSats: 0,
+                isEligibleForPermanentDeletion: false,
+                blockingReason: "Wallet inventory metadata is corrupted or failed to load: \(metadataErr.localizedDescription)"
+            )
+        }
+
         let metadata = await walletInventory.getMetadata()
-        let userKey = username.lowercased()
+        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let ownedWallets = metadata.walletOwners.compactMap { (wallet, owner) -> String? in
             owner.lowercased() == userKey ? wallet : nil
         }.sorted()
@@ -136,12 +228,24 @@ public actor OperatorAccountPurgeCoordinator {
         var blockingReason: String? = nil
         var isEligible = true
 
-        // Strict disk inventory reconciliation: fail closed if metadata is empty while disk wallets or quarantine exists
-        let diskEntries = (try? FileManager.default.contentsOfDirectory(atPath: dataDirectory.path)) ?? []
-        let hasDiskWallets = diskEntries.contains(where: { entry in
-            !entry.hasPrefix(".") && entry != "wallets_metadata.json" && entry != "auth_registry.json"
-        })
-        if metadata.walletOwners.isEmpty && (hasDiskWallets || !metadata.quarantinedWallets.isEmpty) {
+        // Authoritative Knots wallet directory query (distinguishes wallet files/dirs from blocks/chainstate)
+        let walletDirResponse: WalletDirResponse
+        do {
+            walletDirResponse = try await rpcClient.listWalletDir()
+        } catch {
+            return OperatorPurgePreflightInventory(
+                username: username,
+                ownedWallets: ownedWallets,
+                receiveAddressCount: 0,
+                totalBalanceSats: 0,
+                isEligibleForPermanentDeletion: false,
+                blockingReason: "Node RPC error querying wallet directory: \(error.localizedDescription)"
+            )
+        }
+        let diskWalletNames = walletDirResponse.wallets.map { $0.name }
+
+        // Strict disk inventory reconciliation: fail closed if metadata has no owners while disk wallets or quarantine exists
+        if metadata.walletOwners.isEmpty && (!diskWalletNames.isEmpty || !metadata.quarantinedWallets.isEmpty) {
             return OperatorPurgePreflightInventory(
                 username: username,
                 ownedWallets: ownedWallets,
@@ -150,6 +254,31 @@ public actor OperatorAccountPurgeCoordinator {
                 isEligibleForPermanentDeletion: false,
                 blockingReason: "Metadata registry contains no owners, but unassigned or quarantined wallets exist on disk. Hold for ownership reconciliation."
             )
+        }
+
+        // Check if ANY disk wallet is quarantined or unassigned (fail closed even if other owners exist)
+        for diskWallet in diskWalletNames {
+            let key = diskWallet.lowercased()
+            if metadata.quarantinedWallets.contains(key) {
+                return OperatorPurgePreflightInventory(
+                    username: username,
+                    ownedWallets: ownedWallets,
+                    receiveAddressCount: 0,
+                    totalBalanceSats: 0,
+                    isEligibleForPermanentDeletion: false,
+                    blockingReason: "Wallet '\(diskWallet)' is quarantined due to unknown or unreconciled provenance. Purge is held until ownership is reconciled."
+                )
+            }
+            if metadata.walletOwners[key] == nil {
+                return OperatorPurgePreflightInventory(
+                    username: username,
+                    ownedWallets: ownedWallets,
+                    receiveAddressCount: 0,
+                    totalBalanceSats: 0,
+                    isEligibleForPermanentDeletion: false,
+                    blockingReason: "Unassigned wallet '\(diskWallet)' discovered on disk. Permanent deletion is blocked until full ownership reconciliation is performed."
+                )
+            }
         }
 
         // List loaded wallets via RPC (fail closed if RPC fails)
@@ -246,6 +375,9 @@ public actor OperatorAccountPurgeCoordinator {
         #if !DEBUG
         throw OperatorAccountPurgeError.releaseModeDisabled
         #else
+        guard isIsolatedTestPurgeAuthorized else {
+            throw OperatorAccountPurgeError.storageError("Destructive account purge is strictly disabled in normal builds. Execution is only permitted in authorized isolated test fixtures.")
+        }
         guard let session = capability else {
             throw OperatorAccountPurgeError.unauthenticated
         }
@@ -271,7 +403,6 @@ public actor OperatorAccountPurgeCoordinator {
         try await authCoordinator.verifyCapability(session)
 
         // 2. Device Owner Presence Challenge
-        #if DEBUG
         if !mockDeviceOwnerSuccessForTesting {
             do {
                 let presenceOk = try await KeychainHelper.shared.authenticateUserPresence(
@@ -284,18 +415,6 @@ public actor OperatorAccountPurgeCoordinator {
                 throw OperatorAccountPurgeError.deviceOwnerAuthFailed(error.localizedDescription)
             }
         }
-        #else
-        do {
-            let presenceOk = try await KeychainHelper.shared.authenticateUserPresence(
-                reason: "Authorize permanent deletion of account '\(username)' and all owned wallet data"
-            )
-            guard presenceOk else {
-                throw OperatorAccountPurgeError.deviceOwnerAuthFailed("User canceled or failed biometric/device authentication.")
-            }
-        } catch {
-            throw OperatorAccountPurgeError.deviceOwnerAuthFailed(error.localizedDescription)
-        }
-        #endif
         try await authCoordinator.verifyCapability(session)
 
         // 3. Preflight & Zero-Funded Invariant
@@ -312,29 +431,22 @@ public actor OperatorAccountPurgeCoordinator {
         }
         try await authCoordinator.verifyCapability(session)
 
-        // 4. Durable Journal Setup
+        // 4. Durable Journal Setup with Fsync
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
-        struct PurgeJournalRecord: Codable {
-            let username: String
-            let stage: String
-            let wallets: [String]
-            let timestamp: Date
-        }
-        let writeJournal: (String) throws -> Void = { stage in
-            let record = PurgeJournalRecord(username: username, stage: stage, wallets: inventory.ownedWallets, timestamp: Date())
-            let enc = JSONEncoder()
-            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-            enc.dateEncodingStrategy = .iso8601
-            let jData = try enc.encode(record)
-            try jData.write(to: journalURL, options: .atomic)
-        }
-        try writeJournal("started")
+        var journal = PurgeJournalRecord(
+            operationId: UUID(),
+            operatorUsername: username,
+            sessionEpoch: session.id.uuidString,
+            planDigest: "\(userKey):\(inventory.ownedWallets.sorted().joined(separator: ","))",
+            stage: .initiated,
+            ownedWallets: inventory.ownedWallets,
+            perWalletStatus: [:]
+        )
+        try writeDurableJournal(record: journal, to: journalURL)
 
-        // 5. Purge Wallets without try? suppression
-        var purgedWallets: [String] = []
+        // 5. Unload Wallets Stage
         let loaded = try await rpcClient.listWallets()
-
         for wallet in inventory.ownedWallets {
             if loaded.contains(where: { $0.caseInsensitiveCompare(wallet) == .orderedSame }) {
                 do {
@@ -343,7 +455,16 @@ public actor OperatorAccountPurgeCoordinator {
                     throw OperatorAccountPurgeError.storageError("Failed to unload wallet '\(wallet)': \(error.localizedDescription)")
                 }
             }
+            journal.perWalletStatus[wallet] = "unloaded"
+        }
+        journal.stage = .walletsUnloaded
+        journal.timestamp = Date()
+        try writeDurableJournal(record: journal, to: journalURL)
+        try await authCoordinator.verifyCapability(session)
 
+        // 6. Purge Wallets without try? suppression
+        var purgedWallets: [String] = []
+        for wallet in inventory.ownedWallets {
             let candidateA = dataDirectory.appendingPathComponent("wallets").appendingPathComponent(wallet)
             let candidateB = dataDirectory.appendingPathComponent(wallet)
             let walletURL = FileManager.default.fileExists(atPath: candidateA.path) ? candidateA : candidateB
@@ -369,21 +490,31 @@ public actor OperatorAccountPurgeCoordinator {
                 throw OperatorAccountPurgeError.storageError("Failed to remove metadata for '\(wallet)': \(error.localizedDescription)")
             }
 
+            journal.perWalletStatus[wallet] = "purged"
             purgedWallets.append(wallet)
         }
-        try writeJournal("wallets_purged")
+        journal.stage = .walletsRemoved
+        journal.timestamp = Date()
+        try writeDurableJournal(record: journal, to: journalURL)
+        try await authCoordinator.verifyCapability(session)
 
-        // 6. Purge Auth Registry & Keychain Credentials
+        // 7. Purge Auth Registry & Keychain Credentials
         do {
             try await authCoordinator.purgeOperatorRecord(username: username)
         } catch {
             throw OperatorAccountPurgeError.storageError("Failed to purge auth record for '\(username)': \(error.localizedDescription)")
         }
-        try writeJournal("auth_purged")
+        journal.stage = .credentialsPurged
+        journal.timestamp = Date()
+        try writeDurableJournal(record: journal, to: journalURL)
 
-        // 7. Clear Scoped Operator Defaults & Cleanup Journal
+        // 8. Clear Scoped Operator Defaults & Cleanup Journal
         UserDefaults.standard.removeObject(forKey: "nodepocket_selected_wallet_\(userKey)")
-        try? FileManager.default.removeItem(at: journalURL)
+        do {
+            try FileManager.default.removeItem(at: journalURL)
+        } catch {
+            // Log notice if journal removal fails after successful purge
+        }
 
         return purgedWallets
         #endif

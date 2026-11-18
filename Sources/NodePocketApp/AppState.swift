@@ -704,8 +704,17 @@ public final class AppState: ObservableObject {
             return result
         }
         walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+        guard self.authSession?.id == sessionBefore?.id else {
+            return result
+        }
         await self.loadOrEstablishReceiveAddresses(for: name)
+        guard self.authSession?.id == sessionBefore?.id else {
+            return result
+        }
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        guard self.authSession?.id == sessionBefore?.id else {
+            return result
+        }
         self.refreshWalletInventory()
         startupStatus = "Ready"
         appendLog("[WALLET] \(result.statusMessage)")
@@ -726,24 +735,9 @@ public final class AppState: ObservableObject {
         totpOrRecoveryCode: String,
         typedConfirmation: String
     ) async throws -> [String] {
-        #if !DEBUG
+        // WO-44: User-facing destructive account purge is unconditionally disabled in both Debug and Release builds
+        // to prevent accidental data destruction. Automated testing is exclusively conducted in isolated test fixtures.
         throw OperatorAccountPurgeError.releaseModeDisabled
-        #else
-        guard let user = self.authSession?.username else {
-            throw OperatorAccountPurgeError.unauthenticated
-        }
-        let purged = try await accountPurgeCoordinator.executePurge(
-            username: user,
-            password: password,
-            totpOrRecoveryCode: totpOrRecoveryCode,
-            typedConfirmation: typedConfirmation,
-            capability: self.authSession
-        )
-        self.lockWallet()
-        self.refreshAuthState()
-        appendLog("[AUTH] Operator account '\(user)' and \(purged.count) owned wallet(s) permanently deleted.")
-        return purged
-        #endif
     }
 
     public func checkRPCReadiness() async -> (isReady: Bool, status: String) {

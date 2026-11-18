@@ -248,6 +248,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             receiveAddressStore: receiveStore
         )
         await purgeCoordinator.setMockDeviceOwnerSuccessForTesting(true)
+        await purgeCoordinator.authorizeIsolatedTestPurge(true)
 
         // 4. Bob purges his account
         let t1 = t0 + 60
@@ -320,6 +321,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             receiveAddressStore: receiveStore
         )
         await purgeCoordinator.setMockDeviceOwnerSuccessForTesting(true)
+        await purgeCoordinator.authorizeIsolatedTestPurge(true)
 
         // 1. Wrong typed confirmation
         do {
@@ -427,6 +429,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             receiveAddressStore: receiveStore
         )
         await purgeCoordinator.setMockDeviceOwnerSuccessForTesting(true)
+        await purgeCoordinator.authorizeIsolatedTestPurge(true)
 
         let preflight = try await purgeCoordinator.preflight(username: "operator", capability: cap)
         XCTAssertFalse(preflight.isEligibleForPermanentDeletion, "Symlinked wallet must fail preflight eligibility")
@@ -494,6 +497,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             receiveAddressStore: receiveStore
         )
         await purgeCoordinator.setMockDeviceOwnerSuccessForTesting(true)
+        await purgeCoordinator.authorizeIsolatedTestPurge(true)
 
         let t1 = t0 + 60
         let freshTotp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t1)
@@ -564,6 +568,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             receiveAddressStore: receiveStore
         )
         await purgeCoordinator.setMockDeviceOwnerSuccessForTesting(true)
+        await purgeCoordinator.authorizeIsolatedTestPurge(true)
 
         let t1 = t0 + 60
         let freshTotp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t1)
@@ -639,7 +644,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         XCTAssertEqual(MockPurgeRPCURLProtocol.unloadWalletCallCount, 0, "Preflight must NEVER call unloadwallet RPC")
 
         // Case B: Wallet is NOT loaded in node memory -> must fail closed without attempting to load
-        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: []) // node memory has 0 wallets
+        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: [], walletDirEntries: [["name": "loaded_wallet"]]) // node memory has 0 wallets
         let preflightB = try await purgeCoordinator.preflight(username: "operator", capability: cap)
         XCTAssertFalse(preflightB.isEligibleForPermanentDeletion, "Unloaded wallet must fail preflight eligibility")
         XCTAssertTrue(preflightB.blockingReason?.contains("is not loaded in node memory") == true)
@@ -670,7 +675,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         try FileManager.default.createDirectory(at: orphanDir, withIntermediateDirectories: true)
         try Data("data".utf8).write(to: orphanDir.appendingPathComponent("wallet.dat"))
 
-        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: [])
+        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: [], walletDirEntries: [["name": "orphan_wallet"]])
         let rpc = Self.makeMockRPCClient()
         let receiveStore = ReceiveAddressStore()
         let inventory = WalletInventory(
@@ -800,6 +805,287 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         }
     }
 
+    // MARK: - WO-44 / WO-45 / WO-46 Tests
+
+    func testAccountPurgeFailsClosedInDebugWithoutExplicitAuthorization() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_purge_unauthorized_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "operator")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        let cap = try await authCoordinator.enroll(
+            username: "operator",
+            password: "OperatorPassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: ["op_wallet"])
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+        try await inventory.setOwner(for: "op_wallet", owner: "operator")
+
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+        // Explicitly NOT calling authorizeIsolatedTestPurge(true) - default is false
+
+        do {
+            _ = try await purgeCoordinator.executePurge(
+                username: "operator",
+                password: "OperatorPassword123!@#",
+                totpOrRecoveryCode: totp,
+                typedConfirmation: "operator",
+                capability: cap
+            )
+            XCTFail("executePurge must fail closed without explicit test authorization")
+        } catch let err as OperatorAccountPurgeError {
+            guard case .storageError(let msg) = err else {
+                XCTFail("Expected storageError, got \(err)")
+                return
+            }
+            XCTAssertTrue(msg.contains("Destructive account purge is strictly disabled in normal builds"), "Error must explain fixture isolation gating: \(msg)")
+        }
+    }
+
+    func testPreflightFailsClosedWhenUnassignedDiskWalletDiscoveredViaListWalletDir() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_preflight_unassigned_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "alice")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        let cap = try await authCoordinator.enroll(
+            username: "alice",
+            password: "AlicePassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        // Mock listwalletdir returning alice_wallet AND an unassigned wallet_foreign
+        MockPurgeRPCURLProtocol.reset(
+            simulatedBalanceSats: 0,
+            simulateRPCErrors: false,
+            loadedWallets: ["alice_wallet"],
+            walletDirEntries: [["name": "alice_wallet"], ["name": "wallet_foreign"]]
+        )
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+        try await inventory.setOwner(for: "alice_wallet", owner: "alice")
+
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+
+        let preflight = try await purgeCoordinator.preflight(username: "alice", capability: cap)
+        XCTAssertFalse(preflight.isEligibleForPermanentDeletion, "Preflight must fail closed when unassigned wallet exists on disk")
+        XCTAssertTrue(preflight.blockingReason?.contains("Unassigned wallet 'wallet_foreign' discovered on disk") == true, "Blocking reason must identify unassigned wallet: \(String(describing: preflight.blockingReason))")
+    }
+
+    func testPreflightFailsClosedWhenQuarantinedDiskWalletDiscoveredViaListWalletDir() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_preflight_quarantined_disk_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "alice")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        let cap = try await authCoordinator.enroll(
+            username: "alice",
+            password: "AlicePassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        MockPurgeRPCURLProtocol.reset(
+            simulatedBalanceSats: 0,
+            simulateRPCErrors: false,
+            loadedWallets: ["alice_wallet"],
+            walletDirEntries: [["name": "alice_wallet"], ["name": "legacy_orphan"]]
+        )
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+        try await inventory.setOwner(for: "alice_wallet", owner: "alice")
+        await inventory.reconcileLegacyWalletOwnership(diskNames: ["legacy_orphan"])
+
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+
+        let preflight = try await purgeCoordinator.preflight(username: "alice", capability: cap)
+        XCTAssertFalse(preflight.isEligibleForPermanentDeletion, "Preflight must fail closed when quarantined wallet exists on disk")
+        XCTAssertTrue(preflight.blockingReason?.contains("is quarantined due to unknown or unreconciled provenance") == true, "Blocking reason must state quarantine: \(String(describing: preflight.blockingReason))")
+    }
+
+    func testPreflightFailsClosedOnCorruptedMetadata() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_preflight_corrupt_meta_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "alice")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        let cap = try await authCoordinator.enroll(
+            username: "alice",
+            password: "AlicePassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        // Corrupt the metadata file
+        let metaURL = tempDir.appendingPathComponent("wallets_metadata.json")
+        try Data("NOT_A_VALID_JSON_OBJECT".utf8).write(to: metaURL)
+
+        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: [])
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+
+        let preflight = try await purgeCoordinator.preflight(username: "alice", capability: cap)
+        XCTAssertFalse(preflight.isEligibleForPermanentDeletion, "Preflight must fail closed on corrupted metadata")
+        XCTAssertTrue(preflight.blockingReason?.contains("Wallet inventory metadata is corrupted or failed to load") == true, "Blocking reason must state corruption: \(String(describing: preflight.blockingReason))")
+    }
+
+    func testJournalRecoveryInspectionCapturesUnfinishedPurge() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_journal_inspection_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+
+        // Write a mock interrupted journal
+        let opId = UUID()
+        let record = PurgeJournalRecord(
+            operationId: opId,
+            operatorUsername: "interrupted_op",
+            sessionEpoch: UUID().uuidString,
+            planDigest: "digest_123",
+            stage: .walletsUnloaded,
+            ownedWallets: ["wallet_x"],
+            perWalletStatus: ["wallet_x": "unloaded"]
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(record)
+        let journalURL = tempDir.appendingPathComponent("nodepocket_purge_journal_interrupted_op.json")
+        try data.write(to: journalURL, options: .atomic)
+
+        let inspected = await purgeCoordinator.inspectPendingJournal(username: "interrupted_op")
+        XCTAssertNotNil(inspected, "Journal must be successfully discovered and decoded")
+        XCTAssertEqual(inspected?.operationId, opId)
+        XCTAssertEqual(inspected?.stage, .walletsUnloaded)
+        XCTAssertEqual(inspected?.perWalletStatus["wallet_x"], "unloaded")
+    }
+
+    func testSetOwnerAtomicityPreserved() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_setowner_atomicity_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        try await inventory.setOwner(for: "test_atomic_wallet", owner: "operator_a")
+        let owner = await inventory.getOwner(for: "test_atomic_wallet")
+        XCTAssertEqual(owner, "operator_a")
+
+        // Read from disk to verify persistence
+        let metaURL = tempDir.appendingPathComponent("wallets_metadata.json")
+        let diskData = try Data(contentsOf: metaURL)
+        let decoder = JSONDecoder()
+        let reg = try decoder.decode(WalletMetadataRegistry.self, from: diskData)
+        XCTAssertEqual(reg.walletOwners["test_atomic_wallet"], "operator_a")
+    }
+
     private static func makeMockRPCClient() -> BitcoinRPCClient {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [MockPurgeRPCURLProtocol.self]
@@ -821,14 +1107,16 @@ private final class MockPurgeRPCURLProtocol: URLProtocol {
     static var simulatedBalanceSats: Int64 = 0
     static var simulateRPCErrors: Bool = false
     static var loadedWallets: [String] = []
+    static var walletDirEntries: [[String: String]]? = nil
     static var loadWalletCallCount: Int = 0
     static var unloadWalletCallCount: Int = 0
 
-    static func reset(simulatedBalanceSats: Int64 = 0, simulateRPCErrors: Bool = false, loadedWallets: [String] = []) {
+    static func reset(simulatedBalanceSats: Int64 = 0, simulateRPCErrors: Bool = false, loadedWallets: [String] = [], walletDirEntries: [[String: String]]? = nil) {
         lock.lock()
         self.simulatedBalanceSats = simulatedBalanceSats
         self.simulateRPCErrors = simulateRPCErrors
         self.loadedWallets = loadedWallets
+        self.walletDirEntries = walletDirEntries
         self.loadWalletCallCount = 0
         self.unloadWalletCallCount = 0
         lock.unlock()
@@ -880,6 +1168,11 @@ private final class MockPurgeRPCURLProtocol: URLProtocol {
         switch method {
         case "listwallets":
             result = loaded
+        case "listwalletdir":
+            MockPurgeRPCURLProtocol.lock.lock()
+            let entries = MockPurgeRPCURLProtocol.walletDirEntries ?? MockPurgeRPCURLProtocol.loadedWallets.map { ["name": $0] }
+            MockPurgeRPCURLProtocol.lock.unlock()
+            result = ["wallets": entries]
         case "loadwallet":
             MockPurgeRPCURLProtocol.lock.lock()
             MockPurgeRPCURLProtocol.loadWalletCallCount += 1
