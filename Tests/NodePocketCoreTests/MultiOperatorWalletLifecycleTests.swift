@@ -254,13 +254,16 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         // 4. Bob purges his account
         let t1 = t0 + 60
         let freshBobTotp = WalletAuthCoordinator.generateTOTP(secret: bobSec, time: t1)
+        let preflight = try await purgeCoordinator.preflight(username: "bob", capability: bobCap)
+        XCTAssertTrue(preflight.isEligibleForPermanentDeletion)
         let purgedWallets = try await purgeCoordinator.executePurge(
             username: "bob",
             password: "BobPassword123!@#",
             totpOrRecoveryCode: freshBobTotp,
             typedConfirmation: "bob",
             capability: bobCap,
-            time: t1
+            time: t1,
+            expectedMetadataGeneration: preflight.metadataGeneration
         )
 
         XCTAssertEqual(purgedWallets, ["bob_wallet"])
@@ -1638,6 +1641,314 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         let decoder = JSONDecoder()
         let reg = try decoder.decode(WalletMetadataRegistry.self, from: diskData)
         XCTAssertEqual(reg.walletOwners["test_atomic_wallet"], "operator_a")
+    }
+
+    // MARK: - WO-55 & WO-56 Crash Recovery, Point-of-No-Return Ordering, and Factor Concurrency Tests
+
+    func testPurgeInterruptionRollbackRestoresQuarantinedWallets() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_purge_rollback_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, receiveAddressStore: receiveStore, authCoordinator: authCoordinator)
+
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
+        )
+
+        // 1. Setup operator and wallet
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "alice")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        _ = try await authCoordinator.enroll(
+            username: "alice",
+            password: "AlicePassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        let walletsDir = tempDir.appendingPathComponent("wallets")
+        try FileManager.default.createDirectory(at: walletsDir, withIntermediateDirectories: true)
+        let aliceWalletDir = walletsDir.appendingPathComponent("alice_wallet")
+        try FileManager.default.createDirectory(at: aliceWalletDir, withIntermediateDirectories: true)
+        let walletFile = aliceWalletDir.appendingPathComponent("wallet.dat")
+        try Data("alice_secret_wallet_data".utf8).write(to: walletFile)
+        try await inventory.setOwner(for: "alice_wallet", owner: "alice")
+
+        // 2. Simulate interruption after quarantine move, BEFORE credentials purge (Point-of-No-Return)
+        let opId = UUID()
+        let quarantineBase = tempDir.appendingPathComponent(".purge_quarantine").appendingPathComponent(opId.uuidString)
+        let quarantinedWalletDir = quarantineBase.appendingPathComponent("alice_wallet")
+        try FileManager.default.createDirectory(at: quarantineBase, withIntermediateDirectories: true)
+        try FileManager.default.moveItem(at: aliceWalletDir, to: quarantinedWalletDir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: aliceWalletDir.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: quarantinedWalletDir.path))
+
+        let journal = PurgeJournalRecord(
+            operationId: opId,
+            operatorUsername: "alice",
+            sessionEpoch: UUID().uuidString,
+            planDigest: "testdigest",
+            stage: .walletsUnloaded,
+            ownedWallets: ["alice_wallet"],
+            perWalletStatus: ["alice_wallet": "quarantined"],
+            timestamp: Date()
+        )
+        let journalURL = tempDir.appendingPathComponent("nodepocket_purge_journal_alice.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let journalData = try encoder.encode(journal)
+        try journalData.write(to: journalURL)
+
+        // 3. Perform recovery: since stage is .walletsUnloaded (before credentialsPurged), rollback must occur!
+        let outcome = try await purgeCoordinator.recoverPendingPurge(username: "alice")
+        guard case .rolledBack(let restored, _) = outcome else {
+            XCTFail("Expected .rolledBack outcome, got \(outcome)")
+            return
+        }
+        XCTAssertEqual(restored, ["alice_wallet"])
+
+        // 4. Assert wallet is fully restored to original location with intact bytes
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walletFile.path), "Wallet file must be restored")
+        let restoredBytes = try Data(contentsOf: walletFile)
+        XCTAssertEqual(String(data: restoredBytes, encoding: .utf8), "alice_secret_wallet_data")
+
+        // 5. Assert quarantine directory and journal are cleaned up
+        XCTAssertFalse(FileManager.default.fileExists(atPath: quarantineBase.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
+
+        // 6. Assert operator account is still enrolled
+        let isEnrolled = await authCoordinator.isEnrolled
+        XCTAssertTrue(isEnrolled)
+    }
+
+    func testPurgeResumeAfterPointOfNoReturnFinalizesCleanup() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_purge_resume_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, receiveAddressStore: receiveStore, authCoordinator: authCoordinator)
+
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
+        )
+
+        // 1. Simulate post-Point-of-No-Return state: credentials are already purged from auth registry
+        let opId = UUID()
+        let quarantineBase = tempDir.appendingPathComponent(".purge_quarantine").appendingPathComponent(opId.uuidString)
+        let quarantinedWalletDir = quarantineBase.appendingPathComponent("bob_wallet")
+        try FileManager.default.createDirectory(at: quarantinedWalletDir, withIntermediateDirectories: true)
+        try Data("bob_quarantined_bytes".utf8).write(to: quarantinedWalletDir.appendingPathComponent("wallet.dat"))
+
+        let journal = PurgeJournalRecord(
+            operationId: opId,
+            operatorUsername: "bob",
+            sessionEpoch: UUID().uuidString,
+            planDigest: "testdigest",
+            stage: .credentialsPurged,
+            ownedWallets: ["bob_wallet"],
+            perWalletStatus: ["bob_wallet": "quarantined"],
+            timestamp: Date()
+        )
+        let journalURL = tempDir.appendingPathComponent("nodepocket_purge_journal_bob.json")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let journalData = try encoder.encode(journal)
+        try journalData.write(to: journalURL)
+
+        // 2. Perform recovery: since stage is .credentialsPurged, resume cleanup must finalize removal
+        let outcome = try await purgeCoordinator.recoverPendingPurge(username: "bob")
+        guard case .resumedAndCompleted(let purged) = outcome else {
+            XCTFail("Expected .resumedAndCompleted outcome, got \(outcome)")
+            return
+        }
+        XCTAssertEqual(purged, ["bob_wallet"])
+
+        // 3. Assert quarantine folder and files are completely removed
+        XCTAssertFalse(FileManager.default.fileExists(atPath: quarantinedWalletDir.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: quarantineBase.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: journalURL.path))
+    }
+
+    func testCorruptedJournalRecoveryFailsClosed() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_corrupt_journal_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, receiveAddressStore: receiveStore, authCoordinator: authCoordinator)
+
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
+        )
+
+        let journalURL = tempDir.appendingPathComponent("nodepocket_purge_journal_charlie.json")
+        try Data("NOT_VALID_JSON{{{".utf8).write(to: journalURL)
+
+        let outcome = try await purgeCoordinator.recoverPendingPurge(username: "charlie")
+        guard case .corruptedJournal(let path, _) = outcome else {
+            XCTFail("Expected corruptedJournal, got \(outcome)")
+            return
+        }
+        XCTAssertEqual(path, journalURL.path)
+    }
+
+    func testConcurrentRecoveryCodeConsumptionFailsSecondProcess() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_recovery_race_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordA = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await coordA.generateEnrollmentSecret(username: "race_operator")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        _ = try await coordA.enroll(
+            username: "race_operator",
+            password: "OperatorPassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        let targetCode = codes.first!
+        let coordB = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Race verifyFreshCredentials on both coordinators simultaneously using the exact same recovery code
+        var successCount = 0
+        var failureCount = 0
+
+        await withTaskGroup(of: Result<Void, Error>.self) { group in
+            group.addTask {
+                do {
+                    try await coordA.verifyFreshCredentials(
+                        username: "race_operator",
+                        password: "OperatorPassword123!@#",
+                        totpOrRecoveryCode: targetCode,
+                        time: t0 + 10
+                    )
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }
+            group.addTask {
+                do {
+                    try await coordB.verifyFreshCredentials(
+                        username: "race_operator",
+                        password: "OperatorPassword123!@#",
+                        totpOrRecoveryCode: targetCode,
+                        time: t0 + 10
+                    )
+                    return .success(())
+                } catch {
+                    return .failure(error)
+                }
+            }
+
+            for await result in group {
+                switch result {
+                case .success:
+                    successCount += 1
+                case .failure:
+                    failureCount += 1
+                }
+            }
+        }
+
+        XCTAssertEqual(successCount, 1, "Exactly one process must succeed in consuming the recovery code")
+        XCTAssertEqual(failureCount, 1, "The racing second process must fail due to already-consumed code")
+
+        // Assert code is completely removed from disk and cannot be used a second time
+        let coordC = WalletAuthCoordinator(dataDirectory: tempDir)
+        do {
+            try await coordC.verifyFreshCredentials(
+                username: "race_operator",
+                password: "OperatorPassword123!@#",
+                totpOrRecoveryCode: targetCode,
+                time: t0 + 20
+            )
+            XCTFail("Re-using the consumed recovery code must fail closed")
+        } catch let err as WalletAuthError {
+            guard case .invalidCredentials = err else {
+                XCTFail("Expected invalidCredentials on consumed recovery code, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testStaleActorMetadataSaveWithExpectedGenerationRejected() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_meta_cas_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let auth = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        let inventoryA = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, receiveAddressStore: receiveStore, authCoordinator: auth)
+        let inventoryB = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, receiveAddressStore: receiveStore, authCoordinator: auth)
+
+        // Initial metadata save: version = 1
+        try await inventoryA.setOwner(for: "initial_wallet", owner: "operator_a")
+        let gen1 = await inventoryA.getMetadata().version
+
+        // Actor B updates metadata: version increments
+        try await inventoryB.setOwner(for: "second_wallet", owner: "operator_b")
+        let gen2 = await inventoryB.getMetadata().version
+        XCTAssertGreaterThan(gen2, gen1)
+
+        // Actor A attempts to save with stale expected generation
+        do {
+            try await inventoryA.saveMetadata(expectedGeneration: gen1)
+            XCTFail("saveMetadata with stale expected generation must throw conflict error")
+        } catch let err as WalletInventoryError {
+            guard case .invalidWalletName(let msg) = err else {
+                XCTFail("Expected invalidWalletName with generation conflict, got \(err)")
+                return
+            }
+            XCTAssertTrue(msg.contains("generation conflict"), "Error must cite generation conflict: \(msg)")
+        }
+
+        // Verify disk still has both wallets intact
+        let diskMeta = await inventoryB.getMetadata()
+        XCTAssertEqual(diskMeta.walletOwners["second_wallet"], "operator_b")
     }
 
     private static func makeTestFixtureCapability(

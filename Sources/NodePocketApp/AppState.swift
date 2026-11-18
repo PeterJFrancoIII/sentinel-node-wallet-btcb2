@@ -217,10 +217,17 @@ public final class AppState: ObservableObject {
 
                 // Refresh transactions and wallet snapshot periodically if logged in
                 if let self = self, self.isWalletTabUnlocked, let session = self.authSession {
-                    if let txs = try? await self.walletManager.fetchRecentTransactions(count: 30, capability: session) {
+                    let currentTarget = self.walletSnapshot?.name
+                    if let txs = try? await self.walletManager.fetchRecentTransactions(count: 30, capability: session),
+                       self.authSession?.id == session.id,
+                       self.isWalletTabUnlocked,
+                       self.walletSnapshot?.name == currentTarget {
                         self.transactions = txs
                     }
-                    if let snap = try? await self.walletManager.refreshWalletInfo(capability: session) {
+                    if let snap = try? await self.walletManager.refreshWalletInfo(capability: session),
+                       self.authSession?.id == session.id,
+                       self.isWalletTabUnlocked,
+                       self.walletSnapshot?.name == currentTarget {
                         self.walletSnapshot = snap
                     }
                 }
@@ -716,7 +723,7 @@ public final class AppState: ObservableObject {
             return result
         }
 
-        await self.loadOrEstablishReceiveAddresses(for: name)
+        let stagedAddresses = await self.stageReceiveAddresses(for: name, session: sessionBefore)
         guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
             return result
         }
@@ -724,6 +731,7 @@ public final class AppState: ObservableObject {
         // Atomically publish staged results to @MainActor
         self.walletSnapshot = stagedSnapshot
         self.transactions = stagedTransactions
+        self.commitStagedReceiveAddresses(stagedAddresses, for: name, session: sessionBefore)
         self.refreshWalletInventory()
         startupStatus = "Ready"
         appendLog("[WALLET] \(result.statusMessage)")
@@ -1121,16 +1129,30 @@ public final class AppState: ObservableObject {
     }
 
     public func selectWallet(name: String) {
+        let sessionBefore = self.authSession
         Task { @MainActor in
             do {
-                try await walletManager.selectWallet(name: name, capability: self.authSession)
-                self.walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-                await self.loadOrEstablishReceiveAddresses(for: name)
-                self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                try await walletManager.selectWallet(name: name, capability: sessionBefore)
+                guard self.authSession?.id == sessionBefore?.id, self.isWalletTabUnlocked else { return }
+
+                let snap = try? await walletManager.refreshWalletInfo(capability: sessionBefore)
+                guard self.authSession?.id == sessionBefore?.id, self.isWalletTabUnlocked else { return }
+
+                let stagedAddresses = await self.stageReceiveAddresses(for: name, session: sessionBefore)
+                guard self.authSession?.id == sessionBefore?.id, self.isWalletTabUnlocked else { return }
+
+                let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: sessionBefore)) ?? []
+                guard self.authSession?.id == sessionBefore?.id, self.isWalletTabUnlocked else { return }
+
+                // Atomic commit to @MainActor UI state
+                self.walletSnapshot = snap
+                self.commitStagedReceiveAddresses(stagedAddresses, for: name, session: sessionBefore)
+                self.transactions = txs
                 self.refreshCoinbaseRewards()
                 self.refreshFeeQuotes()
                 self.refreshWalletInventory()
             } catch {
+                guard self.authSession?.id == sessionBefore?.id else { return }
                 self.alertMessage = "Failed to select wallet: \(error.localizedDescription)"
                 self.showAlert = true
             }
@@ -1147,9 +1169,13 @@ public final class AppState: ObservableObject {
             do {
                 let height = blockchainInfo?.blocks ?? 0
                 let summaries = try await walletInventory.refreshInventory(currentBlockHeight: height, capability: session)
+                guard self.authSession?.id == session.id, self.isWalletTabUnlocked else {
+                    return
+                }
                 self.walletSummaries = summaries
                 self.inventoryError = nil
             } catch {
+                guard self.authSession?.id == session.id else { return }
                 self.inventoryError = error.localizedDescription
             }
         }
@@ -1282,21 +1308,39 @@ public final class AppState: ObservableObject {
         }
     }
 
-    @MainActor
-    public func loadOrEstablishReceiveAddresses(for walletName: String) async {
+    public struct StagedReceiveAddresses: Sendable {
+        public let canonicalAddress: String
+        public let receiveAddress: String
+        public let activeAddresses: [ReceiveAddressRecord]
+        public let archivedAddresses: [ReceiveAddressRecord]
+
+        public init(
+            canonicalAddress: String,
+            receiveAddress: String,
+            activeAddresses: [ReceiveAddressRecord],
+            archivedAddresses: [ReceiveAddressRecord]
+        ) {
+            self.canonicalAddress = canonicalAddress
+            self.receiveAddress = receiveAddress
+            self.activeAddresses = activeAddresses
+            self.archivedAddresses = archivedAddresses
+        }
+    }
+
+    public func stageReceiveAddresses(
+        for walletName: String,
+        session: WalletAuthCapability?
+    ) async -> StagedReceiveAddresses {
         guard !walletName.isEmpty else {
-            self.canonicalReceiveAddress = ""
-            self.receiveAddress = ""
-            self.activeReceiveAddresses = []
-            self.archivedReceiveAddresses = []
-            return
+            return StagedReceiveAddresses(canonicalAddress: "", receiveAddress: "", activeAddresses: [], archivedAddresses: [])
         }
 
         // 1. Establish or retrieve Canonical Receive Address (Permanent, locked to creation)
-        if let canonical = try? await walletManager.getOrCreateCanonicalAddress(for: walletName, capability: self.authSession) {
-            self.canonicalReceiveAddress = canonical
+        let canonical: String
+        if let canon = try? await walletManager.getOrCreateCanonicalAddress(for: walletName, capability: session) {
+            canonical = canon
         } else {
-            self.canonicalReceiveAddress = receiveAddressStore.getCanonicalAddress(for: walletName) ?? ""
+            canonical = receiveAddressStore.getCanonicalAddress(for: walletName) ?? ""
         }
 
         // 2. Establish or retrieve Temporary Receive Addresses (Rotatable, dynamic)
@@ -1305,16 +1349,46 @@ public final class AppState: ObservableObject {
 
         // If no temporary addresses exist yet and none archived, generate the initial temporary address
         if temps.isEmpty && archived.isEmpty {
-            if let _ = try? await walletManager.generateReceiveAddress(label: "Temporary Address 1", capability: self.authSession) {
+            if let _ = try? await walletManager.generateReceiveAddress(label: "Temporary Address 1", capability: session) {
                 temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
             }
         }
 
-        self.activeReceiveAddresses = temps
-        self.archivedReceiveAddresses = archived
-        if !temps.contains(where: { $0.address == self.receiveAddress }) {
-            self.receiveAddress = temps.first?.address ?? ""
+        let selected = temps.first?.address ?? ""
+        return StagedReceiveAddresses(
+            canonicalAddress: canonical,
+            receiveAddress: selected,
+            activeAddresses: temps,
+            archivedAddresses: archived
+        )
+    }
+
+    @MainActor
+    public func commitStagedReceiveAddresses(
+        _ staged: StagedReceiveAddresses,
+        for walletName: String,
+        session: WalletAuthCapability?
+    ) {
+        guard let current = self.authSession,
+              current.id == session?.id,
+              self.isWalletTabUnlocked,
+              self.walletSnapshot?.name == walletName else {
+            // Operator switched or wallet changed during async staging: discard staged results!
+            return
         }
+        self.canonicalReceiveAddress = staged.canonicalAddress
+        self.activeReceiveAddresses = staged.activeAddresses
+        self.archivedReceiveAddresses = staged.archivedAddresses
+        if !staged.activeAddresses.contains(where: { $0.address == self.receiveAddress }) {
+            self.receiveAddress = staged.receiveAddress
+        }
+    }
+
+    @MainActor
+    public func loadOrEstablishReceiveAddresses(for walletName: String) async {
+        let currentSession = self.authSession
+        let staged = await stageReceiveAddresses(for: walletName, session: currentSession)
+        commitStagedReceiveAddresses(staged, for: walletName, session: currentSession)
     }
 
     public func generateNewReceiveAddress(label: String = "") {
@@ -1367,19 +1441,22 @@ public final class AppState: ObservableObject {
     }
 
     public func refreshWallet() {
-        let sessionBefore = self.authSession
+        guard isWalletTabUnlocked, let sessionBefore = self.authSession else { return }
+        let currentTarget = self.walletSnapshot?.name
         Task {
             do {
-                guard self.isWalletTabUnlocked else { return }
+                guard let target = currentTarget, !target.isEmpty else { return }
                 let snap = try await walletManager.refreshWalletInfo(capability: sessionBefore)
                 let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: sessionBefore)) ?? []
+                let stagedAddresses = await stageReceiveAddresses(for: target, session: sessionBefore)
+
                 await MainActor.run {
-                    guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else { return }
+                    guard self.authSession?.id == sessionBefore.id,
+                          self.isWalletTabUnlocked,
+                          self.walletSnapshot?.name == currentTarget else { return }
                     self.walletSnapshot = snap
                     self.transactions = txs
-                }
-                if let name = snap.name.isEmpty ? nil : snap.name {
-                    await self.loadOrEstablishReceiveAddresses(for: name)
+                    self.commitStagedReceiveAddresses(stagedAddresses, for: target, session: sessionBefore)
                 }
             } catch {
                 // Wallet may not be loaded yet or locked

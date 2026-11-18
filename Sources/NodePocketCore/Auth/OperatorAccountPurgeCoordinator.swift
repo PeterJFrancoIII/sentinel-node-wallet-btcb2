@@ -223,6 +223,84 @@ public actor OperatorAccountPurgeCoordinator {
         }
     }
 
+    public enum PurgeRecoveryOutcome: Equatable, Sendable {
+        case noPendingPurge
+        case corruptedJournal(path: String, reason: String)
+        case rolledBack(restoredWallets: [String], reason: String)
+        case resumedAndCompleted(purgedWallets: [String])
+        case incomplete(stage: PurgeJournalRecord.Stage, details: String)
+    }
+
+    public func recoverPendingPurge(username: String) async throws -> PurgeRecoveryOutcome {
+        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let inspection = inspectPendingJournal(username: username)
+        switch inspection {
+        case .absent:
+            return .noPendingPurge
+        case .corrupted(let path, let reason):
+            return .corruptedJournal(path: path, reason: reason)
+        case .valid(var journal):
+            let quarantineBaseURL = dataDirectory.appendingPathComponent(".purge_quarantine").appendingPathComponent(journal.operationId.uuidString)
+            let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
+
+            // Point of No Return is .credentialsPurged
+            if journal.stage == .credentialsPurged || journal.stage == .walletsRemoved {
+                // Point of no return was passed! Auth record was purged.
+                // Resume and finalize cleanup of any remaining quarantined files.
+                var allCleaned = true
+                for wallet in journal.ownedWallets {
+                    let quarantinedURL = quarantineBaseURL.appendingPathComponent(wallet)
+                    if FileManager.default.fileExists(atPath: quarantinedURL.path) {
+                        do {
+                            try FileManager.default.removeItem(at: quarantinedURL)
+                            journal.perWalletStatus[wallet] = "purged"
+                        } catch {
+                            journal.perWalletStatus[wallet] = "quarantine_cleanup_failed"
+                            allCleaned = false
+                        }
+                    } else {
+                        journal.perWalletStatus[wallet] = "purged"
+                    }
+                }
+                if allCleaned {
+                    try? FileManager.default.removeItem(at: quarantineBaseURL)
+                    try? FileManager.default.removeItem(at: journalURL)
+                    UserDefaults.standard.removeObject(forKey: "nodepocket_selected_wallet_\(userKey)")
+                    return .resumedAndCompleted(purgedWallets: journal.ownedWallets)
+                } else {
+                    try? writeDurableJournal(record: journal, to: journalURL)
+                    return .incomplete(stage: journal.stage, details: "Some quarantined files could not be removed.")
+                }
+            } else {
+                // Point of no return was NOT reached! Auth record is still intact.
+                // Perform ROLLBACK: move all quarantined wallets back to original location!
+                var restoredWallets: [String] = []
+                for wallet in journal.ownedWallets {
+                    let quarantinedURL = quarantineBaseURL.appendingPathComponent(wallet)
+                    if FileManager.default.fileExists(atPath: quarantinedURL.path) {
+                        let candidateA = dataDirectory.appendingPathComponent("wallets").appendingPathComponent(wallet)
+                        let candidateB = dataDirectory.appendingPathComponent(wallet)
+                        let targetDir = FileManager.default.fileExists(atPath: dataDirectory.appendingPathComponent("wallets").path) ? candidateA : candidateB
+
+                        try? FileManager.default.createDirectory(at: targetDir.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        do {
+                            try FileManager.default.moveItem(at: quarantinedURL, to: targetDir)
+                            restoredWallets.append(wallet)
+                            // Re-establish wallet ownership in metadata if needed
+                            try? await walletInventory.setOwner(for: wallet, owner: username)
+                        } catch {
+                            return .incomplete(stage: journal.stage, details: "Failed to rollback wallet '\(wallet)' from quarantine: \(error.localizedDescription)")
+                        }
+                    }
+                }
+                // Clean up quarantine base and journal after successful rollback
+                try? FileManager.default.removeItem(at: quarantineBaseURL)
+                try? FileManager.default.removeItem(at: journalURL)
+                return .rolledBack(restoredWallets: restoredWallets, reason: "Interrupted prior to credentials purge. Restored all quarantined wallets.")
+            }
+        }
+    }
+
     private func writeDurableJournal(record: PurgeJournalRecord, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -510,11 +588,12 @@ public actor OperatorAccountPurgeCoordinator {
         }
         try await authCoordinator.verifyCapability(session)
 
-        // WO-51: Authoritative Ownership Check & Generation Binding
-        if let expectedGen = expectedMetadataGeneration {
-            guard inventory.metadataGeneration == expectedGen else {
-                throw OperatorAccountPurgeError.storageError("Metadata generation drifted between preflight (\(expectedGen)) and execution (\(inventory.metadataGeneration)). Aborting purge.")
-            }
+        // WO-51 & WO-56: Authoritative Ownership Check & Generation Binding
+        guard let expectedGen = expectedMetadataGeneration else {
+            throw OperatorAccountPurgeError.storageError("Preflight expectedMetadataGeneration is mandatory for executePurge. Aborting.")
+        }
+        guard inventory.metadataGeneration == expectedGen else {
+            throw OperatorAccountPurgeError.storageError("Metadata generation drifted between preflight (\(expectedGen)) and execution (\(inventory.metadataGeneration)). Aborting purge.")
         }
         let currentMetadata = await walletInventory.getMetadata()
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -620,38 +699,49 @@ public actor OperatorAccountPurgeCoordinator {
             purgedWallets.append(wallet)
         }
 
-        // Finalize staged quarantine cleanup only after all pre-conditions and metadata removals succeeded
-        for staged in stagedWallets {
-            do {
-                try FileManager.default.removeItem(at: staged.quarantinedURL)
-            } catch {
-                // If final quarantine cleanup fails, file remains safely isolated in quarantine
-            }
-            journal.perWalletStatus[staged.walletName] = "purged"
-        }
-        try? FileManager.default.removeItem(at: quarantineBaseURL)
-
-        journal.stage = .walletsRemoved
+        // 7. Purge Auth Registry & Operator Keychain Credentials (POINT OF NO RETURN)
+        // WO-55: Auth record must be purged BEFORE deleting quarantined wallet preimages.
+        // If auth record purge fails, quarantined wallet preimages remain intact for rollback/recovery!
+        journal.stage = .credentialsPurged
         journal.timestamp = Date()
         try writeDurableJournal(record: journal, to: journalURL)
         try await authCoordinator.verifyCapability(session)
 
-        // 7. Purge Auth Registry & Keychain Credentials
         do {
             try await authCoordinator.purgeOperatorRecord(username: username)
         } catch {
             throw OperatorAccountPurgeError.storageError("Failed to purge auth record for '\(username)': \(error.localizedDescription)")
         }
-        journal.stage = .credentialsPurged
-        journal.timestamp = Date()
-        try writeDurableJournal(record: journal, to: journalURL)
 
-        // 8. Clear Scoped Operator Defaults & Cleanup Journal
+        // 8. Staged Quarantine Cleanup (Only after Point of No Return is durably committed)
+        var allQuarantinedFilesRemoved = true
+        for staged in stagedWallets {
+            do {
+                try FileManager.default.removeItem(at: staged.quarantinedURL)
+                journal.perWalletStatus[staged.walletName] = "purged"
+            } catch {
+                // If final quarantine cleanup fails, file remains safely isolated in quarantine
+                journal.perWalletStatus[staged.walletName] = "quarantine_cleanup_failed"
+                allQuarantinedFilesRemoved = false
+            }
+            try? writeDurableJournal(record: journal, to: journalURL)
+        }
+
+        if allQuarantinedFilesRemoved {
+            try? FileManager.default.removeItem(at: quarantineBaseURL)
+            journal.stage = .walletsRemoved
+            journal.timestamp = Date()
+            try? writeDurableJournal(record: journal, to: journalURL)
+        }
+
+        // 9. Clear Scoped Operator Defaults & Cleanup Journal
         UserDefaults.standard.removeObject(forKey: "nodepocket_selected_wallet_\(userKey)")
-        do {
-            try FileManager.default.removeItem(at: journalURL)
-        } catch {
-            // Log notice if journal removal fails after successful purge
+        if allQuarantinedFilesRemoved {
+            do {
+                try FileManager.default.removeItem(at: journalURL)
+            } catch {
+                // Log notice if journal removal fails after successful purge
+            }
         }
 
         return purgedWallets

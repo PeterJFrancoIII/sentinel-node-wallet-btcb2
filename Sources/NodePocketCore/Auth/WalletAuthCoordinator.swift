@@ -270,6 +270,33 @@ public struct MultiAuthRegistry: Codable, Sendable {
 public actor WalletAuthCoordinator {
     public nonisolated let dataDirectory: URL
     private let registryURL: URL
+    private var lockFileURL: URL {
+        dataDirectory.appendingPathComponent("auth_registry.lock")
+    }
+
+    private func withCrossProcessLock<T>(_ work: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        let fd = open(lockFileURL.path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else {
+            throw AuthRegistryStorageError.writeFailed(
+                path: lockFileURL.path,
+                underlyingError: "Failed to open auth registry lock file: \(errno)"
+            )
+        }
+        defer {
+            close(fd)
+        }
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw AuthRegistryStorageError.writeFailed(
+                path: lockFileURL.path,
+                underlyingError: "Failed to acquire exclusive lock on auth registry: \(errno)"
+            )
+        }
+        defer {
+            flock(fd, LOCK_UN)
+        }
+        return try work()
+    }
     private var records: [String: AuthRegistryRecord] = [:]
     private var activeSession: WalletAuthCapability?
     private var isAuthInFlight: Bool = false
@@ -562,79 +589,81 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.invalidCredentials
         }
 
-        // Ensure registry is readable and uncorrupted before enrolling
-        do {
-            let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
-            self.records = reloaded
-            self.registryLoadError = nil
-        } catch let err as AuthRegistryStorageError {
-            self.registryLoadError = err
-            throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is damaged or unreadable (\(err.localizedDescription)). Aborting enrollment to protect existing credentials.")
-        } catch {
-            throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is unreadable (\(error.localizedDescription)). Aborting enrollment to protect existing credentials.")
+        return try withCrossProcessLock {
+            // Ensure registry is readable and uncorrupted before enrolling
+            do {
+                let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+                self.records = reloaded
+                self.registryLoadError = nil
+            } catch let err as AuthRegistryStorageError {
+                self.registryLoadError = err
+                throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is damaged or unreadable (\(err.localizedDescription)). Aborting enrollment to protect existing credentials.")
+            } catch {
+                throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is unreadable (\(error.localizedDescription)). Aborting enrollment to protect existing credentials.")
+            }
+
+            let userKey = cleanUser.lowercased()
+            guard records[userKey] == nil else {
+                throw WalletAuthError.alreadyEnrolled
+            }
+            try Self.validatePasswordStrength(password)
+
+            let (valid, timeStep) = Self.verifyTOTP(secret: secretBase32, code: totpCode)
+            guard valid else {
+                throw WalletAuthError.invalidTOTP
+            }
+
+            // P0-1: Save TOTP secret in Keychain, not in plaintext json
+            try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
+            // Automatically save operator login password in macOS Keychain / Apple Passwords
+            do {
+                try Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
+                self.isLastPasswordSavedToKeychain = true
+            } catch {
+                self.isLastPasswordSavedToKeychain = false
+            }
+
+            let salt = try Self.randomBytes(count: 32)
+            let hash = try Self.deriveKey(password: password, salt: salt)
+
+            // P0-2: Salted verifiers for >= 128-bit recovery codes
+            var recordsList: [RecoveryCodeRecord] = []
+            for code in recoveryCodes {
+                let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "").uppercased()
+                let codeSalt = try Self.randomBytes(count: 16)
+                let verifier = try Self.deriveRecoveryVerifier(code: normalized, salt: codeSalt)
+                recordsList.append(RecoveryCodeRecord(
+                    saltHex: codeSalt.map { String(format: "%02x", $0) }.joined(),
+                    verifierHex: verifier.map { String(format: "%02x", $0) }.joined()
+                ))
+            }
+
+            let newRecord = AuthRegistryRecord(
+                username: cleanUser,
+                saltHex: salt.map { String(format: "%02x", $0) }.joined(),
+                passwordHashHex: hash.map { String(format: "%02x", $0) }.joined(),
+                isTotpInKeychain: true,
+                legacyTotpSecretBase32: nil,
+                recoveryCodes: recordsList,
+                legacyRecoveryCodeHashes: nil,
+                failedAttempts: 0,
+                lockedUntil: nil,
+                lastUsedTimeStep: timeStep,
+                version: 2
+            )
+
+            self.recordGeneration += 1
+            self.records[userKey] = newRecord
+            try saveRecords()
+            UserDefaults.standard.set(true, forKey: "hasCompletedInitialEnrollment")
+
+            let session = WalletAuthCapability(
+                username: cleanUser,
+                expiresAt: Date().addingTimeInterval(Self.sessionDurationSeconds)
+            )
+            self.activeSession = session
+            return session
         }
-
-        let userKey = cleanUser.lowercased()
-        guard records[userKey] == nil else {
-            throw WalletAuthError.alreadyEnrolled
-        }
-        try Self.validatePasswordStrength(password)
-
-        let (valid, timeStep) = Self.verifyTOTP(secret: secretBase32, code: totpCode)
-        guard valid else {
-            throw WalletAuthError.invalidTOTP
-        }
-
-        // P0-1: Save TOTP secret in Keychain, not in plaintext json
-        try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
-        // Automatically save operator login password in macOS Keychain / Apple Passwords
-        do {
-            try Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
-            self.isLastPasswordSavedToKeychain = true
-        } catch {
-            self.isLastPasswordSavedToKeychain = false
-        }
-
-        let salt = try Self.randomBytes(count: 32)
-        let hash = try Self.deriveKey(password: password, salt: salt)
-
-        // P0-2: Salted verifiers for >= 128-bit recovery codes
-        var recordsList: [RecoveryCodeRecord] = []
-        for code in recoveryCodes {
-            let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "").uppercased()
-            let codeSalt = try Self.randomBytes(count: 16)
-            let verifier = try Self.deriveRecoveryVerifier(code: normalized, salt: codeSalt)
-            recordsList.append(RecoveryCodeRecord(
-                saltHex: codeSalt.map { String(format: "%02x", $0) }.joined(),
-                verifierHex: verifier.map { String(format: "%02x", $0) }.joined()
-            ))
-        }
-
-        let newRecord = AuthRegistryRecord(
-            username: cleanUser,
-            saltHex: salt.map { String(format: "%02x", $0) }.joined(),
-            passwordHashHex: hash.map { String(format: "%02x", $0) }.joined(),
-            isTotpInKeychain: true,
-            legacyTotpSecretBase32: nil,
-            recoveryCodes: recordsList,
-            legacyRecoveryCodeHashes: nil,
-            failedAttempts: 0,
-            lockedUntil: nil,
-            lastUsedTimeStep: timeStep,
-            version: 2
-        )
-
-        self.recordGeneration += 1
-        self.records[userKey] = newRecord
-        try saveRecords()
-        UserDefaults.standard.set(true, forKey: "hasCompletedInitialEnrollment")
-
-        let session = WalletAuthCapability(
-            username: cleanUser,
-            expiresAt: Date().addingTimeInterval(Self.sessionDurationSeconds)
-        )
-        self.activeSession = session
-        return session
     }
 
     // MARK: - Login
@@ -1289,120 +1318,127 @@ public actor WalletAuthCoordinator {
     ) throws {
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
-        // WO-52: Authoritatively reload from disk to ensure cross-process consistency of consumed TOTP & recovery codes
-        if FileManager.default.fileExists(atPath: registryURL.path) {
-            try reloadRecordsFromDisk()
-        }
-        if let err = self.registryLoadError {
-            throw WalletAuthError.registryStorageError(err)
-        }
+        try withCrossProcessLock {
+            // WO-52 & WO-56: Authoritatively reload from disk under cross-process lock to ensure consistency of consumed TOTP & recovery codes
+            if FileManager.default.fileExists(atPath: registryURL.path) {
+                try reloadRecordsFromDisk()
+            }
+            if let err = self.registryLoadError {
+                throw WalletAuthError.registryStorageError(err)
+            }
 
-        if let fallback = Self.loadDurableLockoutFallback(username: userKey) {
-            if let lock = fallback.lockedUntil, lock > Date(timeIntervalSince1970: time) {
+            if let fallback = Self.loadDurableLockoutFallback(username: userKey) {
+                if let lock = fallback.lockedUntil, lock > Date(timeIntervalSince1970: time) {
+                    let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
+                    throw WalletAuthError.rateLimited(secondsRemaining: max(1, rem))
+                }
+            }
+            guard var rec = records[userKey] else {
+                throw WalletAuthError.invalidCredentials
+            }
+            let originalRecord = rec
+            if let lock = rec.lockedUntil, lock > Date(timeIntervalSince1970: time) {
                 let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
                 throw WalletAuthError.rateLimited(secondsRemaining: max(1, rem))
             }
-        }
-        guard var rec = records[userKey] else {
-            throw WalletAuthError.invalidCredentials
-        }
-        let originalRecord = rec
-        if let lock = rec.lockedUntil, lock > Date(timeIntervalSince1970: time) {
-            let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
-            throw WalletAuthError.rateLimited(secondsRemaining: max(1, rem))
-        }
 
-        // Verify password
-        guard let salt = Self.hexToData(rec.saltHex),
-              let expectedHash = Self.hexToData(rec.passwordHashHex) else {
-            throw registerFailedAttempt(&rec)
-        }
-        let derived = try Self.deriveKey(password: password, salt: salt)
-        guard Self.constantTimeCompare(derived, expectedHash) else {
-            throw registerFailedAttempt(&rec)
-        }
-
-        // Verify TOTP or recovery code
-        let cleanCode = totpOrRecoveryCode.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "")
-        var codeValid = false
-        var usedTimeStep: Int64? = nil
-        var consumedRecoveryIndex: Int? = nil
-
-        if cleanCode.count == 6 && CharacterSet.decimalDigits.isSuperset(of: CharacterSet(charactersIn: cleanCode)) {
-            let secret = (try? Self.loadTOTPSecretFromKeychain(username: rec.username)) ?? rec.legacyTotpSecretBase32 ?? ""
-            let verification = Self.verifyTOTP(secret: secret, code: cleanCode, time: time)
-            if verification.valid {
-                guard verification.timeStep > rec.lastUsedTimeStep else {
-                    recordAuthFailure(.totpTimestepReplayed)
-                    throw WalletAuthError.replayedTOTPTimestep
-                }
-                codeValid = true
-                usedTimeStep = verification.timeStep
+            // Verify password
+            guard let salt = Self.hexToData(rec.saltHex),
+                  let expectedHash = Self.hexToData(rec.passwordHashHex) else {
+                throw registerFailedAttempt(&rec)
             }
-        } else {
-            // Check recovery codes
-            let normalized = cleanCode.uppercased()
-            for (idx, codeRecord) in rec.recoveryCodes.enumerated() {
-                if let rSalt = Self.hexToData(codeRecord.saltHex),
-                   let expectedVerifier = Self.hexToData(codeRecord.verifierHex),
-                   let verifier = try? Self.deriveRecoveryVerifier(code: normalized, salt: rSalt),
-                   Self.constantTimeCompare(verifier, expectedVerifier) {
+            let derived = try Self.deriveKey(password: password, salt: salt)
+            guard Self.constantTimeCompare(derived, expectedHash) else {
+                throw registerFailedAttempt(&rec)
+            }
+
+            // Verify TOTP or recovery code
+            let cleanCode = totpOrRecoveryCode.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "")
+            var codeValid = false
+            var usedTimeStep: Int64? = nil
+            var consumedRecoveryIndex: Int? = nil
+
+            if cleanCode.count == 6 && CharacterSet.decimalDigits.isSuperset(of: CharacterSet(charactersIn: cleanCode)) {
+                let secret = (try? Self.loadTOTPSecretFromKeychain(username: rec.username)) ?? rec.legacyTotpSecretBase32 ?? ""
+                let verification = Self.verifyTOTP(secret: secret, code: cleanCode, time: time)
+                if verification.valid {
+                    guard verification.timeStep > rec.lastUsedTimeStep else {
+                        recordAuthFailure(.totpTimestepReplayed)
+                        throw WalletAuthError.replayedTOTPTimestep
+                    }
                     codeValid = true
-                    consumedRecoveryIndex = idx
-                    break
+                    usedTimeStep = verification.timeStep
+                }
+            } else {
+                // Check recovery codes
+                let normalized = cleanCode.uppercased()
+                for (idx, codeRecord) in rec.recoveryCodes.enumerated() {
+                    if let rSalt = Self.hexToData(codeRecord.saltHex),
+                       let expectedVerifier = Self.hexToData(codeRecord.verifierHex),
+                       let verifier = try? Self.deriveRecoveryVerifier(code: normalized, salt: rSalt),
+                       Self.constantTimeCompare(verifier, expectedVerifier) {
+                        codeValid = true
+                        consumedRecoveryIndex = idx
+                        break
+                    }
                 }
             }
-        }
 
-        guard codeValid else {
-            throw registerFailedAttempt(&rec)
-        }
+            guard codeValid else {
+                throw registerFailedAttempt(&rec)
+            }
 
-        if let step = usedTimeStep {
-            rec.lastUsedTimeStep = step
-        }
-        if let idx = consumedRecoveryIndex {
-            rec.recoveryCodes.remove(at: idx)
-        }
+            if let step = usedTimeStep {
+                rec.lastUsedTimeStep = step
+            }
+            if let idx = consumedRecoveryIndex {
+                rec.recoveryCodes.remove(at: idx)
+            }
 
-        // Reset failed attempts on success
-        rec.failedAttempts = 0
-        rec.lockedUntil = nil
-        self.recordGeneration += 1
-        self.records[userKey] = rec
-        do {
-            try saveRecords()
-            Self.clearDurableLockoutFallback(username: userKey)
-        } catch let storageErr as AuthRegistryStorageError {
-            self.records[userKey] = originalRecord
-            self.registryLoadError = storageErr
-            recordAuthFailure(.registryUnavailable)
-            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: originalRecord.failedAttempts, lockedUntil: originalRecord.lockedUntil)
-            throw WalletAuthError.registryStorageError(storageErr)
-        } catch {
-            self.records[userKey] = originalRecord
-            let writeErr = AuthRegistryStorageError.writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
-            self.registryLoadError = writeErr
-            recordAuthFailure(.registryUnavailable)
-            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: originalRecord.failedAttempts, lockedUntil: originalRecord.lockedUntil)
-            throw WalletAuthError.registryStorageError(writeErr)
+            // Reset failed attempts on success
+            rec.failedAttempts = 0
+            rec.lockedUntil = nil
+            self.recordGeneration += 1
+            self.records[userKey] = rec
+            do {
+                try saveRecords()
+                Self.clearDurableLockoutFallback(username: userKey)
+            } catch let storageErr as AuthRegistryStorageError {
+                self.records[userKey] = originalRecord
+                self.registryLoadError = storageErr
+                recordAuthFailure(.registryUnavailable)
+                Self.saveDurableLockoutFallback(username: userKey, failedAttempts: originalRecord.failedAttempts, lockedUntil: originalRecord.lockedUntil)
+                throw WalletAuthError.registryStorageError(storageErr)
+            } catch {
+                self.records[userKey] = originalRecord
+                let writeErr = AuthRegistryStorageError.writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
+                self.registryLoadError = writeErr
+                recordAuthFailure(.registryUnavailable)
+                Self.saveDurableLockoutFallback(username: userKey, failedAttempts: originalRecord.failedAttempts, lockedUntil: originalRecord.lockedUntil)
+                throw WalletAuthError.registryStorageError(writeErr)
+            }
         }
     }
 
     public func purgeOperatorRecord(username: String) throws {
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard records[userKey] != nil else { return }
-        records.removeValue(forKey: userKey)
-        self.recordGeneration += 1
-        try saveRecords()
-        Self.deleteTOTPSecretFromKeychain(username: userKey)
-        Self.deleteOperatorPasswordFromKeychain(username: userKey)
-        Self.clearDurableLockoutFallback(username: userKey)
-        if records.isEmpty {
-            UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
-        }
-        if activeSession?.username.lowercased() == userKey {
-            activeSession = nil
+        try withCrossProcessLock {
+            if FileManager.default.fileExists(atPath: registryURL.path) {
+                try? reloadRecordsFromDisk()
+            }
+            guard records[userKey] != nil else { return }
+            records.removeValue(forKey: userKey)
+            self.recordGeneration += 1
+            try saveRecords()
+            Self.deleteTOTPSecretFromKeychain(username: userKey)
+            Self.deleteOperatorPasswordFromKeychain(username: userKey)
+            Self.clearDurableLockoutFallback(username: userKey)
+            if records.isEmpty {
+                UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+            }
+            if activeSession?.username.lowercased() == userKey {
+                activeSession = nil
+            }
         }
     }
 
@@ -2214,6 +2250,32 @@ public actor WalletAuthCoordinator {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             try data.write(to: registryURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registryURL.path)
+
+            let fileHandle = try FileHandle(forWritingTo: registryURL)
+            try fileHandle.synchronize()
+            try fileHandle.close()
+
+            let dirFd = open(dataDirectory.path, O_RDONLY)
+            guard dirFd >= 0 else {
+                throw AuthRegistryStorageError.writeFailed(
+                    path: registryURL.path,
+                    underlyingError: "Failed to open directory for fsync: \(errno)"
+                )
+            }
+            let syncResult = fsync(dirFd)
+            let closeResult = close(dirFd)
+            guard syncResult == 0 else {
+                throw AuthRegistryStorageError.writeFailed(
+                    path: registryURL.path,
+                    underlyingError: "Failed to fsync directory descriptor: \(errno)"
+                )
+            }
+            guard closeResult == 0 else {
+                throw AuthRegistryStorageError.writeFailed(
+                    path: registryURL.path,
+                    underlyingError: "Failed to close directory descriptor: \(errno)"
+                )
+            }
         } catch {
             throw AuthRegistryStorageError.writeFailed(
                 path: registryURL.path,
