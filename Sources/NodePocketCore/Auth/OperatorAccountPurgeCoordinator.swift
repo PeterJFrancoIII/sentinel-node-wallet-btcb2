@@ -12,6 +12,7 @@ public enum OperatorAccountPurgeError: Error, LocalizedError, Sendable, Equatabl
     case symlinkNotPermitted(String)
     case storageError(String)
     case inFlightOperationActive
+    case releaseModeDisabled
 
     public var errorDescription: String? {
         switch self {
@@ -38,6 +39,8 @@ public enum OperatorAccountPurgeError: Error, LocalizedError, Sendable, Equatabl
             return "Storage error during account purge: \(msg)"
         case .inFlightOperationActive:
             return "Cannot delete account while a wallet or authentication action is in progress."
+        case .releaseModeDisabled:
+            return "Operator account and wallet data deletion is strictly disabled in release mode pending independent security qualification."
         }
     }
 }
@@ -74,6 +77,13 @@ public actor OperatorAccountPurgeCoordinator {
     private let dataDirectory: URL
     private let receiveAddressStore: ReceiveAddressStore
 
+    #if DEBUG
+    private var mockDeviceOwnerSuccessForTesting: Bool = false
+    public func setMockDeviceOwnerSuccessForTesting(_ enabled: Bool) {
+        self.mockDeviceOwnerSuccessForTesting = enabled
+    }
+    #endif
+
     public init(
         authCoordinator: WalletAuthCoordinator,
         walletInventory: WalletInventory,
@@ -86,6 +96,22 @@ public actor OperatorAccountPurgeCoordinator {
         self.rpcClient = rpcClient
         self.dataDirectory = dataDirectory
         self.receiveAddressStore = receiveAddressStore
+    }
+
+    private func verifyPathContainmentAndNoSymlinks(candidateURL: URL) throws -> URL {
+        let standardized = candidateURL.standardizedFileURL.path
+        let datadirStandardized = dataDirectory.standardizedFileURL.path
+        guard standardized.hasPrefix(datadirStandardized) else {
+            throw OperatorAccountPurgeError.pathEscape(standardized)
+        }
+        var current = candidateURL
+        while current.standardizedFileURL.path.hasPrefix(datadirStandardized) && current.standardizedFileURL.path != datadirStandardized {
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)) != nil {
+                throw OperatorAccountPurgeError.symlinkNotPermitted(current.path)
+            }
+            current = current.deletingLastPathComponent()
+        }
+        return candidateURL
     }
 
     public func preflight(
@@ -110,59 +136,87 @@ public actor OperatorAccountPurgeCoordinator {
         var blockingReason: String? = nil
         var isEligible = true
 
-        let loadedWallets = (try? await rpcClient.listWallets()) ?? []
+        // Strict disk inventory reconciliation: fail closed if metadata is empty while disk wallets or quarantine exists
+        let diskEntries = (try? FileManager.default.contentsOfDirectory(atPath: dataDirectory.path)) ?? []
+        let hasDiskWallets = diskEntries.contains(where: { entry in
+            !entry.hasPrefix(".") && entry != "wallets_metadata.json" && entry != "auth_registry.json"
+        })
+        if metadata.walletOwners.isEmpty && (hasDiskWallets || !metadata.quarantinedWallets.isEmpty) {
+            return OperatorPurgePreflightInventory(
+                username: username,
+                ownedWallets: ownedWallets,
+                receiveAddressCount: 0,
+                totalBalanceSats: 0,
+                isEligibleForPermanentDeletion: false,
+                blockingReason: "Metadata registry contains no owners, but unassigned or quarantined wallets exist on disk. Hold for ownership reconciliation."
+            )
+        }
+
+        // List loaded wallets via RPC (fail closed if RPC fails)
+        let loadedWallets: [String]
+        do {
+            loadedWallets = try await rpcClient.listWallets()
+        } catch {
+            return OperatorPurgePreflightInventory(
+                username: username,
+                ownedWallets: ownedWallets,
+                receiveAddressCount: 0,
+                totalBalanceSats: 0,
+                isEligibleForPermanentDeletion: false,
+                blockingReason: "Node RPC error querying loaded wallets: \(error.localizedDescription)"
+            )
+        }
 
         for wallet in ownedWallets {
-            // Path verification
+            // Path and symlink ancestor verification
             let candidateA = dataDirectory.appendingPathComponent("wallets").appendingPathComponent(wallet)
             let candidateB = dataDirectory.appendingPathComponent(wallet)
             let walletURL = FileManager.default.fileExists(atPath: candidateA.path) ? candidateA : candidateB
-            let standardized = walletURL.standardizedFileURL.path
-            if !standardized.hasPrefix(dataDirectory.standardizedFileURL.path) {
-                return OperatorPurgePreflightInventory(
-                    username: username,
-                    ownedWallets: ownedWallets,
-                    receiveAddressCount: 0,
-                    totalBalanceSats: 0,
-                    isEligibleForPermanentDeletion: false,
-                    blockingReason: "Wallet '\(wallet)' path escapes canonical datadir: \(standardized)"
-                )
-            }
-            if (try? FileManager.default.destinationOfSymbolicLink(atPath: standardized)) != nil {
-                return OperatorPurgePreflightInventory(
-                    username: username,
-                    ownedWallets: ownedWallets,
-                    receiveAddressCount: 0,
-                    totalBalanceSats: 0,
-                    isEligibleForPermanentDeletion: false,
-                    blockingReason: "Wallet '\(wallet)' is a symbolic link, which is prohibited."
-                )
-            }
-
-            // Balance check via RPC
-            let wasLoaded = loadedWallets.contains(where: { $0.caseInsensitiveCompare(wallet) == .orderedSame })
             do {
-                if !wasLoaded {
-                    _ = try await rpcClient.loadWallet(name: wallet)
-                }
-                let balances = try await rpcClient.getBalances(walletName: wallet)
-                if !wasLoaded {
-                    _ = try? await rpcClient.unloadWallet(name: wallet, loadOnStartup: false)
-                }
-                let spendable = Int64(round(balances.mine.trusted * 100_000_000))
-                let pending = Int64(round(balances.mine.untrusted_pending * 100_000_000))
-                let immature = Int64(round(balances.mine.immature * 100_000_000))
-                let walletTotal = spendable + pending + immature
-                totalSats += walletTotal
-
-                if walletTotal > 0 {
-                    isEligible = false
-                    blockingReason = "Wallet '\(wallet)' has non-zero balance (\(walletTotal) sats). Move all funds before permanent account deletion."
-                }
+                _ = try verifyPathContainmentAndNoSymlinks(candidateURL: walletURL)
+            } catch let err as OperatorAccountPurgeError {
+                return OperatorPurgePreflightInventory(
+                    username: username,
+                    ownedWallets: ownedWallets,
+                    receiveAddressCount: 0,
+                    totalBalanceSats: 0,
+                    isEligibleForPermanentDeletion: false,
+                    blockingReason: err.localizedDescription
+                )
             } catch {
-                // If RPC fails to query balance, fail closed!
+                return OperatorPurgePreflightInventory(
+                    username: username,
+                    ownedWallets: ownedWallets,
+                    receiveAddressCount: 0,
+                    totalBalanceSats: 0,
+                    isEligibleForPermanentDeletion: false,
+                    blockingReason: "Path verification failed: \(error.localizedDescription)"
+                )
+            }
+
+            // Strictly read-only balance check: preflight NEVER loads or unloads wallets!
+            let wasLoaded = loadedWallets.contains(where: { $0.caseInsensitiveCompare(wallet) == .orderedSame })
+            if wasLoaded {
+                do {
+                    let balances = try await rpcClient.getBalances(walletName: wallet)
+                    let spendable = Int64(round(balances.mine.trusted * 100_000_000))
+                    let pending = Int64(round(balances.mine.untrusted_pending * 100_000_000))
+                    let immature = Int64(round(balances.mine.immature * 100_000_000))
+                    let walletTotal = spendable + pending + immature
+                    totalSats += walletTotal
+
+                    if walletTotal > 0 {
+                        isEligible = false
+                        blockingReason = "Wallet '\(wallet)' has non-zero balance (\(walletTotal) sats). Move all funds before permanent account deletion."
+                    }
+                } catch {
+                    isEligible = false
+                    blockingReason = "Balance for loaded wallet '\(wallet)' could not be verified via node RPC: \(error.localizedDescription)"
+                }
+            } else {
+                // If wallet is not currently loaded in node memory, preflight refuses to mutate node
                 isEligible = false
-                blockingReason = "Balance for wallet '\(wallet)' could not be verified via node RPC: \(error.localizedDescription)"
+                blockingReason = "Wallet '\(wallet)' is not loaded in node memory. Please load wallet to verify zero balance before deletion."
             }
         }
 
@@ -187,9 +241,11 @@ public actor OperatorAccountPurgeCoordinator {
         totpOrRecoveryCode: String,
         typedConfirmation: String,
         capability: WalletAuthCapability?,
-        time: TimeInterval = Date().timeIntervalSince1970,
-        skipDeviceOwnerPromptForTesting: Bool = false
+        time: TimeInterval = Date().timeIntervalSince1970
     ) async throws -> [String] {
+        #if !DEBUG
+        throw OperatorAccountPurgeError.releaseModeDisabled
+        #else
         guard let session = capability else {
             throw OperatorAccountPurgeError.unauthenticated
         }
@@ -201,7 +257,7 @@ public actor OperatorAccountPurgeCoordinator {
         }
         try await authCoordinator.verifyCapability(session)
 
-        // 1. Fresh Factor Authentication Check
+        // 1. Fresh Factor Authentication Check with Session Re-binding
         do {
             try await authCoordinator.verifyFreshCredentials(
                 username: username,
@@ -212,9 +268,11 @@ public actor OperatorAccountPurgeCoordinator {
         } catch {
             throw OperatorAccountPurgeError.credentialVerificationFailed(error.localizedDescription)
         }
+        try await authCoordinator.verifyCapability(session)
 
         // 2. Device Owner Presence Challenge
-        if !skipDeviceOwnerPromptForTesting {
+        #if DEBUG
+        if !mockDeviceOwnerSuccessForTesting {
             do {
                 let presenceOk = try await KeychainHelper.shared.authenticateUserPresence(
                     reason: "Authorize permanent deletion of account '\(username)' and all owned wallet data"
@@ -226,6 +284,19 @@ public actor OperatorAccountPurgeCoordinator {
                 throw OperatorAccountPurgeError.deviceOwnerAuthFailed(error.localizedDescription)
             }
         }
+        #else
+        do {
+            let presenceOk = try await KeychainHelper.shared.authenticateUserPresence(
+                reason: "Authorize permanent deletion of account '\(username)' and all owned wallet data"
+            )
+            guard presenceOk else {
+                throw OperatorAccountPurgeError.deviceOwnerAuthFailed("User canceled or failed biometric/device authentication.")
+            }
+        } catch {
+            throw OperatorAccountPurgeError.deviceOwnerAuthFailed(error.localizedDescription)
+        }
+        #endif
+        try await authCoordinator.verifyCapability(session)
 
         // 3. Preflight & Zero-Funded Invariant
         let inventory = try await preflight(username: username, capability: capability)
@@ -239,40 +310,82 @@ public actor OperatorAccountPurgeCoordinator {
             }
             throw OperatorAccountPurgeError.balanceUnknown(walletName: "Unknown balance state")
         }
+        try await authCoordinator.verifyCapability(session)
 
-        // 4. Purge Wallets
+        // 4. Durable Journal Setup
+        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
+        struct PurgeJournalRecord: Codable {
+            let username: String
+            let stage: String
+            let wallets: [String]
+            let timestamp: Date
+        }
+        let writeJournal: (String) throws -> Void = { stage in
+            let record = PurgeJournalRecord(username: username, stage: stage, wallets: inventory.ownedWallets, timestamp: Date())
+            let enc = JSONEncoder()
+            enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+            enc.dateEncodingStrategy = .iso8601
+            let jData = try enc.encode(record)
+            try jData.write(to: journalURL, options: .atomic)
+        }
+        try writeJournal("started")
+
+        // 5. Purge Wallets without try? suppression
         var purgedWallets: [String] = []
-        let loaded = (try? await rpcClient.listWallets()) ?? []
+        let loaded = try await rpcClient.listWallets()
 
         for wallet in inventory.ownedWallets {
             if loaded.contains(where: { $0.caseInsensitiveCompare(wallet) == .orderedSame }) {
-                _ = try? await rpcClient.unloadWallet(name: wallet, loadOnStartup: false)
+                do {
+                    _ = try await rpcClient.unloadWallet(name: wallet, loadOnStartup: false)
+                } catch {
+                    throw OperatorAccountPurgeError.storageError("Failed to unload wallet '\(wallet)': \(error.localizedDescription)")
+                }
             }
 
             let candidateA = dataDirectory.appendingPathComponent("wallets").appendingPathComponent(wallet)
             let candidateB = dataDirectory.appendingPathComponent(wallet)
             let walletURL = FileManager.default.fileExists(atPath: candidateA.path) ? candidateA : candidateB
             if FileManager.default.fileExists(atPath: walletURL.path) {
-                try? FileManager.default.removeItem(at: walletURL)
+                do {
+                    try FileManager.default.removeItem(at: walletURL)
+                } catch {
+                    throw OperatorAccountPurgeError.storageError("Failed to delete wallet directory at '\(walletURL.path)': \(error.localizedDescription)")
+                }
             }
 
-            try? KeychainHelper.shared.deletePassphrase(account: wallet)
+            do {
+                try KeychainHelper.shared.deletePassphrase(account: wallet)
+            } catch {
+                throw OperatorAccountPurgeError.storageError("Failed to delete Keychain passphrase for '\(wallet)': \(error.localizedDescription)")
+            }
+
             receiveAddressStore.deleteAllAddresses(for: wallet)
-            try? await walletInventory.removeWalletMetadata(name: wallet)
+
+            do {
+                try await walletInventory.removeWalletMetadata(name: wallet)
+            } catch {
+                throw OperatorAccountPurgeError.storageError("Failed to remove metadata for '\(wallet)': \(error.localizedDescription)")
+            }
+
             purgedWallets.append(wallet)
         }
+        try writeJournal("wallets_purged")
 
-        // 5. Purge Auth Registry & Keychain Credentials
+        // 6. Purge Auth Registry & Keychain Credentials
         do {
             try await authCoordinator.purgeOperatorRecord(username: username)
         } catch {
-            throw OperatorAccountPurgeError.storageError(error.localizedDescription)
+            throw OperatorAccountPurgeError.storageError("Failed to purge auth record for '\(username)': \(error.localizedDescription)")
         }
+        try writeJournal("auth_purged")
 
-        // 6. Clear Scoped Operator Defaults
-        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        // 7. Clear Scoped Operator Defaults & Cleanup Journal
         UserDefaults.standard.removeObject(forKey: "nodepocket_selected_wallet_\(userKey)")
+        try? FileManager.default.removeItem(at: journalURL)
 
         return purgedWallets
+        #endif
     }
 }

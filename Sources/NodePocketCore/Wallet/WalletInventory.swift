@@ -209,6 +209,7 @@ public actor WalletInventory {
     private let dataDirectory: URL
     private var metadata: WalletMetadataRegistry
     private let metadataFileURL: URL
+    public private(set) var metadataLoadError: WalletInventoryStorageError?
     public let receiveAddressStore: ReceiveAddressStore
     public let authCoordinator: WalletAuthCoordinator?
     public let allowUnauthenticatedForTesting: Bool
@@ -223,7 +224,9 @@ public actor WalletInventory {
         self.rpcClient = rpcClient
         self.dataDirectory = dataDirectory
         self.metadataFileURL = dataDirectory.appendingPathComponent("wallets_metadata.json")
-        self.metadata = Self.loadMetadata(from: metadataFileURL)
+        let (loaded, loadErr) = Self.loadMetadata(from: metadataFileURL)
+        self.metadata = loaded
+        self.metadataLoadError = loadErr
         self.receiveAddressStore = receiveAddressStore
         self.authCoordinator = authCoordinator
         self.allowUnauthenticatedForTesting = allowUnauthenticatedForTesting
@@ -250,16 +253,33 @@ public actor WalletInventory {
         }
     }
 
-    private static func loadMetadata(from url: URL) -> WalletMetadataRegistry {
-        guard let data = try? Data(contentsOf: url) else {
-            return WalletMetadataRegistry()
+    private static func loadMetadata(from url: URL) -> (registry: WalletMetadataRegistry, error: WalletInventoryStorageError?) {
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return (WalletMetadataRegistry(), nil)
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            return (WalletMetadataRegistry(), WalletInventoryStorageError.readFailed(path: url.path, underlyingError: error.localizedDescription))
+        }
+        guard !data.isEmpty else {
+            return (WalletMetadataRegistry(), WalletInventoryStorageError.readFailed(path: url.path, underlyingError: "File is empty (0 bytes)"))
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return (try? decoder.decode(WalletMetadataRegistry.self, from: data)) ?? WalletMetadataRegistry()
+        do {
+            let reg = try decoder.decode(WalletMetadataRegistry.self, from: data)
+            return (reg, nil)
+        } catch {
+            return (WalletMetadataRegistry(), WalletInventoryStorageError.readFailed(path: url.path, underlyingError: "Malformed JSON: \(error.localizedDescription)"))
+        }
     }
 
     public func saveMetadata() throws {
+        if let loadErr = metadataLoadError {
+            throw loadErr
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
@@ -288,10 +308,37 @@ public actor WalletInventory {
     }
 
     public func setOwner(for walletName: String, owner: String) throws {
+        if let loadErr = metadataLoadError {
+            throw loadErr
+        }
         let key = walletName.lowercased()
-        metadata.walletOwners[key] = owner.lowercased()
-        metadata.quarantinedWallets.remove(key)
-        try saveMetadata()
+        if let existingOwner = metadata.walletOwners[key], existingOwner.lowercased() != owner.lowercased() {
+            throw WalletInventoryError.invalidWalletName("Wallet '\(walletName)' is already owned by operator '\(existingOwner)'. Cannot reassign owner.")
+        }
+
+        // Transactional CAS: update copy, write to disk atomically, only commit in-memory upon disk success
+        var copy = self.metadata
+        copy.walletOwners[key] = owner.lowercased()
+        copy.quarantinedWallets.remove(key)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data: Data
+        do {
+            data = try encoder.encode(copy)
+        } catch {
+            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+            try data.write(to: metadataFileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
+            self.metadata = copy
+        } catch {
+            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
     }
 
     public func isWalletOwnedBy(walletName: String, username: String) -> Bool {
@@ -350,7 +397,11 @@ public actor WalletInventory {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
         var sanitized = String(trimmed.unicodeScalars.filter { allowed.contains($0) })
         if sanitized.isEmpty {
-            sanitized = "wallet"
+            sanitized = "operator"
+        }
+        // Truncate base sanitized name to <= 40 chars so total name (with suffix _wallet_XXX) is strictly <= 64 chars
+        if sanitized.count > 40 {
+            sanitized = String(sanitized.prefix(40))
         }
 
         let candidate = "\(sanitized)_wallet"
@@ -370,14 +421,36 @@ public actor WalletInventory {
     }
 
     public func removeWalletMetadata(name: String) throws {
+        if let loadErr = metadataLoadError {
+            throw loadErr
+        }
         let key = name.lowercased()
-        metadata.walletOwners.removeValue(forKey: key)
-        metadata.quarantinedWallets.remove(key)
-        metadata.cachedBalances.removeValue(forKey: name)
-        metadata.cachedBalances.removeValue(forKey: key)
-        metadata.archivedWallets.remove(name)
-        metadata.archivedWallets.remove(key)
-        try saveMetadata()
+        var copy = self.metadata
+        copy.walletOwners.removeValue(forKey: key)
+        copy.quarantinedWallets.remove(key)
+        copy.cachedBalances.removeValue(forKey: name)
+        copy.cachedBalances.removeValue(forKey: key)
+        copy.archivedWallets.remove(name)
+        copy.archivedWallets.remove(key)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        let data: Data
+        do {
+            data = try encoder.encode(copy)
+        } catch {
+            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
+
+        do {
+            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+            try data.write(to: metadataFileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
+            self.metadata = copy
+        } catch {
+            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
     }
 
     public func refreshInventory(

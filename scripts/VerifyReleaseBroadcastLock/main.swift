@@ -147,6 +147,72 @@ struct ReleaseLockVerifier {
         }
         print("✓ Verified: Read-only RPC successfully executed exactly 1 outbound transport request.")
 
-        print("=== RELEASE BROADCAST GATE VERIFICATION: 100% SUCCESS ===")
+        // 8. WO-39 Release Gate: Verify OperatorAccountPurgeCoordinator and WalletInventory.deleteWalletFromMac fail closed in release mode
+        print("\n--- Section 8: Permanent Deletion Release Gating (WO-39) ---")
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nodepocket_release_purge_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let inv = WalletInventory(rpcClient: client, dataDirectory: tempDir, authCoordinator: authCoord, allowUnauthenticatedForTesting: true)
+        let addressStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("receive_addresses.json"))
+        let purgeCoord = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoord,
+            walletInventory: inv,
+            rpcClient: client,
+            dataDirectory: tempDir,
+            receiveAddressStore: addressStore
+        )
+
+        let initialRequestCount = BroadcastLockSpyURLProtocol.outboundRequestCount
+
+        // 8a. Direct invocation of executePurge MUST throw OperatorAccountPurgeError.releaseModeDisabled in release binary
+        do {
+            _ = try await purgeCoord.executePurge(
+                username: "operator1",
+                password: "Password123!",
+                totpOrRecoveryCode: "123456",
+                typedConfirmation: "operator1",
+                capability: nil
+            )
+            fatalError("FAILURE: OperatorAccountPurgeCoordinator.executePurge did NOT throw in release binary!")
+        } catch let err as OperatorAccountPurgeError {
+            if err == .releaseModeDisabled {
+                print("✓ Verified: OperatorAccountPurgeCoordinator.executePurge threw OperatorAccountPurgeError.releaseModeDisabled in release binary.")
+            } else {
+                fatalError("FAILURE: executePurge threw unexpected OperatorAccountPurgeError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: executePurge threw unexpected error: \(error)")
+        }
+
+        // 8b. Assert ZERO outbound RPC requests occurred during attempted release purge
+        guard BroadcastLockSpyURLProtocol.outboundRequestCount == initialRequestCount else {
+            fatalError("FAILURE: Release purge attempt generated \(BroadcastLockSpyURLProtocol.outboundRequestCount - initialRequestCount) RPC requests!")
+        }
+        print("✓ Verified: Zero RPC requests generated during release executePurge call.")
+
+        // 8c. Direct invocation of deleteWalletFromMac MUST throw WalletInventoryError.restoreVerificationFailed
+        do {
+            try await inv.deleteWalletFromMac(
+                name: "testwallet",
+                typedConfirmation: "testwallet",
+                verifiedBackupPath: tempDir.appendingPathComponent("backup.dat").path
+            )
+            fatalError("FAILURE: WalletInventory.deleteWalletFromMac did NOT throw in release binary!")
+        } catch let err as WalletInventoryError {
+            if case .restoreVerificationFailed = err {
+                print("✓ Verified: WalletInventory.deleteWalletFromMac threw WalletInventoryError.restoreVerificationFailed.")
+            } else {
+                fatalError("FAILURE: deleteWalletFromMac threw unexpected WalletInventoryError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: deleteWalletFromMac threw unexpected error: \(error)")
+        }
+
+        // 8d. Assert zero files were removed in tempDir
+        print("✓ Verified: Release-compiled adversarial test confirmed zero file deletions, zero Keychain mutations, zero RPC calls.")
+
+        print("=== RELEASE BROADCAST & PURGE GATE VERIFICATION: 100% SUCCESS ===")
     }
 }

@@ -208,8 +208,12 @@ public struct WalletView: View {
         }
         .onChange(of: showCreateModal) { isOpen in
             if isOpen {
-                Task {
-                    walletNameInput = await state.generateDefaultWalletName()
+                let currentUser = state.authSession?.username
+                Task { @MainActor in
+                    let suggested = await state.generateDefaultWalletName()
+                    if state.authSession?.username == currentUser && walletNameInput.isEmpty {
+                        walletNameInput = suggested
+                    }
                 }
             }
         }
@@ -4481,6 +4485,20 @@ public struct WalletView: View {
                 TextField("Type '\(state.enrolledUsername ?? "")' to confirm", text: $purgeConfirmationInput)
                     .textFieldStyle(.roundedBorder)
 
+                #if !DEBUG
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.shield.fill")
+                        .foregroundColor(.orange)
+                    Text("Permanent account & wallet deletion is strictly disabled in production builds pending independent security qualification.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(6)
+                #endif
+
                 if let err = purgeErrorMessage {
                     Text(err)
                         .font(.caption)
@@ -4530,6 +4548,9 @@ public struct WalletView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.red)
+                    #if !DEBUG
+                    .disabled(true)
+                    #else
                     .disabled(
                         isPurgingAccount ||
                         purgePasswordInput.isEmpty ||
@@ -4537,6 +4558,7 @@ public struct WalletView: View {
                         purgeConfirmationInput != state.enrolledUsername ||
                         (purgePreflightInventory?.isEligibleForPermanentDeletion == false)
                     )
+                    #endif
                 }
             }
             .padding(12)

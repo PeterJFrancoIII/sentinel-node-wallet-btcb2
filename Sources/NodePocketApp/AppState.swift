@@ -695,9 +695,14 @@ public final class AppState: ObservableObject {
             throw WalletCreationError.nodeUnreachable(rpcStatus)
         }
 
+        let sessionBefore = self.authSession
         let result = try await walletManager.createEncryptedDescriptorWallet(
             name: name, passphrase: passphrase, storeInKeychain: storeInKeychain, capability: self.authSession
         )
+        guard self.authSession?.id == sessionBefore?.id else {
+            // Operator switched during wallet creation await! Do not mutate active state for mismatched operator.
+            return result
+        }
         walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
         await self.loadOrEstablishReceiveAddresses(for: name)
         transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
@@ -721,6 +726,9 @@ public final class AppState: ObservableObject {
         totpOrRecoveryCode: String,
         typedConfirmation: String
     ) async throws -> [String] {
+        #if !DEBUG
+        throw OperatorAccountPurgeError.releaseModeDisabled
+        #else
         guard let user = self.authSession?.username else {
             throw OperatorAccountPurgeError.unauthenticated
         }
@@ -735,6 +743,7 @@ public final class AppState: ObservableObject {
         self.refreshAuthState()
         appendLog("[AUTH] Operator account '\(user)' and \(purged.count) owned wallet(s) permanently deleted.")
         return purged
+        #endif
     }
 
     public func checkRPCReadiness() async -> (isReady: Bool, status: String) {

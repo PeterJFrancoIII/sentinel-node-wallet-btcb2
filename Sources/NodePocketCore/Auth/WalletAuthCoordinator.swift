@@ -1309,19 +1309,30 @@ public actor WalletAuthCoordinator {
         // Verify TOTP or recovery code
         let cleanCode = totpOrRecoveryCode.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "")
         var codeValid = false
+        var usedTimeStep: Int64? = nil
+        var consumedRecoveryIndex: Int? = nil
+
         if cleanCode.count == 6 && CharacterSet.decimalDigits.isSuperset(of: CharacterSet(charactersIn: cleanCode)) {
             let secret = (try? Self.loadTOTPSecretFromKeychain(username: rec.username)) ?? rec.legacyTotpSecretBase32 ?? ""
             let verification = Self.verifyTOTP(secret: secret, code: cleanCode, time: time)
-            codeValid = verification.valid
+            if verification.valid {
+                guard verification.timeStep > rec.lastUsedTimeStep else {
+                    recordAuthFailure(.totpTimestepReplayed)
+                    throw WalletAuthError.replayedTOTPTimestep
+                }
+                codeValid = true
+                usedTimeStep = verification.timeStep
+            }
         } else {
             // Check recovery codes
             let normalized = cleanCode.uppercased()
-            for codeRecord in rec.recoveryCodes {
+            for (idx, codeRecord) in rec.recoveryCodes.enumerated() {
                 if let rSalt = Self.hexToData(codeRecord.saltHex),
                    let expectedVerifier = Self.hexToData(codeRecord.verifierHex),
                    let verifier = try? Self.deriveRecoveryVerifier(code: normalized, salt: rSalt),
                    Self.constantTimeCompare(verifier, expectedVerifier) {
                     codeValid = true
+                    consumedRecoveryIndex = idx
                     break
                 }
             }
@@ -1331,12 +1342,33 @@ public actor WalletAuthCoordinator {
             throw registerFailedAttempt(&rec)
         }
 
+        if let step = usedTimeStep {
+            rec.lastUsedTimeStep = step
+        }
+        if let idx = consumedRecoveryIndex {
+            rec.recoveryCodes.remove(at: idx)
+        }
+
         // Reset failed attempts on success
         rec.failedAttempts = 0
         rec.lockedUntil = nil
+        self.recordGeneration += 1
         self.records[userKey] = rec
-        try? saveRecords()
-        Self.clearDurableLockoutFallback(username: userKey)
+        do {
+            try saveRecords()
+            Self.clearDurableLockoutFallback(username: userKey)
+        } catch let storageErr as AuthRegistryStorageError {
+            self.registryLoadError = storageErr
+            recordAuthFailure(.registryUnavailable)
+            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: rec.failedAttempts, lockedUntil: rec.lockedUntil)
+            throw WalletAuthError.registryStorageError(storageErr)
+        } catch {
+            let writeErr = AuthRegistryStorageError.writeFailed(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = writeErr
+            recordAuthFailure(.registryUnavailable)
+            Self.saveDurableLockoutFallback(username: userKey, failedAttempts: rec.failedAttempts, lockedUntil: rec.lockedUntil)
+            throw WalletAuthError.registryStorageError(writeErr)
+        }
     }
 
     public func purgeOperatorRecord(username: String) throws {
