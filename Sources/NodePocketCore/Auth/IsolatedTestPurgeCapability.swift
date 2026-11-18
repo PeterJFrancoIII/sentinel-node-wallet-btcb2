@@ -7,13 +7,25 @@ public struct IsolatedTestPurgeCapability: Sendable {
     public let fixtureDirectory: URL
     public let fixtureNonce: String
     public let isMockDeviceOwnerAuthorized: Bool
+    public let disposableKeychainNamespace: String
 
     public static let fixtureMarkerFileName = "nodepocket_isolated_test_fixture.lock"
 
-    /// Factory method that creates and validates an isolated test fixture capability.
-    /// Strictly rejects non-temporary directories, production datadir paths, symlinks, or directories without marker lock.
+    /// WO-54: App-facing createForTestFixture is permanently disabled in shipping core.
+    /// External callers from ordinary app code cannot construct a valid test capability.
     public static func createForTestFixture(
         directory: URL,
+        mockDeviceOwner: Bool = false
+    ) throws -> IsolatedTestPurgeCapability {
+        throw OperatorAccountPurgeError.releaseModeDisabled
+    }
+
+    /// Internal test-only factory method available strictly to internal/test targets.
+    /// Strictly rejects non-temporary directories, production datadir paths, symlinks, missing markers,
+    /// or non-disposable / production Keychain namespaces.
+    package static func createInternalTestCapability(
+        directory: URL,
+        disposableKeychainNamespace: String,
         mockDeviceOwner: Bool = false
     ) throws -> IsolatedTestPurgeCapability {
         let stdDir = directory.standardizedFileURL
@@ -56,17 +68,42 @@ public struct IsolatedTestPurgeCapability: Sendable {
             )
         }
 
+        // 5. WO-54: Enforce disposable Keychain namespace (must not be production Keychain namespace)
+        let trimmedNamespace = disposableKeychainNamespace.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmedNamespace != "app.nodepocket.btcb2.wallet" &&
+              trimmedNamespace != "app.nodepocket.btcb2.auth" &&
+              trimmedNamespace.hasPrefix("app.nodepocket.test.") else {
+            throw OperatorAccountPurgeError.storageError(
+                "Security violation: Test purge capability requires a disposable test Keychain namespace starting with 'app.nodepocket.test.', got '\(disposableKeychainNamespace)'"
+            )
+        }
+
         let id = UUID()
         return IsolatedTestPurgeCapability(
             fixtureId: id,
             fixtureDirectory: resolvedDir,
             fixtureNonce: markerNonce.trimmingCharacters(in: .whitespacesAndNewlines),
-            isMockDeviceOwnerAuthorized: mockDeviceOwner
+            isMockDeviceOwnerAuthorized: mockDeviceOwner,
+            disposableKeychainNamespace: trimmedNamespace
         )
     }
 
-    /// Verifies the capability against the coordinator's actual runtime datadir.
-    public func validate(forDataDirectory dataDirectory: URL) -> Bool {
+    package init(
+        fixtureId: UUID,
+        fixtureDirectory: URL,
+        fixtureNonce: String,
+        isMockDeviceOwnerAuthorized: Bool,
+        disposableKeychainNamespace: String
+    ) {
+        self.fixtureId = fixtureId
+        self.fixtureDirectory = fixtureDirectory
+        self.fixtureNonce = fixtureNonce
+        self.isMockDeviceOwnerAuthorized = isMockDeviceOwnerAuthorized
+        self.disposableKeychainNamespace = disposableKeychainNamespace
+    }
+
+    /// Verifies the capability against the coordinator's actual runtime datadir and disposable Keychain namespace.
+    public func validate(forDataDirectory dataDirectory: URL, keychainNamespace: String? = nil) -> Bool {
         let resolvedDataDir = dataDirectory.standardizedFileURL.resolvingSymlinksInPath()
         guard resolvedDataDir == fixtureDirectory else {
             return false
@@ -77,6 +114,11 @@ public struct IsolatedTestPurgeCapability: Sendable {
               let nonce = String(data: data, encoding: .utf8),
               nonce.trimmingCharacters(in: .whitespacesAndNewlines) == self.fixtureNonce else {
             return false
+        }
+        if let ns = keychainNamespace {
+            guard ns == self.disposableKeychainNamespace else {
+                return false
+            }
         }
         return true
     }

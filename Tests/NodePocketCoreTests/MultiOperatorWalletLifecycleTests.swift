@@ -240,14 +240,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         _ = receiveStore.addAddress("bc1q_alice_addr", for: "alice_wallet")
         _ = receiveStore.addAddress("bc1q_bob_addr", for: "bob_wallet")
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         // 4. Bob purges his account
@@ -313,14 +314,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             allowUnauthenticatedForTesting: false
         )
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         // 1. Wrong typed confirmation
@@ -421,14 +423,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         try FileManager.default.createDirectory(at: symlinkPath.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.createSymbolicLink(at: symlinkPath, withDestinationURL: targetFile)
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         let preflight = try await purgeCoordinator.preflight(username: "operator", capability: cap)
@@ -489,14 +492,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
         try Data("funded".utf8).write(to: walletDir.appendingPathComponent("wallet.dat"))
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         let t1 = t0 + 60
@@ -560,14 +564,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
         try Data("unverified".utf8).write(to: walletDir.appendingPathComponent("wallet.dat"))
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         let t1 = t0 + 60
@@ -860,10 +865,31 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         }
     }
 
+    func testOrdinaryAppFacingCreateForTestFixtureAlwaysFailsClosed() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_app_facing_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        XCTAssertThrowsError(
+            try IsolatedTestPurgeCapability.createForTestFixture(directory: tempDir),
+            "App-facing createForTestFixture must unconditionally fail closed in all builds"
+        ) { error in
+            guard let purgeErr = error as? OperatorAccountPurgeError else {
+                XCTFail("Expected OperatorAccountPurgeError, got \(error)")
+                return
+            }
+            XCTAssertEqual(purgeErr, .releaseModeDisabled)
+        }
+    }
+
     func testFixtureCapabilityRejectsProhibitedDatadir() {
         let prohibitedURL = URL(fileURLWithPath: "/Users/user/Library/Application Support/Bitcoin")
         XCTAssertThrowsError(
-            try IsolatedTestPurgeCapability.createForTestFixture(directory: prohibitedURL),
+            try IsolatedTestPurgeCapability.createInternalTestCapability(
+                directory: prohibitedURL,
+                disposableKeychainNamespace: "app.nodepocket.test.prohibited"
+            ),
             "Must reject prohibited application support datadir"
         ) { error in
             guard let purgeErr = error as? OperatorAccountPurgeError,
@@ -882,7 +908,10 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         XCTAssertThrowsError(
-            try IsolatedTestPurgeCapability.createForTestFixture(directory: tempDir),
+            try IsolatedTestPurgeCapability.createInternalTestCapability(
+                directory: tempDir,
+                disposableKeychainNamespace: "app.nodepocket.test.missing_marker"
+            ),
             "Must reject temp directory missing marker file"
         ) { error in
             guard let purgeErr = error as? OperatorAccountPurgeError,
@@ -891,6 +920,226 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
                 return
             }
             XCTAssertTrue(msg.contains("missing required valid marker lock file"), "Error must mention marker file: \(msg)")
+        }
+    }
+
+    func testFixtureCapabilityRejectsSymlinkedDirectory() throws {
+        let targetDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_sym_target_\(UUID().uuidString)")
+        let symlinkDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_sym_link_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: targetDir)
+            try? FileManager.default.removeItem(at: symlinkDir)
+        }
+
+        try FileManager.default.createSymbolicLink(at: symlinkDir, withDestinationURL: targetDir)
+
+        XCTAssertThrowsError(
+            try IsolatedTestPurgeCapability.createInternalTestCapability(
+                directory: symlinkDir,
+                disposableKeychainNamespace: "app.nodepocket.test.symlink"
+            ),
+            "Must reject symbolic link directory"
+        ) { error in
+            guard let purgeErr = error as? OperatorAccountPurgeError,
+                  case .symlinkNotPermitted = purgeErr else {
+                XCTFail("Expected symlinkNotPermitted, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testTempMarkerForgeryRejectedFailClosed() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_forged_marker_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        // Attacker creates a forged marker file with an arbitrary string
+        let markerURL = tempDir.appendingPathComponent(IsolatedTestPurgeCapability.fixtureMarkerFileName)
+        try Data("FORGED_NONCE_VALUE_12345".utf8).write(to: markerURL)
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "forger")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        let cap = try await authCoordinator.enroll(
+            username: "forger",
+            password: "ForgerPassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: ["forged_wallet"])
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+        try await inventory.setOwner(for: "forged_wallet", owner: "forger")
+        let walletDir = tempDir.appendingPathComponent("forged_wallet")
+        try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
+        try Data("dummy_wallet_bytes".utf8).write(to: walletDir.appendingPathComponent("wallet.dat"))
+
+        // Standard app coordinator (no internal test harness injected)
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+
+        do {
+            _ = try await purgeCoordinator.executePurge(
+                username: "forger",
+                password: "ForgerPassword123!@#",
+                totpOrRecoveryCode: totp,
+                typedConfirmation: "forger",
+                capability: cap
+            )
+            XCTFail("Forged marker must fail closed with releaseModeDisabled")
+        } catch let err as OperatorAccountPurgeError {
+            XCTAssertEqual(err, .releaseModeDisabled)
+        }
+
+        // Verify ZERO side-effects: wallet files exist, owner exists, operator enrolled
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walletDir.appendingPathComponent("wallet.dat").path))
+        let owner = await inventory.getOwner(for: "forged_wallet")
+        XCTAssertEqual(owner, "forger")
+        let isEnrolled = await authCoordinator.isEnrolled
+        XCTAssertTrue(isEnrolled)
+    }
+
+    func testLiveLookingTempWalletDirectoryFailsClosed() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_live_looking_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let walletDir = tempDir.appendingPathComponent("wallets").appendingPathComponent("live_node_wallet")
+        try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
+        try Data("authentic_looking_wallet_bytes".utf8).write(to: walletDir.appendingPathComponent("wallet.dat"))
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore
+        )
+
+        do {
+            _ = try await purgeCoordinator.executePurge(
+                username: "operator",
+                password: "Pwd",
+                totpOrRecoveryCode: "123456",
+                typedConfirmation: "operator",
+                capability: nil
+            )
+            XCTFail("Live-looking temp directory must fail closed")
+        } catch let err as OperatorAccountPurgeError {
+            XCTAssertEqual(err, .releaseModeDisabled)
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: walletDir.appendingPathComponent("wallet.dat").path))
+    }
+
+    func testRealKeychainNamespaceProhibitedInPurge() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_real_kc_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let markerURL = tempDir.appendingPathComponent(IsolatedTestPurgeCapability.fixtureMarkerFileName)
+        try Data("valid_nonce".utf8).write(to: markerURL)
+
+        XCTAssertThrowsError(
+            try IsolatedTestPurgeCapability.createInternalTestCapability(
+                directory: tempDir,
+                disposableKeychainNamespace: "app.nodepocket.btcb2.wallet"
+            ),
+            "Must reject real production Keychain namespace 'app.nodepocket.btcb2.wallet'"
+        ) { error in
+            guard let purgeErr = error as? OperatorAccountPurgeError,
+                  case .storageError(let msg) = purgeErr else {
+                XCTFail("Expected storageError, got \(error)")
+                return
+            }
+            XCTAssertTrue(msg.contains("Security violation: Test purge capability requires a disposable test Keychain namespace"), "Error must reject production namespace: \(msg)")
+        }
+    }
+
+    func testCopiedMarkerFromAnotherTestRejected() async throws {
+        let tempDirA = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_donor_\(UUID().uuidString)")
+        let tempDirB = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_recipient_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDirA, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: tempDirB, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDirA)
+            try? FileManager.default.removeItem(at: tempDirB)
+        }
+
+        let fixtureA = try Self.makeTestFixtureCapability(directory: tempDirA)
+
+        // Copy marker from A to B
+        let markerA = tempDirA.appendingPathComponent(IsolatedTestPurgeCapability.fixtureMarkerFileName)
+        let markerB = tempDirB.appendingPathComponent(IsolatedTestPurgeCapability.fixtureMarkerFileName)
+        try FileManager.default.copyItem(at: markerA, to: markerB)
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDirB)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDirB,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        // Attempt to reuse fixtureA capability on directory B
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDirB,
+            receiveAddressStore: receiveStore,
+            testFixtureCapability: fixtureA.capability,
+            keychainHelper: fixtureA.keychain
+        )
+
+        do {
+            _ = try await purgeCoordinator.executePurge(
+                username: "operator",
+                password: "Pwd",
+                totpOrRecoveryCode: "123456",
+                typedConfirmation: "operator",
+                capability: nil
+            )
+            XCTFail("Reused capability on copied marker directory must fail closed")
+        } catch let err as OperatorAccountPurgeError {
+            XCTAssertEqual(err, .releaseModeDisabled)
         }
     }
 
@@ -906,7 +1155,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             try? FileManager.default.removeItem(at: tempDirB)
         }
 
-        let capA = try Self.makeTestFixtureCapability(directory: tempDirA)
+        let fixtureA = try Self.makeTestFixtureCapability(directory: tempDirA)
 
         let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDirB)
         let rpc = Self.makeMockRPCClient()
@@ -926,7 +1175,8 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             rpcClient: rpc,
             dataDirectory: tempDirB,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: capA
+            testFixtureCapability: fixtureA.capability,
+            keychainHelper: fixtureA.keychain
         )
 
         do {
@@ -943,30 +1193,6 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         }
     }
 
-    func testFixtureCapabilityRejectsSymlinkedDirectory() throws {
-        let targetDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("btcb2_sym_target_\(UUID().uuidString)")
-        let symlinkDir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("btcb2_sym_link_\(UUID().uuidString)")
-        try FileManager.default.createDirectory(at: targetDir, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.removeItem(at: targetDir)
-            try? FileManager.default.removeItem(at: symlinkDir)
-        }
-
-        try FileManager.default.createSymbolicLink(at: symlinkDir, withDestinationURL: targetDir)
-
-        XCTAssertThrowsError(
-            try IsolatedTestPurgeCapability.createForTestFixture(directory: symlinkDir),
-            "Must reject symbolic link directory"
-        ) { error in
-            guard let purgeErr = error as? OperatorAccountPurgeError,
-                  case .symlinkNotPermitted = purgeErr else {
-                XCTFail("Expected symlinkNotPermitted, got \(error)")
-                return
-            }
-        }
-    }
 
     func testPreflightFailsClosedWhenUnassignedDiskWalletDiscoveredViaListWalletDir() async throws {
         let tempDir = FileManager.default.temporaryDirectory
@@ -1181,14 +1407,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             allowUnauthenticatedForTesting: false
         )
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         // 1. Absent journal
@@ -1242,14 +1469,15 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
         try Data("zero_balance".utf8).write(to: walletDir.appendingPathComponent("wallet.dat"))
 
-        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let fixture = try Self.makeTestFixtureCapability(directory: tempDir)
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
             walletInventory: inventory,
             rpcClient: rpc,
             dataDirectory: tempDir,
             receiveAddressStore: receiveStore,
-            testFixtureCapability: fixtureCap
+            testFixtureCapability: fixture.capability,
+            keychainHelper: fixture.keychain
         )
 
         // 1. Preflight captures generation G0
@@ -1412,11 +1640,21 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         XCTAssertEqual(reg.walletOwners["test_atomic_wallet"], "operator_a")
     }
 
-    private static func makeTestFixtureCapability(directory: URL, mockDeviceOwner: Bool = true) throws -> IsolatedTestPurgeCapability {
+    private static func makeTestFixtureCapability(
+        directory: URL,
+        mockDeviceOwner: Bool = true,
+        keychainNamespace: String = "app.nodepocket.test.purge.\(UUID().uuidString)"
+    ) throws -> (capability: IsolatedTestPurgeCapability, keychain: KeychainHelper) {
         let markerURL = directory.appendingPathComponent(IsolatedTestPurgeCapability.fixtureMarkerFileName)
         let nonce = UUID().uuidString
         try Data(nonce.utf8).write(to: markerURL)
-        return try IsolatedTestPurgeCapability.createForTestFixture(directory: directory, mockDeviceOwner: mockDeviceOwner)
+        let cap = try IsolatedTestPurgeCapability.createInternalTestCapability(
+            directory: directory,
+            disposableKeychainNamespace: keychainNamespace,
+            mockDeviceOwner: mockDeviceOwner
+        )
+        let keychain = KeychainHelper(serviceName: keychainNamespace, allowFallbackForTesting: true)
+        return (cap, keychain)
     }
 
     private static func makeMockRPCClient() -> BitcoinRPCClient {

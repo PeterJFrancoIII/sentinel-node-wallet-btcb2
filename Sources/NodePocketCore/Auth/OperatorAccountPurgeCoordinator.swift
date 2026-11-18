@@ -120,14 +120,32 @@ public actor OperatorAccountPurgeCoordinator {
     private let dataDirectory: URL
     private let receiveAddressStore: ReceiveAddressStore
     private let testFixtureCapability: IsolatedTestPurgeCapability?
+    private let customKeychainHelper: KeychainHelper?
 
     public init(
         authCoordinator: WalletAuthCoordinator,
         walletInventory: WalletInventory,
         rpcClient: BitcoinRPCClient,
         dataDirectory: URL,
+        receiveAddressStore: ReceiveAddressStore
+    ) {
+        self.authCoordinator = authCoordinator
+        self.walletInventory = walletInventory
+        self.rpcClient = rpcClient
+        self.dataDirectory = dataDirectory
+        self.receiveAddressStore = receiveAddressStore
+        self.testFixtureCapability = nil
+        self.customKeychainHelper = nil
+    }
+
+    package init(
+        authCoordinator: WalletAuthCoordinator,
+        walletInventory: WalletInventory,
+        rpcClient: BitcoinRPCClient,
+        dataDirectory: URL,
         receiveAddressStore: ReceiveAddressStore,
-        testFixtureCapability: IsolatedTestPurgeCapability? = nil
+        testFixtureCapability: IsolatedTestPurgeCapability?,
+        keychainHelper: KeychainHelper? = nil
     ) {
         self.authCoordinator = authCoordinator
         self.walletInventory = walletInventory
@@ -135,6 +153,7 @@ public actor OperatorAccountPurgeCoordinator {
         self.dataDirectory = dataDirectory
         self.receiveAddressStore = receiveAddressStore
         self.testFixtureCapability = testFixtureCapability
+        self.customKeychainHelper = keychainHelper
     }
 
     private func verifyPathContainmentAndNoSymlinks(candidateURL: URL) throws -> URL {
@@ -226,9 +245,16 @@ public actor OperatorAccountPurgeCoordinator {
             try fileHandle.close()
 
             let dirFd = open(parentDir.path, O_RDONLY)
-            if dirFd >= 0 {
-                fsync(dirFd)
-                close(dirFd)
+            guard dirFd >= 0 else {
+                throw OperatorAccountPurgeError.storageError("Failed to open parent directory for fsync: \(errno)")
+            }
+            let syncResult = fsync(dirFd)
+            let closeResult = close(dirFd)
+            guard syncResult == 0 else {
+                throw OperatorAccountPurgeError.storageError("Failed to fsync parent directory descriptor: \(errno)")
+            }
+            guard closeResult == 0 else {
+                throw OperatorAccountPurgeError.storageError("Failed to close parent directory descriptor: \(errno)")
             }
         } catch {
             throw OperatorAccountPurgeError.storageError("Failed to durably write purge journal to '\(url.path)': \(error.localizedDescription)")
@@ -418,11 +444,18 @@ public actor OperatorAccountPurgeCoordinator {
         #if !DEBUG
         throw OperatorAccountPurgeError.releaseModeDisabled
         #else
-        // WO-49: Destructive purge is strictly prohibited against any real or non-fixture datadir in all builds.
-        // Requires an unforgeable IsolatedTestPurgeCapability constructed exclusively for validated temporary test fixtures.
+        // WO-54: Core default executePurge fails closed even if called with forged markers,
+        // temp dirs, or live-looking paths. Destructive execution is strictly prohibited
+        // in ordinary app/core builds and requires an injected, non-public disposable test harness.
         guard let fixture = testFixtureCapability,
-              fixture.validate(forDataDirectory: self.dataDirectory) else {
+              let activeKeychain = self.customKeychainHelper,
+              fixture.validate(forDataDirectory: self.dataDirectory, keychainNamespace: activeKeychain.serviceName) else {
             throw OperatorAccountPurgeError.releaseModeDisabled
+        }
+        guard activeKeychain.serviceName != "app.nodepocket.btcb2.wallet" &&
+              activeKeychain.serviceName != "app.nodepocket.btcb2.auth" &&
+              activeKeychain.serviceName.hasPrefix("app.nodepocket.test.") else {
+            throw OperatorAccountPurgeError.storageError("Security violation: Destructive purge prohibited against production Keychain namespace '\(activeKeychain.serviceName)'")
         }
         guard let session = capability else {
             throw OperatorAccountPurgeError.unauthenticated
@@ -451,7 +484,7 @@ public actor OperatorAccountPurgeCoordinator {
         // 2. Device Owner Presence Challenge
         if !fixture.isMockDeviceOwnerAuthorized {
             do {
-                let presenceOk = try await KeychainHelper.shared.authenticateUserPresence(
+                let presenceOk = try await activeKeychain.authenticateUserPresence(
                     reason: "Authorize permanent deletion of account '\(username)' and all owned wallet data"
                 )
                 guard presenceOk else {
@@ -563,7 +596,7 @@ public actor OperatorAccountPurgeCoordinator {
             journal.perWalletStatus[wallet] = "intent_purge_keychain"
             try writeDurableJournal(record: journal, to: journalURL)
             do {
-                try KeychainHelper.shared.deletePassphrase(account: wallet)
+                try activeKeychain.deletePassphrase(account: wallet)
             } catch {
                 throw OperatorAccountPurgeError.storageError("Failed to delete Keychain passphrase for '\(wallet)': \(error.localizedDescription)")
             }
