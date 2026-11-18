@@ -209,6 +209,7 @@ public actor WalletInventory {
     private let dataDirectory: URL
     private var metadata: WalletMetadataRegistry
     private let metadataFileURL: URL
+    private let lockFileURL: URL
     public private(set) var metadataLoadError: WalletInventoryStorageError?
     public let receiveAddressStore: ReceiveAddressStore
     public let authCoordinator: WalletAuthCoordinator?
@@ -224,6 +225,7 @@ public actor WalletInventory {
         self.rpcClient = rpcClient
         self.dataDirectory = dataDirectory
         self.metadataFileURL = dataDirectory.appendingPathComponent("wallets_metadata.json")
+        self.lockFileURL = dataDirectory.appendingPathComponent("wallets_metadata.lock")
         let (loaded, loadErr) = Self.loadMetadata(from: metadataFileURL)
         self.metadata = loaded
         self.metadataLoadError = loadErr
@@ -276,16 +278,31 @@ public actor WalletInventory {
         }
     }
 
-    public func saveMetadata() throws {
-        if let loadErr = metadataLoadError {
-            throw loadErr
+    private func withCrossProcessLock<T>(_ work: () throws -> T) throws -> T {
+        try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+        let fd = open(lockFileURL.path, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else {
+            throw WalletInventoryStorageError.writeFailed(path: lockFileURL.path, underlyingError: "Failed to open metadata lock file: \(errno)")
         }
+        defer {
+            close(fd)
+        }
+        guard flock(fd, LOCK_EX) == 0 else {
+            throw WalletInventoryStorageError.writeFailed(path: lockFileURL.path, underlyingError: "Failed to acquire exclusive lock: \(errno)")
+        }
+        defer {
+            flock(fd, LOCK_UN)
+        }
+        return try work()
+    }
+
+    private func persistMetadataUnderLock(_ newMetadata: WalletMetadataRegistry) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data: Data
         do {
-            data = try encoder.encode(metadata)
+            data = try encoder.encode(newMetadata)
         } catch {
             throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
         }
@@ -294,8 +311,30 @@ public actor WalletInventory {
             try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
             try data.write(to: metadataFileURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
+
+            let fileHandle = try FileHandle(forWritingTo: metadataFileURL)
+            try fileHandle.synchronize()
+            try fileHandle.close()
+
+            let dirFd = open(dataDirectory.path, O_RDONLY)
+            if dirFd >= 0 {
+                fsync(dirFd)
+                close(dirFd)
+            }
+            self.metadata = newMetadata
         } catch {
             throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
+    }
+
+    public func saveMetadata() throws {
+        if let loadErr = metadataLoadError {
+            throw loadErr
+        }
+        try withCrossProcessLock {
+            var copy = self.metadata
+            copy.version += 1
+            try persistMetadataUnderLock(copy)
         }
     }
 
@@ -312,32 +351,21 @@ public actor WalletInventory {
             throw loadErr
         }
         let key = walletName.lowercased()
-        if let existingOwner = metadata.walletOwners[key], existingOwner.lowercased() != owner.lowercased() {
-            throw WalletInventoryError.invalidWalletName("Wallet '\(walletName)' is already owned by operator '\(existingOwner)'. Cannot reassign owner.")
-        }
 
-        // Transactional CAS: update copy, write to disk atomically, only commit in-memory upon disk success
-        var copy = self.metadata
-        copy.walletOwners[key] = owner.lowercased()
-        copy.quarantinedWallets.remove(key)
+        try withCrossProcessLock {
+            let (freshDisk, diskErr) = Self.loadMetadata(from: metadataFileURL)
+            if let err = diskErr {
+                throw err
+            }
+            if let existingOwner = freshDisk.walletOwners[key], existingOwner.lowercased() != owner.lowercased() {
+                throw WalletInventoryError.invalidWalletName("Wallet '\(walletName)' is already owned by operator '\(existingOwner)'. Cannot reassign owner.")
+            }
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data: Data
-        do {
-            data = try encoder.encode(copy)
-        } catch {
-            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
-        }
-
-        do {
-            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-            try data.write(to: metadataFileURL, options: .atomic)
-            self.metadata = copy
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
-        } catch {
-            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+            var updated = freshDisk
+            updated.version += 1
+            updated.walletOwners[key] = owner.lowercased()
+            updated.quarantinedWallets.remove(key)
+            try persistMetadataUnderLock(updated)
         }
     }
 
@@ -351,31 +379,29 @@ public actor WalletInventory {
 
     /// Discovers unowned legacy wallets on disk and marks them quarantined/unassigned.
     /// Strictly avoids heuristic substring guessing (e.g. "kevin" or "peter") and avoids auto-assigning to current caller.
-    public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String? = nil) {
-        guard metadataLoadError == nil else { return }
-        var copy = self.metadata
-        var didChange = false
-        for name in diskNames {
-            let key = name.lowercased()
-            if copy.walletOwners[key] == nil {
-                if !copy.quarantinedWallets.contains(key) {
-                    copy.quarantinedWallets.insert(key)
-                    didChange = true
+    public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String? = nil) throws {
+        if let loadErr = metadataLoadError {
+            throw loadErr
+        }
+        try withCrossProcessLock {
+            let (freshDisk, diskErr) = Self.loadMetadata(from: metadataFileURL)
+            if let err = diskErr {
+                throw err
+            }
+            var updated = freshDisk
+            var didChange = false
+            for name in diskNames {
+                let key = name.lowercased()
+                if updated.walletOwners[key] == nil {
+                    if !updated.quarantinedWallets.contains(key) {
+                        updated.quarantinedWallets.insert(key)
+                        didChange = true
+                    }
                 }
             }
-        }
-        if didChange {
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            if let data = try? encoder.encode(copy) {
-                do {
-                    try data.write(to: metadataFileURL, options: .atomic)
-                    self.metadata = copy
-                    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
-                } catch {
-                    // Do not desync in-memory state on write failure
-                }
+            if didChange {
+                updated.version += 1
+                try persistMetadataUnderLock(updated)
             }
         }
     }
@@ -438,31 +464,21 @@ public actor WalletInventory {
             throw loadErr
         }
         let key = name.lowercased()
-        var copy = self.metadata
-        copy.walletOwners.removeValue(forKey: key)
-        copy.quarantinedWallets.remove(key)
-        copy.cachedBalances.removeValue(forKey: name)
-        copy.cachedBalances.removeValue(forKey: key)
-        copy.archivedWallets.remove(name)
-        copy.archivedWallets.remove(key)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data: Data
-        do {
-            data = try encoder.encode(copy)
-        } catch {
-            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
-        }
-
-        do {
-            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-            try data.write(to: metadataFileURL, options: .atomic)
-            self.metadata = copy
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
-        } catch {
-            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        try withCrossProcessLock {
+            let (freshDisk, diskErr) = Self.loadMetadata(from: metadataFileURL)
+            if let err = diskErr {
+                throw err
+            }
+            var updated = freshDisk
+            updated.version += 1
+            updated.walletOwners.removeValue(forKey: key)
+            updated.quarantinedWallets.remove(key)
+            updated.cachedBalances.removeValue(forKey: name)
+            updated.cachedBalances.removeValue(forKey: key)
+            updated.archivedWallets.remove(name)
+            updated.archivedWallets.remove(key)
+            try persistMetadataUnderLock(updated)
         }
     }
 
@@ -481,7 +497,7 @@ public actor WalletInventory {
         let loadedNames = Set(try await rpcClient.listWallets())
 
         // Reconcile legacy unowned wallets if needed
-        reconcileLegacyWalletOwnership(diskNames: diskNames, currentCaller: callerUser)
+        try? reconcileLegacyWalletOwnership(diskNames: diskNames, currentCaller: callerUser)
 
         var summaries: [WalletSummary] = []
 

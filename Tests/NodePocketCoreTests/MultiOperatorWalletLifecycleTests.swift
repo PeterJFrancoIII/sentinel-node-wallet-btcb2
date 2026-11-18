@@ -75,7 +75,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         let diskWallets = ["kevin_vault", "peter_main", "main_wallet", "orphaned_test"]
 
         // Reconcile
-        await inventory.reconcileLegacyWalletOwnership(diskNames: diskWallets, currentCaller: "NewCaller")
+        try await inventory.reconcileLegacyWalletOwnership(diskNames: diskWallets, currentCaller: "NewCaller")
 
         let meta = await inventory.getMetadata()
         // Must NOT assign to any heuristic identities or the current caller
@@ -1051,7 +1051,7 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
             allowUnauthenticatedForTesting: false
         )
         try await inventory.setOwner(for: "alice_wallet", owner: "alice")
-        await inventory.reconcileLegacyWalletOwnership(diskNames: ["legacy_orphan"])
+        try await inventory.reconcileLegacyWalletOwnership(diskNames: ["legacy_orphan"])
 
         let purgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoordinator,
@@ -1155,10 +1155,232 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         try data.write(to: journalURL, options: .atomic)
 
         let inspected = await purgeCoordinator.inspectPendingJournal(username: "interrupted_op")
-        XCTAssertNotNil(inspected, "Journal must be successfully discovered and decoded")
-        XCTAssertEqual(inspected?.operationId, opId)
-        XCTAssertEqual(inspected?.stage, .walletsUnloaded)
-        XCTAssertEqual(inspected?.perWalletStatus["wallet_x"], "unloaded")
+        guard case .valid(let rec) = inspected else {
+            XCTFail("Expected .valid journal inspection result, got \(inspected)")
+            return
+        }
+        XCTAssertEqual(rec.operationId, opId)
+        XCTAssertEqual(rec.stage, .walletsUnloaded)
+        XCTAssertEqual(rec.perWalletStatus["wallet_x"], "unloaded")
+    }
+
+    func testOperatorAccountPurgeJournalInspectionAbsentAndCorrupted() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_journal_absent_corrupt_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            testFixtureCapability: fixtureCap
+        )
+
+        // 1. Absent journal
+        let absentResult = await purgeCoordinator.inspectPendingJournal(username: "nonexistent_op")
+        XCTAssertEqual(absentResult, .absent, "Missing journal file must return .absent")
+
+        // 2. Corrupted / unreadable journal
+        let corruptJournalURL = tempDir.appendingPathComponent("nodepocket_purge_journal_corrupt_op.json")
+        try Data("NOT_VALID_JSON{{{".utf8).write(to: corruptJournalURL, options: .atomic)
+
+        let corruptResult = await purgeCoordinator.inspectPendingJournal(username: "corrupt_op")
+        guard case .corrupted(let path, let reason) = corruptResult else {
+            XCTFail("Expected .corrupted journal result, got \(corruptResult)")
+            return
+        }
+        XCTAssertEqual(path, corruptJournalURL.path)
+        XCTAssertTrue(reason.contains("Corrupted journal JSON"), "Corrupted reason must explain failure: \(reason)")
+    }
+
+    func testPreflightMetadataGenerationDriftRejection() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_gen_drift_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let authCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await authCoordinator.generateEnrollmentSecret(username: "drift_operator")
+        let t0 = Date().timeIntervalSince1970
+        let totp0 = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        let cap = try await authCoordinator.enroll(
+            username: "drift_operator",
+            password: "OperatorPassword123!@#",
+            secretBase32: sec,
+            totpCode: totp0,
+            recoveryCodes: codes
+        )
+
+        MockPurgeRPCURLProtocol.reset(simulatedBalanceSats: 0, simulateRPCErrors: false, loadedWallets: ["drift_wallet"])
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: authCoordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        try await inventory.setOwner(for: "drift_wallet", owner: "drift_operator")
+        let walletDir = tempDir.appendingPathComponent("drift_wallet")
+        try FileManager.default.createDirectory(at: walletDir, withIntermediateDirectories: true)
+        try Data("zero_balance".utf8).write(to: walletDir.appendingPathComponent("wallet.dat"))
+
+        let fixtureCap = try Self.makeTestFixtureCapability(directory: tempDir)
+        let purgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoordinator,
+            walletInventory: inventory,
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            testFixtureCapability: fixtureCap
+        )
+
+        // 1. Preflight captures generation G0
+        let preflight = try await purgeCoordinator.preflight(username: "drift_operator", capability: cap)
+        XCTAssertTrue(preflight.isEligibleForPermanentDeletion)
+
+        // 2. Metadata drifts before execution (external modification increases version)
+        try await inventory.saveMetadata()
+
+        // 3. Purge execution must fail closed due to generation mismatch
+        let t1 = t0 + 60
+        let freshTotp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t1)
+
+        do {
+            _ = try await purgeCoordinator.executePurge(
+                username: "drift_operator",
+                password: "OperatorPassword123!@#",
+                totpOrRecoveryCode: freshTotp,
+                typedConfirmation: "drift_operator",
+                capability: cap,
+                time: t1,
+                expectedMetadataGeneration: preflight.metadataGeneration
+            )
+            XCTFail("Purge must fail closed when metadata generation drifts")
+        } catch let err as OperatorAccountPurgeError {
+            guard case .storageError(let msg) = err else {
+                XCTFail("Expected storageError, got \(err)")
+                return
+            }
+            XCTAssertTrue(msg.contains("Metadata generation drifted"), "Error must cite generation drift: \(msg)")
+        }
+    }
+
+    func testWalletInventoryCrossProcessLockAndCAS() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_cas_lock_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+
+        // Instance 1
+        let inventory1 = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: nil,
+            allowUnauthenticatedForTesting: true
+        )
+        // Instance 2 (simulating a concurrent process sharing the same directory)
+        let inventory2 = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            receiveAddressStore: receiveStore,
+            authCoordinator: nil,
+            allowUnauthenticatedForTesting: true
+        )
+
+        // Instance 1 sets owner
+        try await inventory1.setOwner(for: "shared_wallet_1", owner: "operator_a")
+
+        // Instance 2 attempts to overwrite owner with operator_b -> must be rejected by CAS
+        do {
+            try await inventory2.setOwner(for: "shared_wallet_1", owner: "operator_b")
+            XCTFail("Cannot reassign owner in concurrent instance")
+        } catch let err as WalletInventoryError {
+            guard case .invalidWalletName = err else {
+                XCTFail("Expected invalidWalletName, got \(err)")
+                return
+            }
+        }
+
+        // Instance 2 sets owner for new wallet
+        try await inventory2.setOwner(for: "shared_wallet_2", owner: "operator_b")
+
+        // Instance 1 reads metadata and confirms both owners persisted
+        let owner1 = await inventory1.getOwner(for: "shared_wallet_1")
+        XCTAssertEqual(owner1, "operator_a")
+
+        // Verify disk file permissions are 0600
+        let metaURL = tempDir.appendingPathComponent("wallets_metadata.json")
+        let attrs = try FileManager.default.attributesOfItem(atPath: metaURL.path)
+        let posixPerms = attrs[.posixPermissions] as? NSNumber
+        XCTAssertEqual(posixPerms?.intValue, 0o600, "Metadata file permissions must be 0600")
+    }
+
+    func testVerifyFreshCredentialsReloadsPersistedState() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_fresh_creds_reload_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator1 = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await coordinator1.generateEnrollmentSecret(username: "operator_multi_proc")
+        let t0 = Date().timeIntervalSince1970
+        let totp0 = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        _ = try await coordinator1.enroll(
+            username: "operator_multi_proc",
+            password: "OperatorPassword123!@#",
+            secretBase32: sec,
+            totpCode: totp0,
+            recoveryCodes: codes
+        )
+
+        // Instance 2 simulating a concurrent process
+        let coordinator2 = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        let t1 = t0 + 60
+        let totp1 = WalletAuthCoordinator.generateTOTP(secret: sec, time: t1)
+
+        // Consume TOTP in coordinator1
+        try await coordinator1.verifyFreshCredentials(
+            username: "operator_multi_proc",
+            password: "OperatorPassword123!@#",
+            totpOrRecoveryCode: totp1,
+            time: t1
+        )
+
+        // Attempt to replay the same TOTP timestep in coordinator2 -> must be rejected because disk state was reloaded
+        do {
+            try await coordinator2.verifyFreshCredentials(
+                username: "operator_multi_proc",
+                password: "OperatorPassword123!@#",
+                totpOrRecoveryCode: totp1,
+                time: t1
+            )
+            XCTFail("Replayed TOTP must be rejected across coordinators")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .replayedTOTPTimestep, "Must reject replayed timestep after disk reload")
+        }
     }
 
     func testSetOwnerAtomicityPreserved() async throws {

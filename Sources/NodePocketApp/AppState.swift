@@ -699,22 +699,31 @@ public final class AppState: ObservableObject {
         let result = try await walletManager.createEncryptedDescriptorWallet(
             name: name, passphrase: passphrase, storeInKeychain: storeInKeychain, capability: self.authSession
         )
-        guard self.authSession?.id == sessionBefore?.id else {
+        guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
             // Operator switched during wallet creation await! Do not mutate active state for mismatched operator.
             return result
         }
-        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-        guard self.authSession?.id == sessionBefore?.id else {
+
+        // WO-52: Stage results locally and atomically publish walletSnapshot, receive addresses, and transactions
+        // ONLY after verifying session equality at every stage.
+        let stagedSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+        guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
             return result
         }
+
+        let stagedTransactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+        guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
+            return result
+        }
+
         await self.loadOrEstablishReceiveAddresses(for: name)
-        guard self.authSession?.id == sessionBefore?.id else {
+        guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
             return result
         }
-        transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
-        guard self.authSession?.id == sessionBefore?.id else {
-            return result
-        }
+
+        // Atomically publish staged results to @MainActor
+        self.walletSnapshot = stagedSnapshot
+        self.transactions = stagedTransactions
         self.refreshWalletInventory()
         startupStatus = "Ready"
         appendLog("[WALLET] \(result.statusMessage)")
@@ -1358,15 +1367,15 @@ public final class AppState: ObservableObject {
     }
 
     public func refreshWallet() {
+        let sessionBefore = self.authSession
         Task {
             do {
                 guard self.isWalletTabUnlocked else { return }
-                let snap = try await walletManager.refreshWalletInfo(capability: self.authSession)
+                let snap = try await walletManager.refreshWalletInfo(capability: sessionBefore)
+                let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: sessionBefore)) ?? []
                 await MainActor.run {
+                    guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else { return }
                     self.walletSnapshot = snap
-                }
-                let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
-                await MainActor.run {
                     self.transactions = txs
                 }
                 if let name = snap.name.isEmpty ? nil : snap.name {

@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum OperatorAccountPurgeError: Error, LocalizedError, Sendable, Equatable {
     case unauthenticated
@@ -52,6 +53,7 @@ public struct OperatorPurgePreflightInventory: Sendable, Equatable {
     public let totalBalanceSats: Int64
     public let isEligibleForPermanentDeletion: Bool
     public let blockingReason: String?
+    public let metadataGeneration: Int
 
     public init(
         username: String,
@@ -59,7 +61,8 @@ public struct OperatorPurgePreflightInventory: Sendable, Equatable {
         receiveAddressCount: Int,
         totalBalanceSats: Int64,
         isEligibleForPermanentDeletion: Bool,
-        blockingReason: String?
+        blockingReason: String?,
+        metadataGeneration: Int = 0
     ) {
         self.username = username
         self.ownedWallets = ownedWallets
@@ -67,6 +70,7 @@ public struct OperatorPurgePreflightInventory: Sendable, Equatable {
         self.totalBalanceSats = totalBalanceSats
         self.isEligibleForPermanentDeletion = isEligibleForPermanentDeletion
         self.blockingReason = blockingReason
+        self.metadataGeneration = metadataGeneration
     }
 }
 
@@ -169,27 +173,65 @@ public actor OperatorAccountPurgeCoordinator {
         return candidateURL
     }
 
-    public func inspectPendingJournal(username: String) -> PurgeJournalRecord? {
+    public enum PendingJournalInspectionResult: Equatable, Sendable {
+        case absent
+        case valid(PurgeJournalRecord)
+        case corrupted(path: String, reason: String)
+    }
+
+    public func inspectPendingJournal(username: String) -> PendingJournalInspectionResult {
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
-        guard FileManager.default.fileExists(atPath: journalURL.path),
-              let data = try? Data(contentsOf: journalURL) else {
-            return nil
+        guard FileManager.default.fileExists(atPath: journalURL.path) else {
+            return .absent
+        }
+        let data: Data
+        do {
+            data = try Data(contentsOf: journalURL)
+        } catch {
+            return .corrupted(path: journalURL.path, reason: "Unreadable journal file: \(error.localizedDescription)")
+        }
+        guard !data.isEmpty else {
+            return .corrupted(path: journalURL.path, reason: "Journal file is empty (0 bytes)")
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        return try? decoder.decode(PurgeJournalRecord.self, from: data)
+        do {
+            let record = try decoder.decode(PurgeJournalRecord.self, from: data)
+            return .valid(record)
+        } catch {
+            return .corrupted(path: journalURL.path, reason: "Corrupted journal JSON: \(error.localizedDescription)")
+        }
     }
 
     private func writeDurableJournal(record: PurgeJournalRecord, to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(record)
-        try data.write(to: url, options: .atomic)
-        if let fileHandle = try? FileHandle(forWritingTo: url) {
-            try? fileHandle.synchronize()
-            try? fileHandle.close()
+        let data: Data
+        do {
+            data = try encoder.encode(record)
+        } catch {
+            throw OperatorAccountPurgeError.storageError("Failed to encode purge journal: \(error.localizedDescription)")
+        }
+
+        do {
+            let parentDir = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: parentDir, withIntermediateDirectories: true)
+            try data.write(to: url, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+
+            let fileHandle = try FileHandle(forWritingTo: url)
+            try fileHandle.synchronize()
+            try fileHandle.close()
+
+            let dirFd = open(parentDir.path, O_RDONLY)
+            if dirFd >= 0 {
+                fsync(dirFd)
+                close(dirFd)
+            }
+        } catch {
+            throw OperatorAccountPurgeError.storageError("Failed to durably write purge journal to '\(url.path)': \(error.localizedDescription)")
         }
     }
 
@@ -359,7 +401,8 @@ public actor OperatorAccountPurgeCoordinator {
             receiveAddressCount: totalReceiveAddresses,
             totalBalanceSats: totalSats,
             isEligibleForPermanentDeletion: isEligible,
-            blockingReason: blockingReason
+            blockingReason: blockingReason,
+            metadataGeneration: metadata.version
         )
     }
 
@@ -369,7 +412,8 @@ public actor OperatorAccountPurgeCoordinator {
         totpOrRecoveryCode: String,
         typedConfirmation: String,
         capability: WalletAuthCapability?,
-        time: TimeInterval = Date().timeIntervalSince1970
+        time: TimeInterval = Date().timeIntervalSince1970,
+        expectedMetadataGeneration: Int? = nil
     ) async throws -> [String] {
         #if !DEBUG
         throw OperatorAccountPurgeError.releaseModeDisabled
@@ -433,23 +477,43 @@ public actor OperatorAccountPurgeCoordinator {
         }
         try await authCoordinator.verifyCapability(session)
 
-        // 4. Durable Journal Setup with Fsync
+        // WO-51: Authoritative Ownership Check & Generation Binding
+        if let expectedGen = expectedMetadataGeneration {
+            guard inventory.metadataGeneration == expectedGen else {
+                throw OperatorAccountPurgeError.storageError("Metadata generation drifted between preflight (\(expectedGen)) and execution (\(inventory.metadataGeneration)). Aborting purge.")
+            }
+        }
+        let currentMetadata = await walletInventory.getMetadata()
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        for wallet in inventory.ownedWallets {
+            guard currentMetadata.walletOwners[wallet.lowercased()]?.lowercased() == userKey else {
+                throw OperatorAccountPurgeError.storageError("Wallet '\(wallet)' ownership changed before purge execution. Aborting.")
+            }
+        }
+
+        // 4. Cryptographically Bound Durable Journal Setup
+        let rawPlan = "\(userKey):\(session.id.uuidString):\(inventory.metadataGeneration):\(inventory.ownedWallets.sorted().joined(separator: ","))"
+        let planHash = SHA256.hash(data: Data(rawPlan.utf8))
+        let planDigestHex = planHash.map { String(format: "%02x", $0) }.joined()
+
         let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
         var journal = PurgeJournalRecord(
             operationId: UUID(),
             operatorUsername: username,
             sessionEpoch: session.id.uuidString,
-            planDigest: "\(userKey):\(inventory.ownedWallets.sorted().joined(separator: ","))",
+            planDigest: planDigestHex,
             stage: .initiated,
             ownedWallets: inventory.ownedWallets,
             perWalletStatus: [:]
         )
         try writeDurableJournal(record: journal, to: journalURL)
 
-        // 5. Unload Wallets Stage
+        // 5. Unload Wallets Stage with Intent & Result Journaling
         let loaded = try await rpcClient.listWallets()
         for wallet in inventory.ownedWallets {
+            journal.perWalletStatus[wallet] = "intent_unload"
+            try writeDurableJournal(record: journal, to: journalURL)
+
             if loaded.contains(where: { $0.caseInsensitiveCompare(wallet) == .orderedSame }) {
                 do {
                     _ = try await rpcClient.unloadWallet(name: wallet, loadOnStartup: false)
@@ -458,43 +522,82 @@ public actor OperatorAccountPurgeCoordinator {
                 }
             }
             journal.perWalletStatus[wallet] = "unloaded"
+            try writeDurableJournal(record: journal, to: journalURL)
         }
         journal.stage = .walletsUnloaded
         journal.timestamp = Date()
         try writeDurableJournal(record: journal, to: journalURL)
         try await authCoordinator.verifyCapability(session)
 
-        // 6. Purge Wallets without try? suppression
+        // 6. Non-Destructive Quarantine Staging (WO-50)
+        let quarantineBaseURL = dataDirectory.appendingPathComponent(".purge_quarantine").appendingPathComponent(journal.operationId.uuidString)
+        try FileManager.default.createDirectory(at: quarantineBaseURL, withIntermediateDirectories: true)
+
+        var stagedWallets: [(walletName: String, originalURL: URL, quarantinedURL: URL)] = []
         var purgedWallets: [String] = []
+
         for wallet in inventory.ownedWallets {
             let candidateA = dataDirectory.appendingPathComponent("wallets").appendingPathComponent(wallet)
             let candidateB = dataDirectory.appendingPathComponent(wallet)
             let walletURL = FileManager.default.fileExists(atPath: candidateA.path) ? candidateA : candidateB
+
             if FileManager.default.fileExists(atPath: walletURL.path) {
+                _ = try verifyPathContainmentAndNoSymlinks(candidateURL: walletURL)
+                let stagedDestination = quarantineBaseURL.appendingPathComponent(wallet)
+
+                journal.perWalletStatus[wallet] = "intent_quarantine"
+                try writeDurableJournal(record: journal, to: journalURL)
+
                 do {
-                    try FileManager.default.removeItem(at: walletURL)
+                    try FileManager.default.moveItem(at: walletURL, to: stagedDestination)
                 } catch {
-                    throw OperatorAccountPurgeError.storageError("Failed to delete wallet directory at '\(walletURL.path)': \(error.localizedDescription)")
+                    throw OperatorAccountPurgeError.storageError("Failed to move wallet '\(wallet)' into non-destructive quarantine: \(error.localizedDescription)")
                 }
+
+                journal.perWalletStatus[wallet] = "quarantined"
+                try writeDurableJournal(record: journal, to: journalURL)
+                stagedWallets.append((walletName: wallet, originalURL: walletURL, quarantinedURL: stagedDestination))
             }
 
+            // Purge Keychain Credentials for wallet
+            journal.perWalletStatus[wallet] = "intent_purge_keychain"
+            try writeDurableJournal(record: journal, to: journalURL)
             do {
                 try KeychainHelper.shared.deletePassphrase(account: wallet)
             } catch {
                 throw OperatorAccountPurgeError.storageError("Failed to delete Keychain passphrase for '\(wallet)': \(error.localizedDescription)")
             }
+            journal.perWalletStatus[wallet] = "keychain_purged"
+            try writeDurableJournal(record: journal, to: journalURL)
 
+            // Purge Address Store bindings
             receiveAddressStore.deleteAllAddresses(for: wallet)
 
+            // Purge Wallet Metadata
+            journal.perWalletStatus[wallet] = "intent_purge_metadata"
+            try writeDurableJournal(record: journal, to: journalURL)
             do {
                 try await walletInventory.removeWalletMetadata(name: wallet)
             } catch {
                 throw OperatorAccountPurgeError.storageError("Failed to remove metadata for '\(wallet)': \(error.localizedDescription)")
             }
+            journal.perWalletStatus[wallet] = "metadata_purged"
+            try writeDurableJournal(record: journal, to: journalURL)
 
-            journal.perWalletStatus[wallet] = "purged"
             purgedWallets.append(wallet)
         }
+
+        // Finalize staged quarantine cleanup only after all pre-conditions and metadata removals succeeded
+        for staged in stagedWallets {
+            do {
+                try FileManager.default.removeItem(at: staged.quarantinedURL)
+            } catch {
+                // If final quarantine cleanup fails, file remains safely isolated in quarantine
+            }
+            journal.perWalletStatus[staged.walletName] = "purged"
+        }
+        try? FileManager.default.removeItem(at: quarantineBaseURL)
+
         journal.stage = .walletsRemoved
         journal.timestamp = Date()
         try writeDurableJournal(record: journal, to: journalURL)

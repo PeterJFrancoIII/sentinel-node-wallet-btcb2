@@ -1288,6 +1288,15 @@ public actor WalletAuthCoordinator {
         time: TimeInterval = Date().timeIntervalSince1970
     ) throws {
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        // WO-52: Authoritatively reload from disk to ensure cross-process consistency of consumed TOTP & recovery codes
+        if FileManager.default.fileExists(atPath: registryURL.path) {
+            try reloadRecordsFromDisk()
+        }
+        if let err = self.registryLoadError {
+            throw WalletAuthError.registryStorageError(err)
+        }
+
         if let fallback = Self.loadDurableLockoutFallback(username: userKey) {
             if let lock = fallback.lockedUntil, lock > Date(timeIntervalSince1970: time) {
                 let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
