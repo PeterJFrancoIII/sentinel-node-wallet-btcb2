@@ -6,12 +6,20 @@ public struct WalletView: View {
 
     // Wallet Lifecycle Sheets
     @State private var showCreateModal = false
-    @State private var walletNameInput = "main_wallet"
+    @State private var walletNameInput = ""
     @State private var passphraseInput = ""
     @State private var passphraseConfirmInput = ""
     @State private var storeInKeychain = true
     @State private var showWalletPassphrase = false
     @State private var isCreatingWallet = false
+    @State private var showAccountSettingsModal = false
+    @State private var purgePasswordInput = ""
+    @State private var purgeTotpInput = ""
+    @State private var purgeConfirmationInput = ""
+    @State private var purgeErrorMessage: String? = nil
+    @State private var isPurgingAccount = false
+    @State private var purgePreflightInventory: OperatorPurgePreflightInventory? = nil
+    @State private var isPreflightRunning = false
 
     // Send Form Fields
     @State private var sendAddressInput = ""
@@ -198,6 +206,16 @@ public struct WalletView: View {
         .onChange(of: state.walletSnapshot?.trustedBalance) { _ in
             recheckAndClampSendAmount()
         }
+        .onChange(of: showCreateModal) { isOpen in
+            if isOpen {
+                Task {
+                    walletNameInput = await state.generateDefaultWalletName()
+                }
+            }
+        }
+        .sheet(isPresented: $showAccountSettingsModal) {
+            accountSettingsSheet
+        }
         .sheet(isPresented: $showNodePromptSheet) {
             nodeStartupPromptSheet
         }
@@ -265,6 +283,14 @@ public struct WalletView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.1)))
+
+                    Button(action: {
+                        showAccountSettingsModal = true
+                    }) {
+                        Label("Account", systemImage: "gearshape")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
                     Button(action: {
                         state.lockWallet()
@@ -3825,6 +3851,7 @@ public struct WalletView: View {
                             )
                             createWalletErrorMessage = nil
                             showCreateModal = false
+                            selectedWalletToOpen = result.walletName
                             passphraseInput = ""
                             passphraseConfirmInput = ""
                             showWalletPassphrase = false
@@ -4371,5 +4398,161 @@ public struct WalletView: View {
         }
         .padding(24)
         .frame(width: 460)
+    }
+
+    private var accountSettingsSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Operator Account Settings")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    showAccountSettingsModal = false
+                    purgePasswordInput = ""
+                    purgeTotpInput = ""
+                    purgeConfirmationInput = ""
+                    purgeErrorMessage = nil
+                }
+                .buttonStyle(.bordered)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Active Operator:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .foregroundColor(.green)
+                    Text(state.enrolledUsername ?? "Unknown")
+                        .font(.subheadline)
+                        .bold()
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(6)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundColor(.red)
+                    Text("Permanent Account & Wallet Data Deletion")
+                        .font(.subheadline)
+                        .bold()
+                        .foregroundColor(.red)
+                }
+
+                Text("Permanently removes your operator account, all Keychain credentials, and all exclusively owned encrypted wallet files. Unrecoverable. Only permitted if all your owned wallets have exactly zero balance.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if isPreflightRunning {
+                    ProgressView("Analyzing owned wallets and balances…")
+                        .controlSize(.small)
+                } else if let inventory = purgePreflightInventory {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Owned Wallets: \(inventory.ownedWallets.count) (\(inventory.ownedWallets.joined(separator: ", ")))")
+                            .font(.caption)
+                        Text("Total Balance: \(WalletSummary.satsToBTCB2(inventory.totalBalanceSats)) BTCB2 (\(inventory.totalBalanceSats) sats)")
+                            .font(.caption)
+                            .foregroundColor(inventory.totalBalanceSats > 0 ? .red : .primary)
+                        if let reason = inventory.blockingReason {
+                            Text("HOLD: \(reason)")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .bold()
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
+                    .cornerRadius(6)
+                }
+
+                SecureField("Current Password", text: $purgePasswordInput)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Fresh 6-digit TOTP or Recovery Code", text: $purgeTotpInput)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Type '\(state.enrolledUsername ?? "")' to confirm", text: $purgeConfirmationInput)
+                    .textFieldStyle(.roundedBorder)
+
+                if let err = purgeErrorMessage {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                HStack {
+                    Button("Check Deletion Eligibility") {
+                        Task {
+                            isPreflightRunning = true
+                            purgeErrorMessage = nil
+                            do {
+                                purgePreflightInventory = try await state.accountPurgeCoordinator.preflight(
+                                    username: state.enrolledUsername ?? "",
+                                    capability: state.authSession
+                                )
+                            } catch {
+                                purgeErrorMessage = error.localizedDescription
+                            }
+                            isPreflightRunning = false
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isPurgingAccount)
+
+                    Spacer()
+
+                    Button("Delete Account & Wallets Permanently") {
+                        guard !isPurgingAccount else { return }
+                        isPurgingAccount = true
+                        purgeErrorMessage = nil
+                        Task { @MainActor in
+                            defer { isPurgingAccount = false }
+                            do {
+                                let purged = try await state.purgeCurrentOperatorAccount(
+                                    password: purgePasswordInput,
+                                    totpOrRecoveryCode: purgeTotpInput,
+                                    typedConfirmation: purgeConfirmationInput
+                                )
+                                showAccountSettingsModal = false
+                                state.alertMessage = "Account '\(purgeConfirmationInput)' and \(purged.count) wallet(s) have been permanently deleted."
+                                state.showAlert = true
+                            } catch {
+                                purgeErrorMessage = error.localizedDescription
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    .disabled(
+                        isPurgingAccount ||
+                        purgePasswordInput.isEmpty ||
+                        purgeTotpInput.isEmpty ||
+                        purgeConfirmationInput != state.enrolledUsername ||
+                        (purgePreflightInventory?.isEligibleForPermanentDeletion == false)
+                    )
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+        }
+        .padding(20)
+        .frame(width: 520)
+        .onAppear {
+            Task {
+                if let user = state.enrolledUsername {
+                    purgePreflightInventory = try? await state.accountPurgeCoordinator.preflight(
+                        username: user,
+                        capability: state.authSession
+                    )
+                }
+            }
+        }
     }
 }

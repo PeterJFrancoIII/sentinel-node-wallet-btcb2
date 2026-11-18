@@ -1279,6 +1279,83 @@ public actor WalletAuthCoordinator {
         touchSession()
     }
 
+    // MARK: - WO-37 Operator Account Purge & Fresh Factor Verification
+
+    public func verifyFreshCredentials(
+        username: String,
+        password: String,
+        totpOrRecoveryCode: String,
+        time: TimeInterval = Date().timeIntervalSince1970
+    ) throws {
+        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard var rec = records[userKey] else {
+            throw WalletAuthError.invalidCredentials
+        }
+        if let lock = rec.lockedUntil, lock > Date(timeIntervalSince1970: time) {
+            let rem = Int(lock.timeIntervalSince(Date(timeIntervalSince1970: time)))
+            throw WalletAuthError.rateLimited(secondsRemaining: max(1, rem))
+        }
+
+        // Verify password
+        guard let salt = Self.hexToData(rec.saltHex),
+              let expectedHash = Self.hexToData(rec.passwordHashHex) else {
+            throw registerFailedAttempt(&rec)
+        }
+        let derived = try Self.deriveKey(password: password, salt: salt)
+        guard Self.constantTimeCompare(derived, expectedHash) else {
+            throw registerFailedAttempt(&rec)
+        }
+
+        // Verify TOTP or recovery code
+        let cleanCode = totpOrRecoveryCode.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: "-", with: "")
+        var codeValid = false
+        if cleanCode.count == 6 && CharacterSet.decimalDigits.isSuperset(of: CharacterSet(charactersIn: cleanCode)) {
+            let secret = (try? Self.loadTOTPSecretFromKeychain(username: rec.username)) ?? rec.legacyTotpSecretBase32 ?? ""
+            let verification = Self.verifyTOTP(secret: secret, code: cleanCode, time: time)
+            codeValid = verification.valid
+        } else {
+            // Check recovery codes
+            let normalized = cleanCode.uppercased()
+            for codeRecord in rec.recoveryCodes {
+                if let rSalt = Self.hexToData(codeRecord.saltHex),
+                   let expectedVerifier = Self.hexToData(codeRecord.verifierHex),
+                   let verifier = try? Self.deriveRecoveryVerifier(code: normalized, salt: rSalt),
+                   Self.constantTimeCompare(verifier, expectedVerifier) {
+                    codeValid = true
+                    break
+                }
+            }
+        }
+
+        guard codeValid else {
+            throw registerFailedAttempt(&rec)
+        }
+
+        // Reset failed attempts on success
+        rec.failedAttempts = 0
+        rec.lockedUntil = nil
+        self.records[userKey] = rec
+        try? saveRecords()
+        Self.clearDurableLockoutFallback(username: userKey)
+    }
+
+    public func purgeOperatorRecord(username: String) throws {
+        let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard records[userKey] != nil else { return }
+        records.removeValue(forKey: userKey)
+        self.recordGeneration += 1
+        try saveRecords()
+        Self.deleteTOTPSecretFromKeychain(username: userKey)
+        Self.deleteOperatorPasswordFromKeychain(username: userKey)
+        Self.clearDurableLockoutFallback(username: userKey)
+        if records.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        }
+        if activeSession?.username.lowercased() == userKey {
+            activeSession = nil
+        }
+    }
+
     // MARK: - Cryptographic Helpers
 
     private func registerFailedAttempt(_ rec: inout AuthRegistryRecord) -> WalletAuthError {

@@ -1106,6 +1106,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             allowUnauthenticatedForTesting: false,
             initialWalletName: "protected_wallet"
         )
+        try await activeManager.walletInventory.setOwner(for: "protected_wallet", owner: "safety_operator")
         let existingFileURL = tempDir.appendingPathComponent("existing_backup.dat")
         let originalContent = "CRITICAL_ORIGINAL_BACKUP_DO_NOT_DESTROY"
         try originalContent.write(to: existingFileURL, atomically: true, encoding: .utf8)
@@ -1379,6 +1380,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             totpCode: enrollCode,
             recoveryCodes: enrollment.recoveryCodes
         )
+        try await manager.walletInventory.setOwner(for: "e2e_wallet", owner: "operator_e2e")
 
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,
@@ -1469,6 +1471,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             totpCode: enrollCode,
             recoveryCodes: enrollment.recoveryCodes
         )
+        try await manager.walletInventory.setOwner(for: "fail_wallet", owner: "operator_fail")
 
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,
@@ -1550,6 +1553,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             totpCode: enrollCode,
             recoveryCodes: enrollment.recoveryCodes
         )
+        try await manager.walletInventory.setOwner(for: "empty_wallet", owner: "operator_empty")
 
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,

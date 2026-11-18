@@ -298,8 +298,8 @@ final class MultiUserAuthAndPricingTests: XCTestCase {
         )
 
         // 3. Register Alice's wallet and Bob's wallet
-        await inventory.setOwner(for: "Alice_Vault", owner: "alice")
-        await inventory.setOwner(for: "Bob_Treasury", owner: "bob")
+        try await inventory.setOwner(for: "Alice_Vault", owner: "alice")
+        try await inventory.setOwner(for: "Bob_Treasury", owner: "bob")
 
         // 4. Verify ownership queries
         let isAliceOwnerOfAliceVault = await inventory.isWalletOwnedBy(walletName: "Alice_Vault", username: "alice")
@@ -353,7 +353,7 @@ final class MultiUserAuthAndPricingTests: XCTestCase {
         }
 
         // 8. Verify renaming migrates ownership cleanly
-        await inventory.renameWalletMetadata(from: "Alice_Vault", to: "Alice_ColdStorage")
+        try await inventory.renameWalletMetadata(from: "Alice_Vault", to: "Alice_ColdStorage")
         let isAliceOwnerOfRenamed = await inventory.isWalletOwnedBy(walletName: "Alice_ColdStorage", username: "alice")
         let isOldNameStillOwned = await inventory.isWalletOwnedBy(walletName: "Alice_Vault", username: "alice")
         XCTAssertTrue(isAliceOwnerOfRenamed, "Alice must own renamed wallet Alice_ColdStorage")
@@ -392,17 +392,17 @@ final class MultiUserAuthAndPricingTests: XCTestCase {
         )
 
         // 3. Register first wallet for Kevin1
-        await inventory.setOwner(for: "first_wallet", owner: "Kevin1")
+        try await inventory.setOwner(for: "first_wallet", owner: "Kevin1")
         let isKevinOwnerOfFirst = await inventory.isWalletOwnedBy(walletName: "first_wallet", username: "Kevin1")
         XCTAssertTrue(isKevinOwnerOfFirst, "Kevin1 must own first_wallet")
 
         // 4. Register second wallet for Kevin1 (metadata.walletOwners is no longer empty)
-        await inventory.setOwner(for: "second_wallet", owner: "Kevin1")
+        try await inventory.setOwner(for: "second_wallet", owner: "Kevin1")
         let isKevinOwnerOfSecond = await inventory.isWalletOwnedBy(walletName: "second_wallet", username: "Kevin1")
         XCTAssertTrue(isKevinOwnerOfSecond, "Kevin1 must own second_wallet even when other wallets already exist")
 
         // 5. Register third wallet for Kevin1
-        await inventory.setOwner(for: "third_wallet", owner: "Kevin1")
+        try await inventory.setOwner(for: "third_wallet", owner: "Kevin1")
         let isKevinOwnerOfThird = await inventory.isWalletOwnedBy(walletName: "third_wallet", username: "Kevin1")
         XCTAssertTrue(isKevinOwnerOfThird, "Kevin1 must own third_wallet")
 

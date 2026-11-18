@@ -79,22 +79,39 @@ public struct CachedWalletBalance: Codable, Sendable, Equatable {
     }
 }
 
+public enum WalletInventoryStorageError: Error, LocalizedError, Sendable, Equatable {
+    case writeFailed(path: String, underlyingError: String)
+    case readFailed(path: String, underlyingError: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .writeFailed(let path, let underlyingError):
+            return "Failed to save wallet metadata registry at '\(path)': \(underlyingError)"
+        case .readFailed(let path, let underlyingError):
+            return "Failed to read wallet metadata registry at '\(path)': \(underlyingError)"
+        }
+    }
+}
+
 public struct WalletMetadataRegistry: Codable, Sendable, Equatable {
     public var version: Int
     public var archivedWallets: Set<String>
     public var cachedBalances: [String: CachedWalletBalance]
     public var walletOwners: [String: String] // [walletName.lowercased(): ownerUsername.lowercased()]
+    public var quarantinedWallets: Set<String>
 
     public init(
         version: Int = 2,
         archivedWallets: Set<String> = [],
         cachedBalances: [String: CachedWalletBalance] = [:],
-        walletOwners: [String: String] = [:]
+        walletOwners: [String: String] = [:],
+        quarantinedWallets: Set<String> = []
     ) {
         self.version = version
         self.archivedWallets = archivedWallets
         self.cachedBalances = cachedBalances
         self.walletOwners = walletOwners
+        self.quarantinedWallets = quarantinedWallets
     }
 
     enum CodingKeys: String, CodingKey {
@@ -102,6 +119,7 @@ public struct WalletMetadataRegistry: Codable, Sendable, Equatable {
         case archivedWallets
         case cachedBalances
         case walletOwners
+        case quarantinedWallets
     }
 
     public init(from decoder: Decoder) throws {
@@ -110,6 +128,7 @@ public struct WalletMetadataRegistry: Codable, Sendable, Equatable {
         self.archivedWallets = try container.decodeIfPresent(Set<String>.self, forKey: .archivedWallets) ?? []
         self.cachedBalances = try container.decodeIfPresent([String: CachedWalletBalance].self, forKey: .cachedBalances) ?? [:]
         self.walletOwners = try container.decodeIfPresent([String: String].self, forKey: .walletOwners) ?? [:]
+        self.quarantinedWallets = try container.decodeIfPresent(Set<String>.self, forKey: .quarantinedWallets) ?? []
     }
 }
 
@@ -240,15 +259,24 @@ public actor WalletInventory {
         return (try? decoder.decode(WalletMetadataRegistry.self, from: data)) ?? WalletMetadataRegistry()
     }
 
-    private func saveMetadata() {
+    public func saveMetadata() throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(metadata) else { return }
+        let data: Data
+        do {
+            data = try encoder.encode(metadata)
+        } catch {
+            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
 
-        try? FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
-        try? data.write(to: metadataFileURL, options: .atomic)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
+        do {
+            try FileManager.default.createDirectory(at: dataDirectory, withIntermediateDirectories: true)
+            try data.write(to: metadataFileURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: metadataFileURL.path)
+        } catch {
+            throw WalletInventoryStorageError.writeFailed(path: metadataFileURL.path, underlyingError: error.localizedDescription)
+        }
     }
 
     public func getMetadata() -> WalletMetadataRegistry {
@@ -259,9 +287,11 @@ public actor WalletInventory {
         metadata.walletOwners[walletName.lowercased()]
     }
 
-    public func setOwner(for walletName: String, owner: String) {
-        metadata.walletOwners[walletName.lowercased()] = owner.lowercased()
-        saveMetadata()
+    public func setOwner(for walletName: String, owner: String) throws {
+        let key = walletName.lowercased()
+        metadata.walletOwners[key] = owner.lowercased()
+        metadata.quarantinedWallets.remove(key)
+        try saveMetadata()
     }
 
     public func isWalletOwnedBy(walletName: String, username: String) -> Bool {
@@ -269,36 +299,85 @@ public actor WalletInventory {
         if let owner = metadata.walletOwners[key] {
             return owner.lowercased() == username.lowercased()
         }
-        // In legacy single-operator installs or test environments where no owners have been registered yet,
-        // the initial operator adopts the wallet.
-        if metadata.walletOwners.isEmpty {
-            setOwner(for: walletName, owner: username)
-            return true
-        }
         return false
     }
 
-    /// Reconciles legacy unowned wallets on disk so existing single-operator installs migrate smoothly.
-    public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String?) {
+    /// Discovers unowned legacy wallets on disk and marks them quarantined/unassigned.
+    /// Strictly avoids heuristic substring guessing (e.g. "kevin" or "peter") and avoids auto-assigning to current caller.
+    public func reconcileLegacyWalletOwnership(diskNames: [String], currentCaller: String? = nil) {
         var didChange = false
         for name in diskNames {
             let key = name.lowercased()
             if metadata.walletOwners[key] == nil {
-                if key.contains("kevin") {
-                    metadata.walletOwners[key] = "kevin1"
-                    didChange = true
-                } else if key.contains("main") || key.contains("peter") {
-                    metadata.walletOwners[key] = "peterjfrancoiii"
-                    didChange = true
-                } else if let caller = currentCaller, !caller.isEmpty, metadata.walletOwners.isEmpty {
-                    metadata.walletOwners[key] = caller.lowercased()
+                if !metadata.quarantinedWallets.contains(key) {
+                    metadata.quarantinedWallets.insert(key)
                     didChange = true
                 }
             }
         }
         if didChange {
-            saveMetadata()
+            try? saveMetadata()
         }
+    }
+
+    public func isWalletNameInUse(_ name: String) async -> Bool {
+        let key = name.lowercased()
+        if metadata.walletOwners[key] != nil {
+            return true
+        }
+        if metadata.quarantinedWallets.contains(key) {
+            return true
+        }
+        if metadata.cachedBalances.keys.contains(where: { $0.lowercased() == key }) {
+            return true
+        }
+        if metadata.archivedWallets.contains(where: { $0.lowercased() == key }) {
+            return true
+        }
+        if let loaded = try? await rpcClient.listWallets(),
+           loaded.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+            return true
+        }
+        if let dir = try? await rpcClient.listWalletDir(),
+           dir.wallets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            return true
+        }
+        return false
+    }
+
+    public func generateDefaultWalletName(for username: String) async -> String {
+        let trimmed = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        var sanitized = String(trimmed.unicodeScalars.filter { allowed.contains($0) })
+        if sanitized.isEmpty {
+            sanitized = "wallet"
+        }
+
+        let candidate = "\(sanitized)_wallet"
+        if !(await isWalletNameInUse(candidate)) {
+            return candidate
+        }
+
+        var counter = 1
+        while counter < 1000 {
+            let numbered = "\(sanitized)_wallet_\(counter)"
+            if !(await isWalletNameInUse(numbered)) {
+                return numbered
+            }
+            counter += 1
+        }
+        return "\(sanitized)_wallet_\(UUID().uuidString.prefix(6).lowercased())"
+    }
+
+    public func removeWalletMetadata(name: String) throws {
+        let key = name.lowercased()
+        metadata.walletOwners.removeValue(forKey: key)
+        metadata.quarantinedWallets.remove(key)
+        metadata.cachedBalances.removeValue(forKey: name)
+        metadata.cachedBalances.removeValue(forKey: key)
+        metadata.archivedWallets.remove(name)
+        metadata.archivedWallets.remove(key)
+        try saveMetadata()
     }
 
     public func refreshInventory(
@@ -431,7 +510,7 @@ public actor WalletInventory {
             }
         }
 
-        saveMetadata()
+        try? saveMetadata()
         return summaries.sorted { a, b in
             if a.isArchived != b.isArchived {
                 return !a.isArchived && b.isArchived
@@ -469,7 +548,7 @@ public actor WalletInventory {
             }
         }
         metadata.archivedWallets.insert(name)
-        saveMetadata()
+        try saveMetadata()
     }
 
     public func unarchiveWallet(
@@ -492,10 +571,10 @@ public actor WalletInventory {
         try Self.validateWalletName(name)
         _ = try await rpcClient.loadWallet(name: name)
         metadata.archivedWallets.remove(name)
-        saveMetadata()
+        try saveMetadata()
     }
 
-    public func renameWalletMetadata(from oldName: String, to newName: String) {
+    public func renameWalletMetadata(from oldName: String, to newName: String) throws {
         if metadata.archivedWallets.contains(oldName) {
             metadata.archivedWallets.remove(oldName)
             metadata.archivedWallets.insert(newName)
@@ -508,7 +587,7 @@ public actor WalletInventory {
             metadata.walletOwners[newName.lowercased()] = owner
             metadata.walletOwners.removeValue(forKey: oldName.lowercased())
         }
-        saveMetadata()
+        try saveMetadata()
     }
 
     public func preflightDeleteCheck(name: String) async throws -> URL {

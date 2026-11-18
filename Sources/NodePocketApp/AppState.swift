@@ -85,6 +85,7 @@ public final class AppState: ObservableObject {
     @Published public var authRegistryError: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
     @Published public var showSoftwareUpdatesSheet: Bool = false
+    public let accountPurgeCoordinator: OperatorAccountPurgeCoordinator
 
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
@@ -106,6 +107,13 @@ public final class AppState: ObservableObject {
         let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.walletInventory = inv
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
+        self.accountPurgeCoordinator = OperatorAccountPurgeCoordinator(
+            authCoordinator: authCoord,
+            walletInventory: inv,
+            rpcClient: nodeManager.rpcClient,
+            dataDirectory: config.dataDirectory,
+            receiveAddressStore: addrStore
+        )
         let updateCoord = SoftwareUpdateCoordinator()
         self.updateCoordinator = updateCoord
         self.storageMode = config.storageMode
@@ -702,6 +710,33 @@ public final class AppState: ObservableObject {
         return result
     }
 
+    public func generateDefaultWalletName() async -> String {
+        let user = self.authSession?.username ?? "operator"
+        return await walletInventory.generateDefaultWalletName(for: user)
+    }
+
+    @discardableResult
+    public func purgeCurrentOperatorAccount(
+        password: String,
+        totpOrRecoveryCode: String,
+        typedConfirmation: String
+    ) async throws -> [String] {
+        guard let user = self.authSession?.username else {
+            throw OperatorAccountPurgeError.unauthenticated
+        }
+        let purged = try await accountPurgeCoordinator.executePurge(
+            username: user,
+            password: password,
+            totpOrRecoveryCode: totpOrRecoveryCode,
+            typedConfirmation: typedConfirmation,
+            capability: self.authSession
+        )
+        self.lockWallet()
+        self.refreshAuthState()
+        appendLog("[AUTH] Operator account '\(user)' and \(purged.count) owned wallet(s) permanently deleted.")
+        return purged
+    }
+
     public func checkRPCReadiness() async -> (isReady: Bool, status: String) {
         do {
             _ = try await nodeManager.rpcClient.getNetworkInfo()
@@ -1197,7 +1232,7 @@ public final class AppState: ObservableObject {
         }
         do {
             try await walletManager.renameWallet(oldName: oldName, newName: newName, capability: session)
-            await walletInventory.renameWalletMetadata(from: oldName, to: newName)
+            try await walletInventory.renameWalletMetadata(from: oldName, to: newName)
             appendLog("[WALLET] Renamed wallet '\(oldName)' to '\(newName)'.")
             refreshWalletInventory()
             if walletSnapshot?.name == oldName {
