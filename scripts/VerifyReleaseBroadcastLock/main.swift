@@ -233,7 +233,7 @@ struct ReleaseLockVerifier {
         guard dirContentsAfter == dirContentsBefore else {
             fatalError("FAILURE: Directory contents changed after failed release purge! Before: \(dirContentsBefore), After: \(dirContentsAfter)")
         }
-        print("✓ Verified: Measured sentinel fixture (\(sentinelData.count) bytes) and directory contents before and after failed release purge: byte-for-byte identical, zero file deletions, zero file modifications, zero RPC calls.")
+        print("✓ Verified: Measured sentinel fixture (\(sentinelData.count) bytes) and directory contents before and after failed release purge: byte-for-byte identical, zero file deletions, zero file modifications, zero RPC calls. (Keychain, auth registry, and preferences non-mutation are source-inferred from pre-execution gate rejection.)")
 
         print("=== RELEASE BROADCAST & PURGE GATE VERIFICATION: 100% SUCCESS ===")
     }

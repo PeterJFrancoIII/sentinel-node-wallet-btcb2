@@ -115,48 +115,47 @@ public actor OperatorAccountPurgeCoordinator {
     private let rpcClient: BitcoinRPCClient
     private let dataDirectory: URL
     private let receiveAddressStore: ReceiveAddressStore
-
-    #if DEBUG
-    private var mockDeviceOwnerSuccessForTesting: Bool = false
-    public func setMockDeviceOwnerSuccessForTesting(_ enabled: Bool) {
-        self.mockDeviceOwnerSuccessForTesting = enabled
-    }
-
-    private var isIsolatedTestPurgeAuthorized: Bool = false
-    public func authorizeIsolatedTestPurge(_ authorized: Bool) {
-        self.isIsolatedTestPurgeAuthorized = authorized
-    }
-    #endif
+    private let testFixtureCapability: IsolatedTestPurgeCapability?
 
     public init(
         authCoordinator: WalletAuthCoordinator,
         walletInventory: WalletInventory,
         rpcClient: BitcoinRPCClient,
         dataDirectory: URL,
-        receiveAddressStore: ReceiveAddressStore
+        receiveAddressStore: ReceiveAddressStore,
+        testFixtureCapability: IsolatedTestPurgeCapability? = nil
     ) {
         self.authCoordinator = authCoordinator
         self.walletInventory = walletInventory
         self.rpcClient = rpcClient
         self.dataDirectory = dataDirectory
         self.receiveAddressStore = receiveAddressStore
+        self.testFixtureCapability = testFixtureCapability
     }
 
     private func verifyPathContainmentAndNoSymlinks(candidateURL: URL) throws -> URL {
-        let standardizedCandidate = candidateURL.standardizedFileURL.path
-        let standardizedDataDir = dataDirectory.standardizedFileURL.path
-        guard standardizedCandidate.hasPrefix(standardizedDataDir) else {
-            throw OperatorAccountPurgeError.pathEscape(standardizedCandidate)
+        let datadirStandardized = dataDirectory.standardizedFileURL
+        let candidateStandardized = candidateURL.standardizedFileURL
+
+        let datadirComponents = datadirStandardized.pathComponents
+        let candidateComponents = candidateStandardized.pathComponents
+
+        guard candidateComponents.starts(with: datadirComponents) && candidateComponents.count > datadirComponents.count else {
+            throw OperatorAccountPurgeError.pathEscape(candidateStandardized.path)
         }
 
-        let resolvedCandidate = candidateURL.standardizedFileURL.resolvingSymlinksInPath().path
-        let resolvedDataDir = dataDirectory.standardizedFileURL.resolvingSymlinksInPath().path
-        guard resolvedCandidate.hasPrefix(resolvedDataDir) && resolvedCandidate != resolvedDataDir else {
-            throw OperatorAccountPurgeError.pathEscape(resolvedCandidate)
+        let resolvedDataDir = datadirStandardized.resolvingSymlinksInPath()
+        let resolvedCandidate = candidateStandardized.resolvingSymlinksInPath()
+
+        let resolvedDataDirComponents = resolvedDataDir.pathComponents
+        let resolvedCandidateComponents = resolvedCandidate.pathComponents
+
+        guard resolvedCandidateComponents.starts(with: resolvedDataDirComponents) && resolvedCandidateComponents.count > resolvedDataDirComponents.count else {
+            throw OperatorAccountPurgeError.pathEscape(resolvedCandidate.path)
         }
 
-        var current = candidateURL
-        while current.standardizedFileURL.path.hasPrefix(standardizedDataDir) && current.standardizedFileURL.path != standardizedDataDir {
+        var current = candidateStandardized
+        while current.path != datadirStandardized.path && current.pathComponents.starts(with: datadirComponents) {
             if (try? FileManager.default.destinationOfSymbolicLink(atPath: current.path)) != nil {
                 throw OperatorAccountPurgeError.symlinkNotPermitted(current.path)
             }
@@ -375,8 +374,11 @@ public actor OperatorAccountPurgeCoordinator {
         #if !DEBUG
         throw OperatorAccountPurgeError.releaseModeDisabled
         #else
-        guard isIsolatedTestPurgeAuthorized else {
-            throw OperatorAccountPurgeError.storageError("Destructive account purge is strictly disabled in normal builds. Execution is only permitted in authorized isolated test fixtures.")
+        // WO-49: Destructive purge is strictly prohibited against any real or non-fixture datadir in all builds.
+        // Requires an unforgeable IsolatedTestPurgeCapability constructed exclusively for validated temporary test fixtures.
+        guard let fixture = testFixtureCapability,
+              fixture.validate(forDataDirectory: self.dataDirectory) else {
+            throw OperatorAccountPurgeError.releaseModeDisabled
         }
         guard let session = capability else {
             throw OperatorAccountPurgeError.unauthenticated
@@ -403,7 +405,7 @@ public actor OperatorAccountPurgeCoordinator {
         try await authCoordinator.verifyCapability(session)
 
         // 2. Device Owner Presence Challenge
-        if !mockDeviceOwnerSuccessForTesting {
+        if !fixture.isMockDeviceOwnerAuthorized {
             do {
                 let presenceOk = try await KeychainHelper.shared.authenticateUserPresence(
                     reason: "Authorize permanent deletion of account '\(username)' and all owned wallet data"
