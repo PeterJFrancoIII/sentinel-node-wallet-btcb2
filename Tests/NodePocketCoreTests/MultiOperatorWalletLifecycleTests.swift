@@ -1951,6 +1951,150 @@ final class MultiOperatorWalletLifecycleTests: XCTestCase {
         XCTAssertEqual(diskMeta.walletOwners["second_wallet"], "operator_b")
     }
 
+    func testVerifyFreshCredentialsFailsClosedOnUnwritableDirectoryWithoutCredentialLoss() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_ro_dir_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            // Restore write permissions in cleanup so directory can be removed
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let coord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let (sec, _, codes) = try await coord.generateEnrollmentSecret(username: "ro_operator")
+        let t0 = Date().timeIntervalSince1970
+        let totp = WalletAuthCoordinator.generateTOTP(secret: sec, time: t0)
+        _ = try await coord.enroll(
+            username: "ro_operator",
+            password: "OperatorPassword123!@#",
+            secretBase32: sec,
+            totpCode: totp,
+            recoveryCodes: codes
+        )
+
+        let targetCode = codes.first!
+
+        // Make data directory read-only so atomic persist will fail
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: tempDir.path)
+
+        // Attempting to verify/consume recovery code must fail closed
+        do {
+            try await coord.verifyFreshCredentials(
+                username: "ro_operator",
+                password: "OperatorPassword123!@#",
+                totpOrRecoveryCode: targetCode,
+                time: t0 + 10
+            )
+            XCTFail("verifyFreshCredentials must fail closed when directory is read-only")
+        } catch {
+            // Success: write failure caught and propagated
+        }
+
+        // Restore directory permissions
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+
+        // Instantiate new coordinator from disk and verify the recovery code was NOT consumed or corrupted
+        let coordAfter = WalletAuthCoordinator(dataDirectory: tempDir)
+        try await coordAfter.verifyFreshCredentials(
+            username: "ro_operator",
+            password: "OperatorPassword123!@#",
+            totpOrRecoveryCode: targetCode,
+            time: t0 + 20
+        )
+
+        // Verify second attempt with the now-consumed code fails with invalidCredentials
+        do {
+            try await coordAfter.verifyFreshCredentials(
+                username: "ro_operator",
+                password: "OperatorPassword123!@#",
+                totpOrRecoveryCode: targetCode,
+                time: t0 + 30
+            )
+            XCTFail("Reusing consumed recovery code must fail closed")
+        } catch let err as WalletAuthError {
+            guard case .invalidCredentials = err else {
+                XCTFail("Expected invalidCredentials on consumed recovery code, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testCrossOwnerWalletReassignmentBlockedFailClosed() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_cross_owner_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = Self.makeMockRPCClient()
+        let receiveStore = ReceiveAddressStore()
+        let auth = WalletAuthCoordinator(dataDirectory: tempDir)
+        let inventory = WalletInventory(rpcClient: rpc, dataDirectory: tempDir, receiveAddressStore: receiveStore, authCoordinator: auth)
+
+        // Operator A claims wallet_alpha
+        try await inventory.setOwner(for: "wallet_alpha", owner: "operator_a")
+        let isOwnedByA = await inventory.isWalletOwnedBy(walletName: "wallet_alpha", username: "operator_a")
+        let isOwnedByB = await inventory.isWalletOwnedBy(walletName: "wallet_alpha", username: "operator_b")
+        XCTAssertTrue(isOwnedByA)
+        XCTAssertFalse(isOwnedByB)
+
+        // Operator B attempts to claim wallet_alpha: must fail closed
+        do {
+            try await inventory.setOwner(for: "wallet_alpha", owner: "operator_b")
+            XCTFail("setOwner by operator_b on operator_a's wallet must fail closed")
+        } catch let err as WalletInventoryError {
+            guard case .invalidWalletName(let msg) = err else {
+                XCTFail("Expected invalidWalletName error on cross-owner reassignment, got \(err)")
+                return
+            }
+            XCTAssertTrue(msg.contains("already owned by operator 'operator_a'"), "Error must cite existing owner: \(msg)")
+        }
+
+        // Verify operator_a's ownership is completely intact
+        let isStillOwnedByA = await inventory.isWalletOwnedBy(walletName: "wallet_alpha", username: "operator_a")
+        let isStillOwnedByB = await inventory.isWalletOwnedBy(walletName: "wallet_alpha", username: "operator_b")
+        XCTAssertTrue(isStillOwnedByA)
+        XCTAssertFalse(isStillOwnedByB)
+    }
+
+    func testCrossProcessLockExclusiveMutualExclusionOnDisk() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("btcb2_flock_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let lockFileURL = tempDir.appendingPathComponent("auth_registry.lock")
+        let lockPath = lockFileURL.path
+
+        // Descriptor 1 acquires exclusive lock
+        let fd1 = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        XCTAssertGreaterThanOrEqual(fd1, 0, "fd1 open failed: \(errno)")
+        defer { if fd1 >= 0 { close(fd1) } }
+
+        let lockRes1 = flock(fd1, LOCK_EX)
+        XCTAssertEqual(lockRes1, 0, "fd1 flock LOCK_EX failed: \(errno)")
+
+        // Descriptor 2 attempts non-blocking exclusive lock: must fail with EWOULDBLOCK
+        let fd2 = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        XCTAssertGreaterThanOrEqual(fd2, 0, "fd2 open failed: \(errno)")
+        defer { if fd2 >= 0 { close(fd2) } }
+
+        let lockRes2 = flock(fd2, LOCK_EX | LOCK_NB)
+        XCTAssertEqual(lockRes2, -1, "fd2 non-blocking flock should fail while fd1 holds lock")
+        XCTAssertEqual(errno, EWOULDBLOCK, "Expected errno EWOULDBLOCK (\(EWOULDBLOCK)), got \(errno)")
+
+        // Release fd1 lock
+        let unlockRes1 = flock(fd1, LOCK_UN)
+        XCTAssertEqual(unlockRes1, 0, "fd1 flock LOCK_UN failed: \(errno)")
+
+        // Now fd2 non-blocking exclusive lock must succeed
+        let lockRes2After = flock(fd2, LOCK_EX | LOCK_NB)
+        XCTAssertEqual(lockRes2After, 0, "fd2 non-blocking flock should succeed after fd1 unlocked: \(errno)")
+
+        // Release fd2 lock
+        _ = flock(fd2, LOCK_UN)
+    }
+
     private static func makeTestFixtureCapability(
         directory: URL,
         mockDeviceOwner: Bool = true,
