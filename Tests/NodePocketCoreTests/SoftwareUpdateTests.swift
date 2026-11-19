@@ -676,7 +676,7 @@ final class SoftwareUpdateTests: XCTestCase {
 
     func testStableChannelRejectsDraftBranchFallbackOn404() async {
         let resolver = GitHubReleaseResolver()
-        let missingUrl = URL(string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml")!
+        let missingUrl = URL(string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/nonexistent-appcast-fixture-404.xml")!
 
         do {
             _ = try await resolver.fetchFromAppcast(appcastUrl: missingUrl)
