@@ -189,9 +189,8 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                     discoveredRelease = release
                     status = .updateAvailable(release)
                     showUpdateBanner = true
-                    if config.autoDownload {
-                        // Optional auto-download pre-flight
-                    }
+                    // Automatic background check discovers eligible release and triggers notification banner.
+                    // Automatic downloading remains disabled until native notarized Sparkle OTA is validated (WO-92).
                 } else {
                     discoveredRelease = nil
                     status = .upToDate(lastChecked: Date())

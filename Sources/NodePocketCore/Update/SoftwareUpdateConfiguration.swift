@@ -42,12 +42,14 @@ public struct SoftwareUpdateConfiguration: @unchecked Sendable {
         }
     }
 
+    /// Automatic background downloading is strictly disabled until the native notarized Sparkle OTA pipeline is fully active (WO-92).
+    /// The application currently supports automatic scheduled background *checks* only.
     public var autoDownload: Bool {
         get {
-            defaults.bool(forKey: Self.autoDownloadKey)
+            false
         }
         set {
-            defaults.set(newValue, forKey: Self.autoDownloadKey)
+            // Intentionally no-op to prevent false auto-download claims until native Sparkle OTA is validated
         }
     }
 

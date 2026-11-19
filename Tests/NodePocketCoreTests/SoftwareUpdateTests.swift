@@ -1141,4 +1141,131 @@ final class SoftwareUpdateTests: XCTestCase {
         let backupFile = repoRoot.appendingPathComponent("dist/appcast.xml.bak")
         XCTAssertFalse(FileManager.default.fileExists(atPath: backupFile.path), "dist/appcast.xml.bak must never be created in working copy")
     }
+
+    // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test
+
+    func testEndToEndSupplyChainPublisherSandboxSimulation() throws {
+        let currentFile = URL(fileURLWithPath: #file)
+        let repoRoot = currentFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let scriptPath = repoRoot.appendingPathComponent("scripts/publish_production_appcast.sh").path
+
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            XCTFail("publish_production_appcast.sh not found or not executable at \(scriptPath)")
+            return
+        }
+
+        // 1. Create a sandboxed disposable bare Git repository as mock remote origin
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-supply-chain-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        let bareRemote = tempBase.appendingPathComponent("remote.git")
+        let workingClone = tempBase.appendingPathComponent("clone")
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // Initialize bare remote repo with initial main branch
+        _ = runCmd("/usr/bin/git", ["init", "--bare", "-b", "main", bareRemote.path])
+
+        // Clone it, seed dist/appcast.xml, and push to main
+        _ = runCmd("/usr/bin/git", ["clone", bareRemote.path, workingClone.path])
+        _ = runCmd("/usr/bin/git", ["config", "user.name", "Test User"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["config", "user.email", "test@nodepocket.app"], cwd: workingClone)
+
+        let cloneDist = workingClone.appendingPathComponent("dist")
+        try FileManager.default.createDirectory(at: cloneDist, withIntermediateDirectories: true)
+        let initialAppcast = """
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Sentinel Node Wallet Changelog</title>
+        <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+        <description>Official releases</description>
+        <language>en</language>
+        <item>
+            <title>Sentinel Node Wallet v1.0.0 (Build 3)</title>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-BTCB2-v1.0.0-build3-macOS-arm64-notarized.dmg"
+                sparkle:version="3"
+                sparkle:shortVersionString="1.0.0"
+                sparkle:edSignature="fakeSig"
+                length="12000000"
+                type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
+"""
+        try initialAppcast.write(to: cloneDist.appendingPathComponent("appcast.xml"), atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/git", ["add", "dist/appcast.xml"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["commit", "-m", "initial commit"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["push", "origin", "main"], cwd: workingClone)
+
+        // 2. Generate throwaway synthetic Sparkle Curve25519 keypair
+        let privKey = Curve25519.Signing.PrivateKey()
+        let pubKey = privKey.publicKey
+        let pubKeyB64 = pubKey.rawRepresentation.base64EncodedString()
+
+        let dummyDMG = tempBase.appendingPathComponent("test-release.dmg")
+        let dmgBytes = Data("DISPOSABLE_SYNTHETIC_SIGNED_RELEASE_DMG_CONTENT".utf8)
+        try dmgBytes.write(to: dummyDMG)
+
+        let signature = try privKey.signature(for: dmgBytes)
+        let sigB64 = signature.base64EncodedString()
+
+        // 3. Execute publish_production_appcast.sh inside the sandboxed clone against bare remote
+        let cloneScripts = workingClone.appendingPathComponent("scripts")
+        try FileManager.default.createDirectory(at: cloneScripts, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: scriptPath), to: cloneScripts.appendingPathComponent("publish_production_appcast.sh"))
+
+        // Also copy Package.resolved to satisfy Sparkle 2.10.1 pinned version check
+        let packageResolved = repoRoot.appendingPathComponent("Package.resolved")
+        if FileManager.default.fileExists(atPath: packageResolved.path) {
+            try? FileManager.default.copyItem(at: packageResolved, to: workingClone.appendingPathComponent("Package.resolved"))
+        }
+
+        let cloneScript = cloneScripts.appendingPathComponent("publish_production_appcast.sh").path
+
+        // Find existing sign_update executable to pass via --sign-update
+        let signUpdatePath = repoRoot.appendingPathComponent(".build/artifacts/sparkle/Sparkle/bin/sign_update").path
+
+        var args = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES",
+            "--publish-to-main"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            args += ["--sign-update", signUpdatePath]
+        }
+
+        let publishRes = runCmd("/bin/bash", args, cwd: workingClone)
+
+        XCTAssertEqual(publishRes.status, 0, "Sandboxed publish to isolated bare remote must succeed: \(publishRes.output)")
+        XCTAssertTrue(publishRes.output.contains("Production appcast published successfully to origin/main via isolated worktree"))
+
+        // 4. Verify that working clone's tracked dist/appcast.xml remained 100% clean and unmutated
+        let statusRes = runCmd("/usr/bin/git", ["status", "--porcelain=v2", "dist/appcast.xml"], cwd: workingClone)
+        XCTAssertEqual(statusRes.output.trimmingCharacters(in: .whitespacesAndNewlines), "", "dist/appcast.xml in clone workspace must be 100% clean and unmutated")
+
+        // 5. Verify that bare remote origin/main received the atomic publication of Build 5
+        let remoteShowRes = runCmd("/usr/bin/git", ["show", "main:dist/appcast.xml"], cwd: bareRemote)
+        XCTAssertEqual(remoteShowRes.status, 0, "Bare remote must contain dist/appcast.xml on main")
+        XCTAssertTrue(remoteShowRes.output.contains("sparkle:version=\"5\""), "Bare remote main branch must contain published Build 5 enclosure")
+        XCTAssertTrue(remoteShowRes.output.contains("sparkle:edSignature=\"\(sigB64)\""), "Bare remote main branch must contain genuine cryptographic EdDSA signature")
+    }
 }

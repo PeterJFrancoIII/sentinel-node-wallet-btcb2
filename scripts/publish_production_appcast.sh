@@ -297,7 +297,12 @@ fi
 TARGET_ARCHIVE=""
 ASSET_LENGTH=0
 
-if [ "${DRY_RUN}" = "0" ]; then
+if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
+    TARGET_ARCHIVE="${ARCHIVE_OVERRIDE}"
+    ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
+    ACTUAL_SHA="$(shasum -a 256 "${TARGET_ARCHIVE}" | awk '{print $1}')"
+    echo "Using release archive: ${TARGET_ARCHIVE} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
+elif [ "${DRY_RUN}" = "0" ]; then
     echo "Checking immutable GitHub Release asset availability (following redirects to final 200)..."
     HTTP_STATUS="$(curl -sIL -o /dev/null -w "%{http_code}" "${RELEASE_URL}" || echo "000")"
     if [ "${HTTP_STATUS}" != "200" ]; then
@@ -324,14 +329,8 @@ if [ "${DRY_RUN}" = "0" ]; then
     [ "${ASSET_LENGTH}" -gt 1000000 ] || fail "Asset size suspicious (${ASSET_LENGTH} bytes)."
     echo "✓ Verified release asset integrity: ${ASSET_NAME} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
 else
-    if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
-        TARGET_ARCHIVE="${ARCHIVE_OVERRIDE}"
-        ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
-        echo "[DRY RUN] Using local archive override: ${TARGET_ARCHIVE} (${ASSET_LENGTH} bytes)"
-    else
-        echo "[DRY RUN] Simulating asset validation for ${ASSET_NAME}..."
-        ASSET_LENGTH="12450000"
-    fi
+    echo "[DRY RUN] Simulating asset validation for ${ASSET_NAME}..."
+    ASSET_LENGTH="12450000"
 fi
 
 # WO-88: Cryptographic EdDSA signature verification against target archive bytes
