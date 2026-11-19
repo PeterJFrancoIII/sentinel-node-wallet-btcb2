@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import NodePocketCore
 
 final class SoftwareUpdateTests: XCTestCase {
@@ -1003,5 +1004,96 @@ final class SoftwareUpdateTests: XCTestCase {
         ])
         XCTAssertNotEqual(missingApproval.status, 0)
         XCTAssertTrue(missingApproval.output.contains("Live publication requires explicit --operator-approval YES"))
+
+        // MARK: - WO-88 Cryptographic Ed25519 Positive and Negative Verification Tests
+
+        // Generate synthetic Curve25519 keypair for genuine cryptographic test fixtures
+        let privKey = Curve25519.Signing.PrivateKey()
+        let pubKey = privKey.publicKey
+        let pubKeyB64 = pubKey.rawRepresentation.base64EncodedString()
+
+        let tempArchiveURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-dmg-fixture-\(UUID().uuidString).dmg")
+        let archiveBytes = Data("SENTINEL_NODE_WALLET_BTCB2_SYNTHETIC_ARCHIVE_BYTES_FOR_CRYPTO_VERIFICATION_TEST".utf8)
+        try archiveBytes.write(to: tempArchiveURL)
+        defer { try? FileManager.default.removeItem(at: tempArchiveURL) }
+
+        let signature = try privKey.signature(for: archiveBytes)
+        let signatureB64 = signature.base64EncodedString()
+
+        // 8. Positive genuine cryptographic Ed25519 signature verification against archive bytes
+        let validCryptoRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertEqual(validCryptoRun.status, 0, "Valid cryptographic verification must succeed: \(validCryptoRun.output)")
+        XCTAssertTrue(validCryptoRun.output.contains("Cryptographic Ed25519 signature verified successfully"))
+
+        // 9. Tampered archive bytes (1-byte modification) fails cryptographic verification
+        let tamperedBytes = Data("SENTINEL_NODE_WALLET_BTCB2_SYNTHETIC_ARCHIVE_BYTES_FOR_CRYPTO_VERIFICATION_TAMPERED".utf8)
+        try tamperedBytes.write(to: tempArchiveURL)
+        let tamperedRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(tamperedRun.status, 0, "Tampered archive must fail cryptographic verification")
+        XCTAssertTrue(tamperedRun.output.contains("EdDSA cryptographic signature verification failed"))
+
+        // Restore original archive bytes
+        try archiveBytes.write(to: tempArchiveURL)
+
+        // 10. Mismatched public key fails cryptographic verification
+        let wrongPrivKey = Curve25519.Signing.PrivateKey()
+        let wrongPubKeyB64 = wrongPrivKey.publicKey.rawRepresentation.base64EncodedString()
+        let wrongKeyRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", wrongPubKeyB64
+        ])
+        XCTAssertNotEqual(wrongKeyRun.status, 0, "Wrong public key must fail cryptographic verification")
+        XCTAssertTrue(wrongKeyRun.output.contains("EdDSA cryptographic signature verification failed"))
+
+        // 11. Strict 64-byte signature and 32-byte public key length enforcement
+        let shortSignatureB64 = Data(repeating: 0x41, count: 48).base64EncodedString()
+        let shortSigRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", shortSignatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(shortSigRun.status, 0, "Short signature must fail length validation")
+        XCTAssertTrue(shortSigRun.output.contains("must be exactly 64 bytes decoded"))
+
+        let shortPubKeyB64 = Data(repeating: 0x42, count: 16).base64EncodedString()
+        let shortKeyRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", shortPubKeyB64
+        ])
+        XCTAssertNotEqual(shortKeyRun.status, 0, "Short public key must fail length validation")
+        XCTAssertTrue(shortKeyRun.output.contains("must be exactly 32 bytes decoded"))
+
+        // 12. Live mode fails closed when sign_update binary is missing
+        let missingToolRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--sign-update", "/nonexistent/path/to/sign_update",
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(missingToolRun.status, 0, "Missing sign_update in live mode must fail closed")
+        XCTAssertTrue(missingToolRun.output.contains("sign_update binary is required in live mode"))
     }
 }

@@ -23,6 +23,10 @@ PROVIDED_SIGNATURE=""
 SIGNATURE_FILE=""
 ARCHIVE_OVERRIDE=""
 ALLOW_MOCK_FOR_DRY_RUN=0
+PUBLIC_KEY_OVERRIDE=""
+APP_BUNDLE_PATH=""
+SIGN_UPDATE_OVERRIDE=""
+ED_KEY_FILE=""
 
 usage() {
     cat <<EOF
@@ -34,7 +38,11 @@ Options:
   --operator-approval <YES>  Required for live publish to main
   --signature <sig>          EdDSA signature for the archive
   --signature-file <file>    File containing the EdDSA signature
+  --public-key <base64>      Ed25519 public key (SUPublicEDKey) for cryptographic verification
+  --app-bundle <path>        Path to .app bundle to extract SUPublicEDKey from Contents/Info.plist
   --archive <dmg-file>       Local archive file override (skips network download in simulation)
+  --sign-update <path>       Path to Sparkle sign_update binary override
+  --ed-key-file <file>       Private key file for Sparkle sign_update tool verification
   --publish-to-main          Commit and push updated appcast.xml directly to origin/main via isolated worktree
   --dry-run                  Simulate validation and print appcast diff (default)
   --allow-mock-for-dry-run   Explicitly permits synthetic signature in dry-run mode only (STRICTLY FORBIDDEN IN LIVE MODE)
@@ -63,6 +71,26 @@ while [ $# -gt 0 ]; do
         --signature-file)
             [ $# -ge 2 ] || fail "Missing value for --signature-file"
             SIGNATURE_FILE="$2"
+            shift 2
+            ;;
+        --public-key)
+            [ $# -ge 2 ] || fail "Missing value for --public-key"
+            PUBLIC_KEY_OVERRIDE="$2"
+            shift 2
+            ;;
+        --app-bundle)
+            [ $# -ge 2 ] || fail "Missing value for --app-bundle"
+            APP_BUNDLE_PATH="$2"
+            shift 2
+            ;;
+        --sign-update)
+            [ $# -ge 2 ] || fail "Missing value for --sign-update"
+            SIGN_UPDATE_OVERRIDE="$2"
+            shift 2
+            ;;
+        --ed-key-file)
+            [ $# -ge 2 ] || fail "Missing value for --ed-key-file"
+            ED_KEY_FILE="$2"
             shift 2
             ;;
         --archive)
@@ -128,12 +156,57 @@ command -v git >/dev/null || fail "git is required."
 
 [ -f "${APPCAST_FILE}" ] || fail "Appcast file not found at ${APPCAST_FILE}"
 
-SIGN_UPDATE="${ROOT_DIR}/.build/artifacts/sparkle/Sparkle/bin/sign_update"
-if [ ! -x "${SIGN_UPDATE}" ]; then
-    SIGN_UPDATE="$(find "${ROOT_DIR}/.build" -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
+# Resolve Sparkle sign_update binary and enforce pinned provenance (WO-88)
+if [ -n "${SIGN_UPDATE_OVERRIDE}" ]; then
+    SIGN_UPDATE="${SIGN_UPDATE_OVERRIDE}"
+else
+    SIGN_UPDATE="${ROOT_DIR}/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+    if [ ! -x "${SIGN_UPDATE}" ]; then
+        SIGN_UPDATE="$(find "${ROOT_DIR}/.build" -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
+    fi
 fi
 
-# 3. Resolve & Validate EdDSA Signature (WO-82: Absolute No-Mock in Live Mode)
+if [ "${DRY_RUN}" = "0" ]; then
+    # WO-88 P0: Make sign_update absence an explicit STOP before ANY file writes or remote calls in live mode
+    if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
+        fail "Production publish aborted: Sparkle sign_update binary is required in live mode but was not found or is not executable at '${SIGN_UPDATE}'. Run 'swift build' or install Sparkle 2.10.1."
+    fi
+
+    # Enforce verified pinned 2.10.1 binary version in Package.resolved
+    SPARKLE_PINNED_VER="$(python3 -c "
+import json, sys
+try:
+    with open('${ROOT_DIR}/Package.resolved') as f:
+        data = json.load(f)
+    pins = data.get('pins', [])
+    for p in pins:
+        if p.get('identity') == 'sparkle':
+            print(p.get('state', {}).get('version', ''))
+            sys.exit(0)
+    print('')
+except Exception:
+    print('')
+")"
+    if [ "${SPARKLE_PINNED_VER}" != "2.10.1" ]; then
+        fail "Sparkle dependency version mismatch: expected pinned 2.10.1 in Package.resolved, found '${SPARKLE_PINNED_VER}'."
+    fi
+    echo "✓ Verified Sparkle pinned version 2.10.1 and sign_update executable: ${SIGN_UPDATE}"
+fi
+
+# Resolve Public Key (SUPublicEDKey)
+PUBLIC_KEY=""
+if [ -n "${PUBLIC_KEY_OVERRIDE}" ]; then
+    PUBLIC_KEY="${PUBLIC_KEY_OVERRIDE}"
+elif [ -n "${APP_BUNDLE_PATH}" ] && [ -d "${APP_BUNDLE_PATH}" ]; then
+    INFO_PLIST="${APP_BUNDLE_PATH}/Contents/Info.plist"
+    if [ -f "${INFO_PLIST}" ]; then
+        PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${INFO_PLIST}" 2>/dev/null || echo "")"
+    fi
+elif [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+    PUBLIC_KEY="${SPARKLE_PUBLIC_ED_KEY}"
+fi
+
+# 3. Resolve & Validate EdDSA Signature (WO-82, WO-88: Strict 64-Byte Ed25519 & No-Mock)
 ED_SIGNATURE=""
 if [ -n "${PROVIDED_SIGNATURE}" ]; then
     ED_SIGNATURE="${PROVIDED_SIGNATURE}"
@@ -147,6 +220,11 @@ elif [ -f "${ROOT_DIR}/dist/SPARKLE_ENCLOSURE.txt" ]; then
 fi
 
 if [ "${DRY_RUN}" = "0" ]; then
+    # Operator approval check first in live mode
+    if [ "${OPERATOR_APPROVAL}" != "YES" ]; then
+        fail "Live publication requires explicit --operator-approval YES."
+    fi
+
     # LIVE MODE: Mock signatures strictly prohibited fail-closed
     if [ -z "${ED_SIGNATURE}" ]; then
         fail "Production publish aborted: EdDSA signature is required in live mode. Provide via --signature, --signature-file, or dist/SPARKLE_ENCLOSURE.txt."
@@ -154,9 +232,15 @@ if [ "${DRY_RUN}" = "0" ]; then
     if [[ "${ED_SIGNATURE}" == *"mock"* ]] || [[ "${ED_SIGNATURE}" == *"Mock"* ]]; then
         fail "Production publish aborted: Mock EdDSA signatures are strictly prohibited in live mode."
     fi
-    # Base64 validation (Ed25519 signatures are 64 bytes raw, 86-88 chars in base64)
+
+    # Base64 string format validation
     if ! [[ "${ED_SIGNATURE}" =~ ^[A-Za-z0-9+/=]{64,128}$ ]]; then
         fail "Production publish aborted: Signature '${ED_SIGNATURE}' is not a valid canonical Base64 string."
+    fi
+
+    # Public key is strictly required in live mode to verify signature authenticity
+    if [ -z "${PUBLIC_KEY}" ]; then
+        fail "Production publish aborted: SUPublicEDKey is strictly required in live mode to verify signature authenticity before publishing feed. Pass --public-key, --app-bundle, or set SPARKLE_PUBLIC_ED_KEY."
     fi
 else
     # DRY RUN MODE:
@@ -168,6 +252,42 @@ else
             fail "Dry run aborted: No signature provided. Pass --signature, --signature-file, or --allow-mock-for-dry-run to simulate."
         fi
     fi
+    if [ -n "${ED_SIGNATURE}" ] && [ "${ED_SIGNATURE}" != "[DRY_RUN_SYNTHETIC_MOCK_SIGNATURE_STRICTLY_DISALLOWED_IN_PRODUCTION]====" ]; then
+        if ! [[ "${ED_SIGNATURE}" =~ ^[A-Za-z0-9+/=]{64,128}$ ]]; then
+            fail "Dry run aborted: Signature '${ED_SIGNATURE}' is not a valid canonical Base64 string."
+        fi
+    fi
+fi
+
+# WO-88: Strict Base64 and Raw Byte Length Validation (Ed25519 signatures = 64 bytes, public keys = 32 bytes)
+if [ -n "${ED_SIGNATURE}" ] && [ "${ED_SIGNATURE}" != "[DRY_RUN_SYNTHETIC_MOCK_SIGNATURE_STRICTLY_DISALLOWED_IN_PRODUCTION]====" ]; then
+    python3 - "${ED_SIGNATURE}" <<'PY' || fail "Signature validation failed fail-closed."
+import base64, sys
+sig_str = sys.argv[1].strip()
+try:
+    decoded = base64.b64decode(sig_str, validate=True)
+except Exception as e:
+    print(f"ERROR: Signature '{sig_str}' is not a valid canonical Base64 string: {e}", file=sys.stderr)
+    sys.exit(1)
+if len(decoded) != 64:
+    print(f"ERROR: Raw Ed25519 signature must be exactly 64 bytes decoded, got {len(decoded)} bytes.", file=sys.stderr)
+    sys.exit(1)
+PY
+fi
+
+if [ -n "${PUBLIC_KEY}" ]; then
+    python3 - "${PUBLIC_KEY}" <<'PY' || fail "Public key (SUPublicEDKey) validation failed fail-closed."
+import base64, sys
+pub_str = sys.argv[1].strip()
+try:
+    decoded = base64.b64decode(pub_str, validate=True)
+except Exception as e:
+    print(f"ERROR: Public key '{pub_str}' is not a valid canonical Base64 string: {e}", file=sys.stderr)
+    sys.exit(1)
+if len(decoded) != 32:
+    print(f"ERROR: Raw Ed25519 public key must be exactly 32 bytes decoded, got {len(decoded)} bytes.", file=sys.stderr)
+    sys.exit(1)
+PY
 fi
 
 # 4. Verify GitHub Release Asset HTTP Accessibility and Checksum (WO-83: Strong Asset Verification)
@@ -182,10 +302,6 @@ TARGET_ARCHIVE=""
 ASSET_LENGTH=0
 
 if [ "${DRY_RUN}" = "0" ]; then
-    if [ "${OPERATOR_APPROVAL}" != "YES" ]; then
-        fail "Live publication requires explicit --operator-approval YES."
-    fi
-
     echo "Checking immutable GitHub Release asset availability (following redirects to final 200)..."
     HTTP_STATUS="$(curl -sIL -o /dev/null -w "%{http_code}" "${RELEASE_URL}" || echo "000")"
     if [ "${HTTP_STATUS}" != "200" ]; then
@@ -211,14 +327,6 @@ if [ "${DRY_RUN}" = "0" ]; then
     ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
     [ "${ASSET_LENGTH}" -gt 1000000 ] || fail "Asset size suspicious (${ASSET_LENGTH} bytes)."
     echo "✓ Verified release asset integrity: ${ASSET_NAME} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
-
-    # Cryptographic EdDSA signature verification against downloaded archive
-    if [ -n "${SIGN_UPDATE}" ] && [ -x "${SIGN_UPDATE}" ]; then
-        echo "Verifying archive against EdDSA signature via Sparkle sign_update --verify..."
-        "${SIGN_UPDATE}" --verify "${TARGET_ARCHIVE}" "${ED_SIGNATURE}" ||
-            fail "EdDSA cryptographic signature verification failed against downloaded archive."
-        echo "✓ EdDSA signature verified successfully against archive bytes."
-    fi
 else
     if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
         TARGET_ARCHIVE="${ARCHIVE_OVERRIDE}"
@@ -227,6 +335,79 @@ else
     else
         echo "[DRY RUN] Simulating asset validation for ${ASSET_NAME}..."
         ASSET_LENGTH="12450000"
+    fi
+fi
+
+# WO-88: Cryptographic EdDSA signature verification against target archive bytes
+if [ -n "${TARGET_ARCHIVE}" ] && [ -f "${TARGET_ARCHIVE}" ] && [ -n "${PUBLIC_KEY}" ] && [ -n "${ED_SIGNATURE}" ] && [ "${ED_SIGNATURE}" != "[DRY_RUN_SYNTHETIC_MOCK_SIGNATURE_STRICTLY_DISALLOWED_IN_PRODUCTION]====" ]; then
+    echo "Performing cryptographic Ed25519 verification against archive bytes..."
+    python3 - "${PUBLIC_KEY}" "${ED_SIGNATURE}" "${TARGET_ARCHIVE}" <<'PY' || fail "EdDSA cryptographic signature verification failed against archive."
+import base64, sys
+
+pub_b64 = sys.argv[1].strip()
+sig_b64 = sys.argv[2].strip()
+archive_path = sys.argv[3]
+
+pub_bytes = base64.b64decode(pub_b64, validate=True)
+sig_bytes = base64.b64decode(sig_b64, validate=True)
+
+with open(archive_path, "rb") as f:
+    archive_data = f.read()
+
+verified = False
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.exceptions import InvalidSignature
+    pub = Ed25519PublicKey.from_public_bytes(pub_bytes)
+    pub.verify(sig_bytes, archive_data)
+    verified = True
+except ImportError:
+    pass
+except Exception as e:
+    print(f"ERROR: Ed25519 verification failed: {e}", file=sys.stderr)
+    sys.exit(1)
+
+if not verified:
+    import subprocess
+    swift_code = f'''
+import Foundation
+import CryptoKit
+
+guard let pubData = Data(base64Encoded: "{pub_b64}"),
+      let sigData = Data(base64Encoded: "{sig_b64}") else {{
+    exit(1)
+}}
+do {{
+    let fileData = try Data(contentsOf: URL(fileURLWithPath: "{archive_path}"))
+    let pubKey = try Curve25519.Signing.PublicKey(rawRepresentation: pubData)
+    if !pubKey.isValidSignature(sigData, for: fileData) {{
+        exit(1)
+    }}
+}} catch {{
+    exit(1)
+}}
+'''
+    res = subprocess.run(["swift", "-e", swift_code], capture_output=True)
+    if res.returncode != 0:
+        print("ERROR: Cryptographic signature verification failed (Swift CryptoKit).", file=sys.stderr)
+        sys.exit(1)
+
+print("✓ Cryptographic Ed25519 signature verified successfully against archive bytes.")
+PY
+
+    # Cross-verify via Sparkle sign_update tool if private key or key file is available
+    if [ -n "${SIGN_UPDATE}" ] && [ -x "${SIGN_UPDATE}" ]; then
+        if [ -n "${ED_KEY_FILE}" ] && [ -f "${ED_KEY_FILE}" ]; then
+            echo "Cross-verifying via Sparkle sign_update --verify with key file..."
+            "${SIGN_UPDATE}" --verify --ed-key-file "${ED_KEY_FILE}" "${TARGET_ARCHIVE}" "${ED_SIGNATURE}" ||
+                fail "Sparkle sign_update --verify failed."
+            echo "✓ Sparkle sign_update verification succeeded."
+        elif [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
+            echo "Cross-verifying via Sparkle sign_update --verify with SPARKLE_PRIVATE_ED_KEY..."
+            printf "%s" "${SPARKLE_PRIVATE_ED_KEY}" | "${SIGN_UPDATE}" --verify --ed-key-file - "${TARGET_ARCHIVE}" "${ED_SIGNATURE}" ||
+                fail "Sparkle sign_update --verify failed."
+            echo "✓ Sparkle sign_update verification succeeded."
+        fi
     fi
 fi
 
