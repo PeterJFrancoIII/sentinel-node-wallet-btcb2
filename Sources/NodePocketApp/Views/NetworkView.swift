@@ -221,22 +221,21 @@ public struct NetworkView: View {
                 .layoutPriority(1)
             }
 
-            // Controls Sub-Row: MACD Preset Picker & Descriptions
-            HStack(alignment: .center) {
-                HStack(spacing: 6) {
-                    Text("MACD Parameters:")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Picker("MACD Preset", selection: $selectedPreset) {
-                        ForEach(MACDPresetOption.allCases) { opt in
-                            Text(opt.rawValue).tag(opt)
-                        }
+            // Controls Sub-Row: MACD Preset Buttons
+            HStack(alignment: .center, spacing: 8) {
+                Text("MACD Parameters:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                Picker("MACD Preset", selection: $selectedPreset) {
+                    ForEach(MACDPresetOption.allCases) { opt in
+                        Text(opt.rawValue).tag(opt)
                     }
-                    .pickerStyle(.menu)
-                    .labelsHidden()
-                    .controlSize(.small)
-                    .accessibilityLabel("Select MACD indicator preset")
                 }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+                .accessibilityLabel("Select MACD indicator preset")
 
                 Spacer()
             }
