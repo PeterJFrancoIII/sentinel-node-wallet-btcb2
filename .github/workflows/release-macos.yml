@@ -228,6 +228,30 @@ jobs:
             --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
             ${DRAFT_FLAG} ${PRERELEASE_FLAG}
 
+      # Gating Stage 7: Sparkle Production Appcast Publication (WO-77, WO-84, WO-85)
+      - name: Publish or Validate Sparkle Production Appcast Feed
+        env:
+          TAG: "${{ env.VERIFIED_TAG }}"
+          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
+          IS_DRAFT: "${{ github.event.inputs.is_draft }}"
+        run: |
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          if [ "${IS_DRAFT}" = "true" ]; then
+            echo "Release created as draft. Executing feed validation in dry-run mode against signed archive..."
+            bash scripts/publish_production_appcast.sh \
+              --tag "${TAG}" \
+              --archive "${DMG_FILE}" \
+              --dry-run
+            echo "Draft release staged. Feed will update upon operator promotion to public release."
+          else
+            echo "Publishing live production Sparkle appcast to main..."
+            bash scripts/publish_production_appcast.sh \
+              --tag "${TAG}" \
+              --archive "${DMG_FILE}" \
+              --operator-approval "${OPERATOR_APPROVAL}" \
+              --publish-to-main
+          fi
+
       # Cleanup Credentials
       - name: Clean up ephemeral credentials
         if: always()

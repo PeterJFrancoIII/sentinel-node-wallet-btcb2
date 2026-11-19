@@ -140,9 +140,11 @@ xcrun stapler staple "${DMG}"
 xcrun stapler validate "${DMG}"
 hdiutil verify "${DMG}" >/dev/null
 
-# Verify Gatekeeper compliance on signed application bundle
-spctl --assess --type open --context context:primary-signature --verbose "${APP}" ||
+# Verify Gatekeeper compliance on signed application bundle and stapled DMG
+spctl --assess --type execute --verbose "${APP}" ||
     fail "Gatekeeper spctl assessment failed on signed app bundle."
+spctl --assess --type open --context context:primary-signature --verbose "${DMG}" ||
+    fail "Gatekeeper spctl assessment failed on stapled DMG."
 
 shasum -a 256 "${DMG}" > "${DIST}/SHA256SUMS.txt"
 printf "Notarized build candidate: %s\n" "${DMG}"

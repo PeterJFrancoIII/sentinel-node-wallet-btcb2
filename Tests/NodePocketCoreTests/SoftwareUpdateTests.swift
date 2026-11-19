@@ -922,4 +922,86 @@ final class SoftwareUpdateTests: XCTestCase {
             XCTFail("Unexpected error: \(err)")
         }
     }
+
+    // MARK: - WO-86 End-to-End Shell Publisher & Fail-Closed Trust Gating Tests
+
+    func testPublisherScriptIntegrationAndFailClosedGates() throws {
+        let currentFile = URL(fileURLWithPath: #file)
+        let repoRoot = currentFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let scriptPath = repoRoot.appendingPathComponent("scripts/publish_production_appcast.sh").path
+
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            XCTFail("publish_production_appcast.sh not found or not executable at \(scriptPath)")
+            return
+        }
+
+        func runScript(args: [String]) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/bin/bash")
+            proc.arguments = [scriptPath] + args
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            do {
+                try proc.run()
+                proc.waitUntilExit()
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let str = String(data: data, encoding: .utf8) ?? ""
+                return (proc.terminationStatus, str)
+            } catch {
+                return (-1, "\(error)")
+            }
+        }
+
+        // 1. Dry run with mock explicitly allowed succeeds and outputs XML snippet
+        let dryRun = runScript(args: ["--tag", "v1.0.0-build5", "--dry-run", "--allow-mock-for-dry-run"])
+        XCTAssertEqual(dryRun.status, 0, "Dry run with allow mock must succeed: \(dryRun.output)")
+        XCTAssertTrue(dryRun.output.contains("Monotonic check passed"), "Must verify monotonic build > 4")
+        XCTAssertTrue(dryRun.output.contains("<enclosure"), "Must generate enclosure item")
+        XCTAssertTrue(dryRun.output.contains("sparkle:version=\"5\""))
+
+        // 2. Dry run without mock or signature fails closed
+        let dryRunNoSig = runScript(args: ["--tag", "v1.0.0-build5", "--dry-run"])
+        XCTAssertNotEqual(dryRunNoSig.status, 0)
+        XCTAssertTrue(dryRunNoSig.output.contains("No signature provided"), "Must fail closed when no signature provided")
+
+        // 3. Live mode strictly rejects mock signatures
+        let liveMock = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--signature", "mockSignature1234567890123456789012345678901234567890123456789012345678901234",
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(liveMock.status, 0)
+        XCTAssertTrue(liveMock.output.contains("Mock EdDSA signatures are strictly prohibited in live mode"))
+
+        // 4. Live mode rejects invalid non-base64 signature
+        let liveBadBase64 = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--signature", "not_valid_base64!!!",
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(liveBadBase64.status, 0)
+        XCTAssertTrue(liveBadBase64.output.contains("not a valid canonical Base64 string"))
+
+        // 5. Non-monotonic build rejected (< 5)
+        let nonMonotonic = runScript(args: ["--tag", "v1.0.0-build3", "--dry-run", "--allow-mock-for-dry-run"])
+        XCTAssertNotEqual(nonMonotonic.status, 0)
+        XCTAssertTrue(nonMonotonic.output.contains("must be greater than 4"))
+
+        // 6. Invalid tag format rejected
+        let invalidTag = runScript(args: ["--tag", "v1.0.0", "--dry-run", "--allow-mock-for-dry-run"])
+        XCTAssertNotEqual(invalidTag.status, 0)
+        XCTAssertTrue(invalidTag.output.contains("does not match required format"))
+
+        // 7. Live mode without explicit operator approval fails closed
+        let missingApproval = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--signature", "KzM39JvY+Q8r1f8z0A3wH5RealSignature12345678901234567890123456789012345678901234567890=="
+        ])
+        XCTAssertNotEqual(missingApproval.status, 0)
+        XCTAssertTrue(missingApproval.output.contains("Live publication requires explicit --operator-approval YES"))
+    }
 }
