@@ -936,10 +936,15 @@ final class SoftwareUpdateTests: XCTestCase {
             return
         }
 
-        func runScript(args: [String]) -> (status: Int32, output: String) {
+        func runScript(args: [String], extraEnv: [String: String] = [:]) -> (status: Int32, output: String) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/bash")
             proc.arguments = [scriptPath] + args
+            if !extraEnv.isEmpty {
+                var env = ProcessInfo.processInfo.environment
+                for (k, v) in extraEnv { env[k] = v }
+                proc.environment = env
+            }
             let pipe = Pipe()
             proc.standardOutput = pipe
             proc.standardError = pipe
@@ -952,6 +957,20 @@ final class SoftwareUpdateTests: XCTestCase {
             } catch {
                 return (-1, "\(error)")
             }
+        }
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         }
 
         // 1. Dry run with mock explicitly allowed succeeds and outputs XML snippet
@@ -1217,6 +1236,57 @@ final class SoftwareUpdateTests: XCTestCase {
         ])
         XCTAssertNotEqual(badBuildRun.status, 0, "Build number mismatch must fail closed")
         XCTAssertTrue(badBuildRun.output.contains("Build number mismatch"), "Must report Build number mismatch: \(badBuildRun.output)")
+
+        // MARK: - WO-100 Sandbox Simulation & Production Publishing Separation Tests
+
+        // 18. WO-100 P0: Combining --sandbox-simulation and --publish-to-main against GitHub remote fails closed with typed stop and 0 writes
+        let sandboxAgainstGithub = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--sandbox-simulation",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(sandboxAgainstGithub.status, 0, "Simulation against network/GitHub repository must fail closed")
+        XCTAssertTrue(sandboxAgainstGithub.output.contains("FATAL SECURITY STOP (WO-100)"), "Must halt with typed security stop: \(sandboxAgainstGithub.output)")
+        XCTAssertTrue(sandboxAgainstGithub.output.contains("cannot be executed when git remote points to GitHub"), "Must cite remote policy violation: \(sandboxAgainstGithub.output)")
+
+        // 19. WO-100 P0: Running --sandbox-simulation with production SPARKLE_PRIVATE_ED_KEY secret in environment fails closed
+        let sandboxWithSecret = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--sandbox-simulation",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ], extraEnv: ["SPARKLE_PRIVATE_ED_KEY": "dummy_production_secret_key"])
+        XCTAssertNotEqual(sandboxWithSecret.status, 0, "Simulation with production secret in environment must fail closed")
+        XCTAssertTrue(sandboxWithSecret.output.contains("SPARKLE_PRIVATE_ED_KEY secret is present in environment"), "Must reject environment secret: \(sandboxWithSecret.output)")
+
+        // 20. WO-100 P0: Combining --sandbox-simulation and --publish-to-main on local bare remote lacking fixture marker fails closed
+        let unverifiedBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-unverified-remote-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: unverifiedBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: unverifiedBase) }
+        let unverifiedBare = unverifiedBase.appendingPathComponent("unverified.git")
+        let unverifiedClone = unverifiedBase.appendingPathComponent("clone")
+        _ = runCmd("/usr/bin/git", ["init", "--bare", "-b", "main", unverifiedBare.path])
+        _ = runCmd("/usr/bin/git", ["clone", unverifiedBare.path, unverifiedClone.path])
+        let unverifiedCloneScripts = unverifiedClone.appendingPathComponent("scripts")
+        try FileManager.default.createDirectory(at: unverifiedCloneScripts, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: scriptPath), to: unverifiedCloneScripts.appendingPathComponent("publish_production_appcast.sh"))
+        let unverifiedRun = runCmd("/bin/bash", [
+            unverifiedCloneScripts.appendingPathComponent("publish_production_appcast.sh").path,
+            "--tag", "v1.0.0-build5",
+            "--sandbox-simulation",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES"
+        ], cwd: unverifiedClone)
+        XCTAssertNotEqual(unverifiedRun.status, 0, "Unverified bare remote must fail closed without fixture marker")
+        XCTAssertTrue(unverifiedRun.output.contains("SENTINEL_TEST_FIXTURE_MARKER"), "Must cite missing fixture marker: \(unverifiedRun.output)")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test
@@ -1255,6 +1325,8 @@ final class SoftwareUpdateTests: XCTestCase {
 
         // Initialize bare remote repo with initial main branch
         _ = runCmd("/usr/bin/git", ["init", "--bare", "-b", "main", bareRemote.path])
+        // Mark as authorized test fixture bare remote (WO-100)
+        try Data("SENTINEL_TEST_FIXTURE_MARKER".utf8).write(to: bareRemote.appendingPathComponent("SENTINEL_TEST_FIXTURE_MARKER"))
 
         // Clone it, seed dist/appcast.xml, and push to main
         _ = runCmd("/usr/bin/git", ["clone", bareRemote.path, workingClone.path])

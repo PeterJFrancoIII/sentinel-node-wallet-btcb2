@@ -160,6 +160,30 @@ if [ "${BUILD_NUM}" -le 4 ]; then
     fail "Build number ${BUILD_NUM} must be greater than 4 (active development build is 4)."
 fi
 
+# 1.5 Strict Sandbox Simulation Safety Invariants (WO-100 P0)
+REMOTE_ORIGIN_URL="$(git config --get remote.origin.url 2>/dev/null || echo "")"
+
+if [ "${SANDBOX_SIMULATION}" = "1" ]; then
+    # 1. Prohibit production signing secrets in sandbox simulation environment
+    if [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
+        fail "FATAL SECURITY STOP (WO-100): SPARKLE_PRIVATE_ED_KEY secret is present in environment; cannot run --sandbox-simulation with production secrets."
+    fi
+
+    # 2. Prohibit network or GitHub remote origin
+    if [[ "${REMOTE_ORIGIN_URL}" =~ github\.com ]] || [[ "${REMOTE_ORIGIN_URL}" =~ ^https?:// ]] || [[ "${REMOTE_ORIGIN_URL}" =~ ^git@ ]] || [[ "${REMOTE_ORIGIN_URL}" =~ ^ssh:// ]]; then
+        fail "FATAL SECURITY STOP (WO-100): --sandbox-simulation cannot be executed when git remote points to GitHub or a network URL (${REMOTE_ORIGIN_URL}). Simulation is restricted exclusively to local file fixture repositories."
+    fi
+
+    # 3. If publishing to main under simulation, require verified test fixture marker in bare repo
+    if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
+        BARE_REPO_PATH="${REMOTE_ORIGIN_URL#file://}"
+        if [ ! -d "${BARE_REPO_PATH}" ] || [ ! -f "${BARE_REPO_PATH}/SENTINEL_TEST_FIXTURE_MARKER" ]; then
+            fail "FATAL SECURITY STOP (WO-100): Combining --sandbox-simulation and --publish-to-main requires an isolated local bare repository containing 'SENTINEL_TEST_FIXTURE_MARKER'. Remote '${REMOTE_ORIGIN_URL}' lacks verification marker."
+        fi
+        echo "✓ Verified sandbox simulation target is an isolated local test fixture: ${BARE_REPO_PATH}"
+    fi
+fi
+
 ASSET_NAME="Sentinel-Node-Wallet-BTCB2-v${VERSION}-build${BUILD_NUM}-macOS-arm64-notarized.dmg"
 RELEASE_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/${TAG}/${ASSET_NAME}"
 SHA_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/${TAG}/SHA256SUMS.txt"
@@ -588,9 +612,17 @@ else:
     print(f"✓ Isolated staging appcast generated successfully at {candidate_path}")
 PY
 
-# 7. Transactional Feed Publish to Main via Isolated Git Worktree (WO-84, WO-89: Zero Source Workspace Mutation)
+# 7. Transactional Feed Publish to Main via Isolated Git Worktree (WO-84, WO-89: Zero Source Workspace Mutation, WO-100: Sandbox/Live Separation)
 if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
-    echo "Publishing candidate appcast to origin/main branch via isolated git worktree..."
+    if [ "${SANDBOX_SIMULATION}" = "1" ]; then
+        BARE_REPO_PATH="${REMOTE_ORIGIN_URL#file://}"
+        if [ ! -d "${BARE_REPO_PATH}" ] || [ ! -f "${BARE_REPO_PATH}/SENTINEL_TEST_FIXTURE_MARKER" ]; then
+            fail "FATAL SECURITY STOP (WO-100): Remote '${REMOTE_ORIGIN_URL}' is not an authorized test fixture with SENTINEL_TEST_FIXTURE_MARKER."
+        fi
+        echo "Publishing test appcast to isolated fixture bare remote (${BARE_REPO_PATH}) via git worktree..."
+    else
+        echo "Publishing candidate appcast to origin/main branch via isolated git worktree..."
+    fi
     WORKTREE_DIR="$(mktemp -d -t sentinel-worktree-XXXXXX)"
     cleanup_worktree() {
         git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || rm -rf "${WORKTREE_DIR}" 2>/dev/null || true
