@@ -98,8 +98,8 @@ jobs:
       # Configure Ephemeral Keychain for Developer ID Application
       - name: Configure ephemeral keychain and Developer ID identity
         env:
-          CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          CERT_BASE64: "${{ secrets.APPLE_CERTIFICATE_BASE64 }}"
+          CERT_PASSWORD: "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
         run: |
           KEYCHAIN_PATH="${RUNNER_TEMP}/build.keychain"
           KEYCHAIN_PASSWORD="$(uuidgen)"
@@ -117,9 +117,9 @@ jobs:
       # Configure Apple Notary Service Credentials
       - name: Configure Apple Notary credentials
         env:
-          KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
-          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
-          ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          KEY_BASE64: "${{ secrets.NOTARY_API_KEY_BASE64 }}"
+          KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
+          ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
         run: |
           API_KEY_PATH="${RUNNER_TEMP}/AuthKey_${KEY_ID}.p8"
           echo "${KEY_BASE64}" | base64 --decode > "${API_KEY_PATH}"
@@ -134,11 +134,11 @@ jobs:
         env:
           SENTINEL_RELEASE_SECURITY_APPROVED: "1"
           SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
-          SENTINEL_DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION_NAME || 'Developer ID Application: Peter Franco' }}
-          SENTINEL_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}
+          SENTINEL_DEVELOPER_ID_APPLICATION: "${{ secrets.DEVELOPER_ID_APPLICATION_NAME || 'Developer ID Application: Peter Franco' }}"
+          SENTINEL_APPLE_TEAM_ID: "${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}"
           SENTINEL_WEBCREDENTIALS_DOMAIN: pool.sentineldefensetechnologies.co.za
           SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
           SENTINEL_REQUIRE_SPARKLE_KEY: "1"
         run: |
           bash scripts/build_production_dmg.sh
@@ -146,7 +146,7 @@ jobs:
       # Sparkle Signing & Appcast Enclosure Generation
       - name: Sign DMG with Sparkle EdDSA Key
         env:
-          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+          SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
         run: |
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
@@ -155,7 +155,7 @@ jobs:
       # Release Asset Upload (Fail-Closed)
       - name: Publish GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
         run: |
           TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           DRAFT_FLAG=""
