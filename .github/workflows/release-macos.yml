@@ -24,7 +24,7 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: production-release-macos
@@ -35,6 +35,8 @@ jobs:
     name: Unprivileged Build Qualification & Gating
     runs-on: macos-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
     outputs:
       verified_tag: ${{ steps.validate_tag.outputs.verified_tag }}
       short_version: ${{ steps.validate_tag.outputs.short_version }}
@@ -121,11 +123,13 @@ jobs:
         run: bash scripts/fetch-verify-knots.sh
 
   privileged-release:
-    name: Privileged Signing, Notarization & Publication (WO-90)
+    name: Privileged Signing, Notarization & Publication (WO-90, WO-96)
     needs: unprivileged-qualification
     runs-on: macos-latest
     timeout-minutes: 45
     environment: production-release
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -244,14 +248,14 @@ jobs:
             --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
             ${DRAFT_FLAG} ${PRERELEASE_FLAG}
 
-      # Gating Stage 7: Sparkle Production Appcast Publication (WO-77, WO-84, WO-85, WO-89)
+      # Gating Stage 7: Sparkle Production Appcast Publication (WO-77, WO-84, WO-85, WO-89, WO-94, WO-95)
       - name: Publish or Validate Sparkle Production Appcast Feed
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
           IS_DRAFT: "${{ github.event.inputs.is_draft }}"
-          PUB_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
-          PRIV_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
         run: |
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           if [ "${IS_DRAFT}" = "true" ]; then
@@ -259,15 +263,17 @@ jobs:
             bash scripts/publish_production_appcast.sh \
               --tag "${TAG}" \
               --archive "${DMG_FILE}" \
-              --public-key "${PUB_KEY}" \
+              --app-bundle "dist/Sentinel Node Wallet.app" \
+              --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
               --dry-run
             echo "Draft release staged. Feed will update upon operator promotion to public release."
           else
-            echo "Publishing live production Sparkle appcast to main..."
+            echo "Publishing live production Sparkle appcast to main with mandatory remote asset verification..."
             bash scripts/publish_production_appcast.sh \
               --tag "${TAG}" \
-              --archive "${DMG_FILE}" \
-              --public-key "${PUB_KEY}" \
+              --local-archive "${DMG_FILE}" \
+              --app-bundle "dist/Sentinel Node Wallet.app" \
+              --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
               --operator-approval "${OPERATOR_APPROVAL}" \
               --publish-to-main
           fi

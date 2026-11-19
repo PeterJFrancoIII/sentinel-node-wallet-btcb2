@@ -25,8 +25,11 @@ OPERATOR_APPROVAL=""
 PROVIDED_SIGNATURE=""
 SIGNATURE_FILE=""
 ARCHIVE_OVERRIDE=""
+LOCAL_ARCHIVE=""
+SANDBOX_SIMULATION=0
 ALLOW_MOCK_FOR_DRY_RUN=0
 PUBLIC_KEY_OVERRIDE=""
+PRIVATE_KEY_OVERRIDE=""
 APP_BUNDLE_PATH=""
 SIGN_UPDATE_OVERRIDE=""
 ED_KEY_FILE=""
@@ -42,8 +45,11 @@ Options:
   --signature <sig>          EdDSA signature for the archive
   --signature-file <file>    File containing the EdDSA signature
   --public-key <base64>      Ed25519 public key (SUPublicEDKey) for cryptographic verification
-  --app-bundle <path>        Path to .app bundle to extract SUPublicEDKey from Contents/Info.plist
-  --archive <dmg-file>       Local archive file override (skips network download in simulation)
+  --private-key <key>        Sparkle private key for sign_update verification
+  --app-bundle <path>        Path to .app bundle to extract & verify SUPublicEDKey and bundle identity
+  --archive <dmg-file>       Archive file (simulation/dry-run) or local artifact to cross-check (live)
+  --local-archive <dmg-file> Local signed build artifact to cross-check byte-for-byte against downloaded release
+  --sandbox-simulation       Run in isolated test sandbox (offline bare git remote simulation)
   --sign-update <path>       Path to Sparkle sign_update binary override
   --ed-key-file <file>       Private key file for Sparkle sign_update tool verification
   --publish-to-main          Commit and push updated appcast.xml directly to origin/main via isolated worktree
@@ -81,6 +87,11 @@ while [ $# -gt 0 ]; do
             PUBLIC_KEY_OVERRIDE="$2"
             shift 2
             ;;
+        --private-key)
+            [ $# -ge 2 ] || fail "Missing value for --private-key"
+            PRIVATE_KEY_OVERRIDE="$2"
+            shift 2
+            ;;
         --app-bundle)
             [ $# -ge 2 ] || fail "Missing value for --app-bundle"
             APP_BUNDLE_PATH="$2"
@@ -100,6 +111,15 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || fail "Missing value for --archive"
             ARCHIVE_OVERRIDE="$2"
             shift 2
+            ;;
+        --local-archive)
+            [ $# -ge 2 ] || fail "Missing value for --local-archive"
+            LOCAL_ARCHIVE="$2"
+            shift 2
+            ;;
+        --sandbox-simulation)
+            SANDBOX_SIMULATION=1
+            shift
             ;;
         --publish-to-main)
             PUBLISH_TO_MAIN=1
@@ -196,17 +216,46 @@ except Exception:
     echo "✓ Verified Sparkle pinned version 2.10.1 and sign_update executable: ${SIGN_UPDATE}"
 fi
 
-# Resolve Public Key (SUPublicEDKey)
+# Resolve and Validate Public Key (SUPublicEDKey) and App Bundle Identity (WO-95)
 PUBLIC_KEY=""
+BUNDLE_SUPUBLIC_KEY=""
+
+# If app bundle path is provided or discovered in dist/, verify identity and extract SUPublicEDKey
+BUNDLE_CANDIDATE="${APP_BUNDLE_PATH}"
+if [ -z "${BUNDLE_CANDIDATE}" ] && [ -d "${DIST_DIR}/Sentinel Node Wallet.app" ]; then
+    BUNDLE_CANDIDATE="${DIST_DIR}/Sentinel Node Wallet.app"
+fi
+
+if [ -n "${BUNDLE_CANDIDATE}" ] && [ -d "${BUNDLE_CANDIDATE}" ]; then
+    INFO_PLIST="${BUNDLE_CANDIDATE}/Contents/Info.plist"
+    if [ -f "${INFO_PLIST}" ]; then
+        BUNDLE_SUPUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${INFO_PLIST}" 2>/dev/null || echo "")"
+        BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST}" 2>/dev/null || echo "")"
+        BUNDLE_SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}" 2>/dev/null || echo "")"
+        BUNDLE_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${INFO_PLIST}" 2>/dev/null || echo "")"
+
+        [ "${BUNDLE_ID}" = "pool.sentineldefensetechnologies.co.za" ] ||
+            fail "Bundle ID mismatch in ${BUNDLE_CANDIDATE}: expected 'pool.sentineldefensetechnologies.co.za', got '${BUNDLE_ID}'."
+        [ "${BUNDLE_SHORT_VER}" = "${VERSION}" ] ||
+            fail "Version mismatch in ${BUNDLE_CANDIDATE}: expected '${VERSION}', got '${BUNDLE_SHORT_VER}'."
+        [ "${BUNDLE_BUILD}" = "${BUILD_NUM}" ] ||
+            fail "Build number mismatch in ${BUNDLE_CANDIDATE}: expected '${BUILD_NUM}', got '${BUNDLE_BUILD}'."
+
+        echo "✓ Verified bundle identity and metadata: ${BUNDLE_ID} v${BUNDLE_SHORT_VER} (Build ${BUNDLE_BUILD})"
+    fi
+fi
+
 if [ -n "${PUBLIC_KEY_OVERRIDE}" ]; then
     PUBLIC_KEY="${PUBLIC_KEY_OVERRIDE}"
-elif [ -n "${APP_BUNDLE_PATH}" ] && [ -d "${APP_BUNDLE_PATH}" ]; then
-    INFO_PLIST="${APP_BUNDLE_PATH}/Contents/Info.plist"
-    if [ -f "${INFO_PLIST}" ]; then
-        PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${INFO_PLIST}" 2>/dev/null || echo "")"
+    if [ -n "${BUNDLE_SUPUBLIC_KEY}" ] && [ "${PUBLIC_KEY}" != "${BUNDLE_SUPUBLIC_KEY}" ]; then
+        fail "SUPublicEDKey mismatch: App bundle key (${BUNDLE_SUPUBLIC_KEY}) does not match supplied public key (${PUBLIC_KEY})."
     fi
+elif [ -n "${BUNDLE_SUPUBLIC_KEY}" ]; then
+    PUBLIC_KEY="${BUNDLE_SUPUBLIC_KEY}"
 elif [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
     PUBLIC_KEY="${SPARKLE_PUBLIC_ED_KEY}"
+elif [ -n "${PUB_KEY:-}" ]; then
+    PUBLIC_KEY="${PUB_KEY}"
 fi
 
 # 3. Resolve & Validate EdDSA Signature (WO-82, WO-88: Strict 64-Byte Ed25519 & No-Mock)
@@ -293,44 +342,75 @@ if len(decoded) != 32:
 PY
 fi
 
-# 4. Verify GitHub Release Asset HTTP Accessibility and Checksum (WO-83: Strong Asset Verification)
+# 4. Verify GitHub Release Asset HTTP Accessibility and Checksum (WO-83: Strong Asset Verification, WO-94: Mandatory Remote Asset Verification)
 TARGET_ARCHIVE=""
 ASSET_LENGTH=0
 
-if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
-    TARGET_ARCHIVE="${ARCHIVE_OVERRIDE}"
-    ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
-    ACTUAL_SHA="$(shasum -a 256 "${TARGET_ARCHIVE}" | awk '{print $1}')"
-    echo "Using release archive: ${TARGET_ARCHIVE} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
-elif [ "${DRY_RUN}" = "0" ]; then
-    echo "Checking immutable GitHub Release asset availability (following redirects to final 200)..."
+if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
+    # LIVE PRODUCTION MODE:
+    # Downloading and validating the immutable, publicly accessible GitHub release asset is MANDATORY.
+    echo "Checking immutable public GitHub Release asset availability (following redirects to final 200)..."
     HTTP_STATUS="$(curl -sIL -o /dev/null -w "%{http_code}" "${RELEASE_URL}" || echo "000")"
     if [ "${HTTP_STATUS}" != "200" ]; then
-        fail "Release asset at ${RELEASE_URL} returned final HTTP ${HTTP_STATUS}. Release must be publicly accessible before feed publication."
+        fail "Remote release asset at ${RELEASE_URL} returned final HTTP ${HTTP_STATUS}. Release must be publicly accessible with final HTTP 200 before live appcast feed publication."
     fi
 
-    echo "Downloading release SHA256SUMS.txt..."
-    curl -fsSL "${SHA_URL}" -o "${TEMP_DIR}/SHA256SUMS.txt" || fail "Failed to retrieve SHA256SUMS.txt from release."
+    echo "Downloading release SHA256SUMS.txt from ${SHA_URL}..."
+    curl -fsSL "${SHA_URL}" -o "${TEMP_DIR}/SHA256SUMS.txt" || fail "Failed to retrieve SHA256SUMS.txt from public release at ${SHA_URL}."
 
     EXPECTED_SHA="$(grep -E "^[a-f0-9]{64}[[:space:]]+(\./)?${ASSET_NAME}$" "${TEMP_DIR}/SHA256SUMS.txt" | awk '{print $1}' || echo "")"
-    [ -n "${EXPECTED_SHA}" ] || fail "Asset ${ASSET_NAME} not found in release SHA256SUMS.txt with valid 64-hex SHA-256."
+    [ -n "${EXPECTED_SHA}" ] || fail "Asset ${ASSET_NAME} not found in public release SHA256SUMS.txt with valid 64-hex SHA-256."
 
-    echo "Downloading release asset bytes into isolated verification staging..."
+    echo "Downloading immutable release asset bytes from GitHub into isolated verification staging..."
     TARGET_ARCHIVE="${TEMP_DIR}/${ASSET_NAME}"
     curl -fsSL "${RELEASE_URL}" -o "${TARGET_ARCHIVE}" || fail "Failed to download release archive from ${RELEASE_URL}."
 
     # Compute actual checksum on downloaded bytes
     ACTUAL_SHA="$(shasum -a 256 "${TARGET_ARCHIVE}" | awk '{print $1}')"
     if [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
-        fail "Integrity violation: Downloaded asset SHA-256 (${ACTUAL_SHA}) does not match release manifest (${EXPECTED_SHA})."
+        fail "Integrity violation: Downloaded public asset SHA-256 (${ACTUAL_SHA}) does not match release manifest (${EXPECTED_SHA})."
     fi
 
     ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
     [ "${ASSET_LENGTH}" -gt 1000000 ] || fail "Asset size suspicious (${ASSET_LENGTH} bytes)."
-    echo "✓ Verified release asset integrity: ${ASSET_NAME} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
+    echo "✓ Verified public release asset integrity: ${ASSET_NAME} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
+
+    # Cross-check local build artifact if supplied
+    LOCAL_COMPARE="${LOCAL_ARCHIVE:-${ARCHIVE_OVERRIDE}}"
+    if [ -n "${LOCAL_COMPARE}" ]; then
+        [ -f "${LOCAL_COMPARE}" ] || fail "Specified local build archive does not exist: ${LOCAL_COMPARE}"
+        LOCAL_SHA="$(shasum -a 256 "${LOCAL_COMPARE}" | awk '{print $1}')"
+        LOCAL_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${LOCAL_COMPARE}")"
+        if [ "${ACTUAL_SHA}" != "${LOCAL_SHA}" ]; then
+            fail "Integrity violation: Downloaded public GitHub asset SHA-256 (${ACTUAL_SHA}) does not match local build artifact (${LOCAL_SHA})."
+        fi
+        if [ "${ASSET_LENGTH}" != "${LOCAL_LENGTH}" ]; then
+            fail "Integrity violation: Downloaded public GitHub asset size (${ASSET_LENGTH}) does not match local build artifact (${LOCAL_LENGTH})."
+        fi
+        cmp -s "${TARGET_ARCHIVE}" "${LOCAL_COMPARE}" || fail "Downloaded release archive differs byte-for-byte from local build artifact."
+        echo "✓ Verified byte-for-byte identity between local build artifact and public remote GitHub release asset."
+    fi
+elif [ "${SANDBOX_SIMULATION}" = "1" ]; then
+    # SANDBOX SIMULATION MODE: Used exclusively by isolated test harness
+    if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
+        TARGET_ARCHIVE="${ARCHIVE_OVERRIDE}"
+        ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
+        ACTUAL_SHA="$(shasum -a 256 "${TARGET_ARCHIVE}" | awk '{print $1}')"
+        echo "Using sandbox simulation release archive: ${TARGET_ARCHIVE} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
+    else
+        fail "Sandbox simulation requires --archive <file> pointing to a valid archive."
+    fi
 else
-    echo "[DRY RUN] Simulating asset validation for ${ASSET_NAME}..."
-    ASSET_LENGTH="12450000"
+    # DRY RUN MODE
+    if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
+        TARGET_ARCHIVE="${ARCHIVE_OVERRIDE}"
+        ASSET_LENGTH="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${TARGET_ARCHIVE}")"
+        ACTUAL_SHA="$(shasum -a 256 "${TARGET_ARCHIVE}" | awk '{print $1}')"
+        echo "[DRY RUN] Using specified release archive: ${TARGET_ARCHIVE} (${ASSET_LENGTH} bytes, SHA-256: ${ACTUAL_SHA})"
+    else
+        echo "[DRY RUN] Simulating asset validation for ${ASSET_NAME}..."
+        ASSET_LENGTH="12450000"
+    fi
 fi
 
 # WO-88: Cryptographic EdDSA signature verification against target archive bytes
@@ -391,15 +471,16 @@ print("✓ Cryptographic Ed25519 signature verified successfully against archive
 PY
 
     # Cross-verify via Sparkle sign_update tool if private key or key file is available
+    SPARKLE_PRIV="${PRIVATE_KEY_OVERRIDE:-${SPARKLE_PRIVATE_ED_KEY:-${PRIV_KEY:-}}}"
     if [ -n "${SIGN_UPDATE}" ] && [ -x "${SIGN_UPDATE}" ]; then
         if [ -n "${ED_KEY_FILE}" ] && [ -f "${ED_KEY_FILE}" ]; then
             echo "Cross-verifying via Sparkle sign_update --verify with key file..."
             "${SIGN_UPDATE}" --verify --ed-key-file "${ED_KEY_FILE}" "${TARGET_ARCHIVE}" "${ED_SIGNATURE}" ||
                 fail "Sparkle sign_update --verify failed."
             echo "✓ Sparkle sign_update verification succeeded."
-        elif [ -n "${SPARKLE_PRIVATE_ED_KEY:-}" ]; then
-            echo "Cross-verifying via Sparkle sign_update --verify with SPARKLE_PRIVATE_ED_KEY..."
-            printf "%s" "${SPARKLE_PRIVATE_ED_KEY}" | "${SIGN_UPDATE}" --verify --ed-key-file - "${TARGET_ARCHIVE}" "${ED_SIGNATURE}" ||
+        elif [ -n "${SPARKLE_PRIV}" ]; then
+            echo "Cross-verifying via Sparkle sign_update --verify with private key..."
+            printf "%s" "${SPARKLE_PRIV}" | "${SIGN_UPDATE}" --verify --ed-key-file - "${TARGET_ARCHIVE}" "${ED_SIGNATURE}" ||
                 fail "Sparkle sign_update --verify failed."
             echo "✓ Sparkle sign_update verification succeeded."
         fi

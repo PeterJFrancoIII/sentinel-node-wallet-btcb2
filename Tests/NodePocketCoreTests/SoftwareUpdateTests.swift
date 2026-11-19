@@ -1140,6 +1140,83 @@ final class SoftwareUpdateTests: XCTestCase {
         // Ensure no backup file was created in dist/
         let backupFile = repoRoot.appendingPathComponent("dist/appcast.xml.bak")
         XCTAssertFalse(FileManager.default.fileExists(atPath: backupFile.path), "dist/appcast.xml.bak must never be created in working copy")
+
+        // MARK: - WO-94 & WO-95 Remote Asset Enforcement & App Bundle Binding Tests
+
+        // 14. WO-94 P0: Live mode without --sandbox-simulation attempts remote download and fails closed on missing remote asset
+        let liveMissingRemote = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(liveMissingRemote.status, 0, "Live mode must fail closed when remote GitHub Release asset is not available")
+        XCTAssertTrue(liveMissingRemote.output.contains("Remote release asset at") || liveMissingRemote.output.contains("Release must be publicly accessible"), "Must enforce remote asset availability: \(liveMissingRemote.output)")
+
+        // 15. WO-95 P0: App bundle SUPublicEDKey mismatch against provided public key fails closed
+        let tempBundleURL = FileManager.default.temporaryDirectory.appendingPathComponent("Sentinel Node Wallet-\(UUID().uuidString).app")
+        let contentsURL = tempBundleURL.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBundleURL) }
+
+        let testInfoPlist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>pool.sentineldefensetechnologies.co.za</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>CFBundleVersion</key>
+            <string>5</string>
+            <key>SUPublicEDKey</key>
+            <string>\(pubKeyB64)</string>
+        </dict>
+        </plist>
+        """
+        try testInfoPlist.write(to: contentsURL.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+
+        let keyMismatchRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", tempBundleURL.path,
+            "--signature", signatureB64,
+            "--public-key", wrongPubKeyB64
+        ])
+        XCTAssertNotEqual(keyMismatchRun.status, 0, "Key mismatch between bundle and public key must fail closed")
+        XCTAssertTrue(keyMismatchRun.output.contains("SUPublicEDKey mismatch"), "Must report SUPublicEDKey mismatch: \(keyMismatchRun.output)")
+
+        // 16. WO-95 P0: Bundle ID mismatch in app bundle fails closed
+        let badIdPlist = testInfoPlist.replacingOccurrences(of: "pool.sentineldefensetechnologies.co.za", with: "com.unauthorized.wallet")
+        try badIdPlist.write(to: contentsURL.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        let badIdRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", tempBundleURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(badIdRun.status, 0, "Bundle ID mismatch must fail closed")
+        XCTAssertTrue(badIdRun.output.contains("Bundle ID mismatch"), "Must report Bundle ID mismatch: \(badIdRun.output)")
+
+        // 17. WO-95 P0: Version / build number mismatch between app bundle and tag fails closed
+        let badBuildPlist = testInfoPlist.replacingOccurrences(of: "<string>5</string>", with: "<string>4</string>")
+        try badBuildPlist.write(to: contentsURL.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        let badBuildRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", tempBundleURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(badBuildRun.status, 0, "Build number mismatch must fail closed")
+        XCTAssertTrue(badBuildRun.output.contains("Build number mismatch"), "Must report Build number mismatch: \(badBuildRun.output)")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test
@@ -1243,6 +1320,7 @@ final class SoftwareUpdateTests: XCTestCase {
         var args = [
             cloneScript,
             "--tag", "v1.0.0-build5",
+            "--sandbox-simulation",
             "--archive", dummyDMG.path,
             "--signature", sigB64,
             "--public-key", pubKeyB64,
