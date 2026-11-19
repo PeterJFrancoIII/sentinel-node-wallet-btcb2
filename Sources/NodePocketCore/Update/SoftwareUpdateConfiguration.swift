@@ -7,6 +7,7 @@ public struct SoftwareUpdateConfiguration: @unchecked Sendable {
     public static let autoDownloadKey = "app.nodepocket.btcb2.update.autoDownload"
     public static let lastCheckDateKey = "app.nodepocket.btcb2.update.lastCheckDate"
     public static let lastCheckETagKey = "app.nodepocket.btcb2.update.lastCheckETag"
+    public static let etagsByFeedKey = "app.nodepocket.btcb2.update.eTagsByFeed"
     public static let skippedVersionsKey = "app.nodepocket.btcb2.update.skippedVersions"
 
     private let defaults: UserDefaults
@@ -75,6 +76,25 @@ public struct SoftwareUpdateConfiguration: @unchecked Sendable {
                 defaults.removeObject(forKey: Self.lastCheckETagKey)
             }
         }
+    }
+
+    /// Retrieves segregated ETag cache specific to a given feed URL to prevent cross-feed collisions.
+    public func lastCheckETag(for feedUrl: URL) -> String? {
+        let dict = defaults.dictionary(forKey: Self.etagsByFeedKey) as? [String: String] ?? [:]
+        return dict[feedUrl.absoluteString]
+    }
+
+    /// Stores segregated ETag cache specific to a given feed URL.
+    public func setLastCheckETag(_ etag: String?, for feedUrl: URL) {
+        var dict = defaults.dictionary(forKey: Self.etagsByFeedKey) as? [String: String] ?? [:]
+        if let val = etag {
+            dict[feedUrl.absoluteString] = val
+            defaults.set(val, forKey: Self.lastCheckETagKey)
+        } else {
+            dict.removeValue(forKey: feedUrl.absoluteString)
+            defaults.removeObject(forKey: Self.lastCheckETagKey)
+        }
+        defaults.set(dict, forKey: Self.etagsByFeedKey)
     }
 
     public var skippedVersions: Set<String> {

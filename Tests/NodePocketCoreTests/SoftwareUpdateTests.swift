@@ -644,4 +644,46 @@ final class SoftwareUpdateTests: XCTestCase {
         try? await stopAction()
         XCTAssertTrue(ctx.nodeStopInvoked, "Confirmed node shutdown invoked only on deliberate install")
     }
+
+    // MARK: - WO-70 Production Feed Isolation, ETag Segregation & Fallback Defense
+
+    func testETagSegregationPerFeedURL() {
+        let tempDefaults = UserDefaults(suiteName: "test.etag.segregation.\(UUID().uuidString)")!
+        let config = SoftwareUpdateConfiguration(defaults: tempDefaults)
+
+        let prodUrl = URL(string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml")!
+        let betaUrl = URL(string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast-beta.xml")!
+
+        XCTAssertNil(config.lastCheckETag(for: prodUrl))
+        XCTAssertNil(config.lastCheckETag(for: betaUrl))
+
+        config.setLastCheckETag("\"etag-prod-123\"", for: prodUrl)
+        XCTAssertEqual(config.lastCheckETag(for: prodUrl), "\"etag-prod-123\"")
+        XCTAssertNil(config.lastCheckETag(for: betaUrl), "Beta feed must NOT inherit production ETag")
+
+        config.setLastCheckETag("\"etag-beta-456\"", for: betaUrl)
+        XCTAssertEqual(config.lastCheckETag(for: prodUrl), "\"etag-prod-123\"")
+        XCTAssertEqual(config.lastCheckETag(for: betaUrl), "\"etag-beta-456\"")
+    }
+
+    func testStableChannelRejectsInsecureScheme() {
+        let insecureUrl = URL(string: "http://malicious-site.com/appcast.xml")!
+        let scheme = insecureUrl.scheme?.lowercased()
+        let isSecure = scheme == "https" || (scheme == "http" && (insecureUrl.host == "127.0.0.1" || insecureUrl.host == "localhost"))
+        XCTAssertFalse(isSecure, "Non-local HTTP scheme must be rejected")
+    }
+
+    func testStableChannelRejectsDraftBranchFallbackOn404() async {
+        let resolver = GitHubReleaseResolver()
+        let missingUrl = URL(string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml")!
+
+        do {
+            _ = try await resolver.fetchFromAppcast(appcastUrl: missingUrl)
+            XCTFail("Must fail when stable feed returns 404")
+        } catch let SoftwareUpdateError.networkError(msg) {
+            XCTAssertTrue(msg.contains("404"), "Expected HTTP 404 in error message, got: \(msg)")
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
 }

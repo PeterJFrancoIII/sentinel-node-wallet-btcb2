@@ -263,15 +263,16 @@ public struct SoftwareUpdatesSettingsView: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
 
         case .error(let msg):
+            let isFeedUnpublished = msg.contains("404") || msg.contains("not yet published")
             HStack(alignment: .top, spacing: 10) {
-                Image(systemName: "exclamationmark.octagon.fill")
-                    .foregroundColor(.red)
+                Image(systemName: isFeedUnpublished ? "info.circle.fill" : "exclamationmark.octagon.fill")
+                    .foregroundColor(isFeedUnpublished ? .secondary : .red)
                     .font(.system(size: 18))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Update Check Failed")
+                    Text(isFeedUnpublished ? "Feed Not Published" : "Update Check Failed")
                         .font(.caption)
                         .bold()
-                        .foregroundColor(.red)
+                        .foregroundColor(isFeedUnpublished ? .primary : .red)
                     Text(msg)
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -280,9 +281,9 @@ public struct SoftwareUpdatesSettingsView: View {
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.1)))
+            .background(RoundedRectangle(cornerRadius: 8).fill(isFeedUnpublished ? Color(NSColor.controlBackgroundColor) : Color.red.opacity(0.1)))
             .overlay(
-                RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 8).stroke(isFeedUnpublished ? Color.secondary.opacity(0.2) : Color.red.opacity(0.3), lineWidth: 1)
             )
 
         default:

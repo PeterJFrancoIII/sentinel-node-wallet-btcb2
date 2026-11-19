@@ -10,8 +10,8 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     public static nonisolated let defaultAppcastUrl = URL(
         string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml"
     )!
-    public static nonisolated let preReleaseAppcastUrl = URL(
-        string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/integration/pre-release-qualification-20261116/dist/appcast.xml"
+    public static nonisolated let betaAppcastUrl = URL(
+        string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast-beta.xml"
     )!
 
     @Published public var status: SoftwareUpdateStatus = .idle
@@ -148,32 +148,30 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
 
         do {
             var targetUrl = appcastUrl
+            if config.channel == .beta && appcastUrl == Self.defaultAppcastUrl {
+                targetUrl = Self.betaAppcastUrl
+            }
+            #if DEBUG
             if let customUrlStr = ProcessInfo.processInfo.environment["SENTINEL_APPCAST_URL"],
                let customUrl = URL(string: customUrlStr) {
                 targetUrl = customUrl
-            } else if config.channel == .beta && appcastUrl == Self.defaultAppcastUrl {
-                targetUrl = Self.preReleaseAppcastUrl
+            }
+            #endif
+
+            // Enforce secure HTTPS scheme for external appcast feeds
+            guard let scheme = targetUrl.scheme?.lowercased(),
+                  scheme == "https" || (scheme == "http" && (targetUrl.host == "127.0.0.1" || targetUrl.host == "localhost")) else {
+                throw SoftwareUpdateError.networkError("Insecure update feed URL scheme: \(targetUrl.scheme ?? "none")")
             }
 
-            var fetchResult: (releases: [AppReleaseInfo], newETag: String?)
-            do {
-                fetchResult = try await resolver.fetchFromAppcast(
-                    appcastUrl: targetUrl,
-                    cachedETag: isUserInitiated ? nil : config.lastCheckETag
-                )
-            } catch let SoftwareUpdateError.networkError(msg) where msg.contains("404") && targetUrl == Self.defaultAppcastUrl {
-                // If main production branch feed returns 404 (e.g. pre-merge qualification),
-                // fall back to pre-release feed on integration branch
-                fetchResult = try await resolver.fetchFromAppcast(
-                    appcastUrl: Self.preReleaseAppcastUrl,
-                    cachedETag: isUserInitiated ? nil : config.lastCheckETag
-                )
-            }
-
-            let (releases, newETag) = fetchResult
+            let cachedETag = isUserInitiated ? nil : config.lastCheckETag(for: targetUrl)
+            let (releases, newETag) = try await resolver.fetchFromAppcast(
+                appcastUrl: targetUrl,
+                cachedETag: cachedETag
+            )
 
             if let etag = newETag {
-                config.lastCheckETag = etag
+                config.setLastCheckETag(etag, for: targetUrl)
             }
             config.lastCheckDate = Date()
 
@@ -218,11 +216,21 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 status = .upToDate(lastChecked: Date())
             }
         } catch let updateErr as SoftwareUpdateError {
-            status = .error(updateErr.localizedDescription)
-            errorMessage = updateErr.localizedDescription
+            let desc: String
+            if case .networkError(let msg) = updateErr, msg.contains("404") {
+                desc = (config.channel == .beta)
+                    ? "Beta update feed is not published on GitHub (HTTP 404)."
+                    : "Production update feed is not yet published on GitHub (HTTP 404). Update checks will resume once the release is published."
+            } else {
+                desc = updateErr.localizedDescription
+            }
+            status = .error(desc)
+            errorMessage = desc
+            showUpdateBanner = false
         } catch {
             status = .error(error.localizedDescription)
             errorMessage = error.localizedDescription
+            showUpdateBanner = false
         }
     }
 
