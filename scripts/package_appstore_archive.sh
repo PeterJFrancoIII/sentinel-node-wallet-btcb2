@@ -6,9 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-BUNDLE_ID="${SENTINEL_BUNDLE_ID:-app.nodepocket.btcb2}"
-VERSION="1.0"
-BUILD_NUMBER="3"
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
+VERSION="${SENTINEL_VERSION:-1.0}"
+BUILD_NUMBER="${SENTINEL_BUILD_NUMBER:-4}"
 APP_NAME="Sentinel Node Wallet"
 TEAM_ID="${SENTINEL_APPLE_TEAM_ID:-S8QMQZA656}"
 SIGNING_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
