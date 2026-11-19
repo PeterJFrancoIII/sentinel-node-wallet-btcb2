@@ -10,6 +10,9 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     public static nonisolated let defaultAppcastUrl = URL(
         string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml"
     )!
+    public static nonisolated let preReleaseAppcastUrl = URL(
+        string: "https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/integration/pre-release-qualification-20261116/dist/appcast.xml"
+    )!
 
     @Published public var status: SoftwareUpdateStatus = .idle
     @Published public var config: SoftwareUpdateConfiguration
@@ -144,10 +147,30 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         }
 
         do {
-            let (releases, newETag) = try await resolver.fetchFromAppcast(
-                appcastUrl: appcastUrl,
-                cachedETag: isUserInitiated ? nil : config.lastCheckETag
-            )
+            var targetUrl = appcastUrl
+            if let customUrlStr = ProcessInfo.processInfo.environment["SENTINEL_APPCAST_URL"],
+               let customUrl = URL(string: customUrlStr) {
+                targetUrl = customUrl
+            } else if config.channel == .beta && appcastUrl == Self.defaultAppcastUrl {
+                targetUrl = Self.preReleaseAppcastUrl
+            }
+
+            var fetchResult: (releases: [AppReleaseInfo], newETag: String?)
+            do {
+                fetchResult = try await resolver.fetchFromAppcast(
+                    appcastUrl: targetUrl,
+                    cachedETag: isUserInitiated ? nil : config.lastCheckETag
+                )
+            } catch let SoftwareUpdateError.networkError(msg) where msg.contains("404") && targetUrl == Self.defaultAppcastUrl {
+                // If main production branch feed returns 404 (e.g. pre-merge qualification),
+                // fall back to pre-release feed on integration branch
+                fetchResult = try await resolver.fetchFromAppcast(
+                    appcastUrl: Self.preReleaseAppcastUrl,
+                    cachedETag: isUserInitiated ? nil : config.lastCheckETag
+                )
+            }
+
+            let (releases, newETag) = fetchResult
 
             if let etag = newETag {
                 config.lastCheckETag = etag

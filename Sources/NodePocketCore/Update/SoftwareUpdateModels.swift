@@ -157,6 +157,9 @@ public enum SoftwareUpdateError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .networkError(let msg):
+            if msg.contains("404") {
+                return "Update feed not found on GitHub (HTTP 404). The feed has not yet been merged into main."
+            }
             return "Network error checking for updates: \(msg)"
         case .rateLimited(let retry):
             if let r = retry {

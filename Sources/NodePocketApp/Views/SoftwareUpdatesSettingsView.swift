@@ -13,21 +13,12 @@ public struct SoftwareUpdatesSettingsView: View {
     }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // Header
-            HStack(spacing: 12) {
-                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                    .font(.system(size: 32))
-                    .foregroundColor(.blue)
+        VStack(alignment: .leading, spacing: 16) {
+            // Status and manual check action bar
+            HStack(alignment: .center) {
+                Label("Update Controls", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.headline)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Software Updates")
-                        .font(.title2)
-                        .bold()
-                    Text("Sentinel Node Wallet BTCB2 / XBT update management")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
                 Spacer()
 
                 if coordinator.distributionChannel == .directGitHub {
@@ -35,19 +26,25 @@ public struct SoftwareUpdatesSettingsView: View {
                         Task { await coordinator.checkForUpdates(isUserInitiated: true) }
                     }) {
                         if coordinator.isChecking {
-                            ProgressView()
-                                .controlSize(.small)
-                                .padding(.horizontal, 4)
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("Checking…")
+                                    .font(.caption)
+                            }
                         } else {
-                            Label("Check Now", systemImage: "arrow.clockwise")
+                            Label("Check for Updates Now", systemImage: "arrow.clockwise")
+                                .font(.caption)
                         }
                     }
                     .disabled(coordinator.isChecking)
                     .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
                 }
             }
 
-            Divider()
+            // Update Status Callout (Prominently at the top)
+            statusCalloutView
 
             // Current Version & System Environment
             GroupBox(label: Label("Installed Environment", systemImage: "macbook")) {
@@ -84,9 +81,6 @@ public struct SoftwareUpdatesSettingsView: View {
                 .padding(6)
             }
 
-            // Update Status Callout
-            statusCalloutView
-
             // Update Configuration Controls
             if coordinator.distributionChannel == .directGitHub {
                 GroupBox(label: Label("Update Preferences", systemImage: "gearshape")) {
@@ -114,13 +108,14 @@ public struct SoftwareUpdatesSettingsView: View {
                         }
                         .pickerStyle(.segmented)
 
-                        Toggle("Automatically download new updates in the background (Not Implemented - Manual Confirmation Required)", isOn: .constant(false))
+                        Toggle("Automatically download new updates in the background", isOn: .constant(false))
                             .font(.caption)
                             .disabled(true)
 
                         Text("Silent automatic restart is strictly disabled. You will always be prompted to review and confirm installation before any update is applied.")
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(6)
                 }
@@ -130,6 +125,7 @@ public struct SoftwareUpdatesSettingsView: View {
                         Text("This installation is managed directly by the Mac App Store. Binary updates are delivered securely through macOS App Store updates.")
                             .font(.caption)
                             .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
 
                         Button("View in Mac App Store…") {
                             Task {
@@ -150,11 +146,9 @@ public struct SoftwareUpdatesSettingsView: View {
                     .padding(6)
                 }
             }
-
-            Spacer()
         }
-        .padding(20)
-        .frame(minWidth: 500, minHeight: 450)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 6)
     }
 
     @ViewBuilder
@@ -177,19 +171,24 @@ public struct SoftwareUpdatesSettingsView: View {
             HStack(spacing: 10) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundColor(.green)
+                    .font(.system(size: 20))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Sentinel Node Wallet is Up to Date")
-                        .font(.caption)
+                        .font(.subheadline)
                         .bold()
                         .foregroundColor(.green)
-                    Text("You have the latest compatible release for your Mac.")
+                    Text("Installed version \(coordinator.installedVersion.shortDescription) is current. No newer updates found on GitHub.")
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .padding(10)
+            .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.green.opacity(0.1)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8).stroke(Color.green.opacity(0.3), lineWidth: 1)
+            )
 
         case .updateAvailable(let release):
             VStack(alignment: .leading, spacing: 10) {
@@ -256,6 +255,7 @@ public struct SoftwareUpdatesSettingsView: View {
                     Text(reason)
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(10)
@@ -263,9 +263,10 @@ public struct SoftwareUpdatesSettingsView: View {
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
 
         case .error(let msg):
-            HStack(spacing: 10) {
+            HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.octagon.fill")
                     .foregroundColor(.red)
+                    .font(.system(size: 18))
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Update Check Failed")
                         .font(.caption)
@@ -274,11 +275,15 @@ public struct SoftwareUpdatesSettingsView: View {
                     Text(msg)
                         .font(.caption2)
                         .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .padding(10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.1)))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1)
+            )
 
         default:
             EmptyView()

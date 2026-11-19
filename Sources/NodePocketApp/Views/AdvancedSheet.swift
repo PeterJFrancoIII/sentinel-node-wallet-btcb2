@@ -276,7 +276,10 @@ public struct AdvancedSheet: View {
                 }
             }
         } else if settingsTab == 1 {
-            SoftwareUpdatesSettingsView(coordinator: state.updateCoordinator)
+            ScrollView {
+                SoftwareUpdatesSettingsView(coordinator: state.updateCoordinator)
+                    .padding(.bottom, 8)
+            }
         } else {
             fullUninstallationTab
         }
@@ -300,15 +303,15 @@ public struct AdvancedSheet: View {
                 }
                 .buttonStyle(.bordered)
                 Spacer()
-                Button("Cancel / Done") {
+                Button("Done") {
                     dismiss()
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
             }
         }
         }
-        .padding(24)
-        .frame(width: 540, height: 600)
+        .padding(20)
+        .frame(minWidth: 560, idealWidth: 600, maxWidth: 660, minHeight: 580, idealHeight: 640, maxHeight: 720)
         .onAppear {
             loadCurrentSettings()
         }
