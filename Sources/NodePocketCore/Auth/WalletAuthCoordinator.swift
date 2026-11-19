@@ -432,8 +432,11 @@ public actor WalletAuthCoordinator {
         }
     }
 
-    public init(dataDirectory: URL) {
+    private let customAuthKeychainHelper: KeychainHelper?
+
+    public init(dataDirectory: URL, customKeychainHelper: KeychainHelper? = nil) {
         self.dataDirectory = dataDirectory
+        self.customAuthKeychainHelper = customKeychainHelper
         self.registryURL = dataDirectory.appendingPathComponent("auth_registry.json")
         do {
             self.records = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
@@ -517,6 +520,11 @@ public actor WalletAuthCoordinator {
 
     public var enrolledUsernames: [String] {
         Array(records.values.map(\.username)).sorted()
+    }
+
+    public func hasOperatorRecord(username: String) -> Bool {
+        let key = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return records[key] != nil
     }
 
     public var currentSession: WalletAuthCapability? {
@@ -614,13 +622,19 @@ public actor WalletAuthCoordinator {
             }
 
             // P0-1: Save TOTP secret in Keychain, not in plaintext json
-            try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
-            // Automatically save operator login password in macOS Keychain / Apple Passwords
-            do {
-                try Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
+            if let customKeychain = self.customAuthKeychainHelper {
+                _ = try? customKeychain.savePassphrase(secretBase32, account: "totp_" + userKey)
+                _ = try? customKeychain.savePassphrase(password, account: "operator_login_" + userKey)
                 self.isLastPasswordSavedToKeychain = true
-            } catch {
-                self.isLastPasswordSavedToKeychain = false
+            } else {
+                try Self.saveTOTPSecretToKeychain(username: cleanUser, secretBase32: secretBase32)
+                // Automatically save operator login password in macOS Keychain / Apple Passwords
+                do {
+                    try Self.saveOperatorPasswordToKeychain(username: cleanUser, password: password)
+                    self.isLastPasswordSavedToKeychain = true
+                } catch {
+                    self.isLastPasswordSavedToKeychain = false
+                }
             }
 
             let salt = try Self.randomBytes(count: 32)
@@ -1424,14 +1438,21 @@ public actor WalletAuthCoordinator {
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         try withCrossProcessLock {
             if FileManager.default.fileExists(atPath: registryURL.path) {
-                try? reloadRecordsFromDisk()
+                try reloadRecordsFromDisk()
             }
             guard records[userKey] != nil else { return }
             records.removeValue(forKey: userKey)
             self.recordGeneration += 1
             try saveRecords()
-            Self.deleteTOTPSecretFromKeychain(username: userKey)
-            Self.deleteOperatorPasswordFromKeychain(username: userKey)
+
+            if let customKeychain = self.customAuthKeychainHelper {
+                _ = try? customKeychain.deletePassphrase(account: "totp_" + userKey)
+                _ = try? customKeychain.deletePassphrase(account: "operator_login_" + userKey)
+            } else {
+                Self.deleteTOTPSecretFromKeychain(username: userKey)
+                Self.deleteOperatorPasswordFromKeychain(username: userKey)
+            }
+
             Self.clearDurableLockoutFallback(username: userKey)
             if records.isEmpty {
                 UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")

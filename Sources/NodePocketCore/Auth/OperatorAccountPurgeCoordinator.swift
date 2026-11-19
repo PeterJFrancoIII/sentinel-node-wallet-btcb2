@@ -79,6 +79,7 @@ public struct PurgeJournalRecord: Codable, Sendable, Equatable {
         case initiated
         case walletsUnloaded = "wallets_unloaded"
         case walletsRemoved = "wallets_removed"
+        case intentCredentialsPurge = "intent_credentials_purge"
         case credentialsPurged = "credentials_purged"
         case completed
     }
@@ -231,7 +232,26 @@ public actor OperatorAccountPurgeCoordinator {
         case incomplete(stage: PurgeJournalRecord.Stage, details: String)
     }
 
-    public func recoverPendingPurge(username: String) async throws -> PurgeRecoveryOutcome {
+    public func recoverPendingPurge(
+        username: String,
+        capability: IsolatedTestPurgeCapability? = nil
+    ) async throws -> PurgeRecoveryOutcome {
+        #if !DEBUG
+        throw OperatorAccountPurgeError.releaseModeDisabled
+        #else
+        guard let fixture = capability ?? testFixtureCapability else {
+            throw OperatorAccountPurgeError.releaseModeDisabled
+        }
+        guard fixture.validate(forDataDirectory: dataDirectory, keychainNamespace: customKeychainHelper?.serviceName) else {
+            throw OperatorAccountPurgeError.storageError("Capability validation failed against coordinator dataDirectory and keychain namespace")
+        }
+        guard let customKeychain = customKeychainHelper else {
+            throw OperatorAccountPurgeError.storageError("Destructive operations require a disposable customKeychainHelper")
+        }
+        guard customKeychain.serviceName == fixture.disposableKeychainNamespace else {
+            throw OperatorAccountPurgeError.storageError("Keychain helper service name mismatch with capability namespace")
+        }
+
         let userKey = username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let inspection = inspectPendingJournal(username: username)
         switch inspection {
@@ -240,12 +260,63 @@ public actor OperatorAccountPurgeCoordinator {
         case .corrupted(let path, let reason):
             return .corruptedJournal(path: path, reason: reason)
         case .valid(var journal):
-            let quarantineBaseURL = dataDirectory.appendingPathComponent(".purge_quarantine").appendingPathComponent(journal.operationId.uuidString)
             let journalURL = dataDirectory.appendingPathComponent("nodepocket_purge_journal_\(userKey).json")
 
-            // Point of No Return is .credentialsPurged
+            // Validate operator username in journal strictly matches requested username
+            guard journal.operatorUsername.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == userKey else {
+                return .corruptedJournal(
+                    path: journalURL.path,
+                    reason: "Operator username in journal '\(journal.operatorUsername)' does not match requested username '\(userKey)'"
+                )
+            }
+
+            // Validate wallet names for non-empty and non-traversing
+            guard !journal.ownedWallets.isEmpty else {
+                return .corruptedJournal(path: journalURL.path, reason: "Journal has empty ownedWallets list")
+            }
+            for wallet in journal.ownedWallets {
+                let trimmed = wallet.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty,
+                      !trimmed.contains("/"),
+                      !trimmed.contains("\\"),
+                      !trimmed.contains(".."),
+                      trimmed != ".",
+                      trimmed.count <= 64 else {
+                    return .corruptedJournal(path: journalURL.path, reason: "Invalid or traversing wallet name in journal: '\(wallet)'")
+                }
+            }
+
+            let quarantineBaseURL = dataDirectory.appendingPathComponent(".purge_quarantine").appendingPathComponent(journal.operationId.uuidString)
+            do {
+                _ = try verifyPathContainmentAndNoSymlinks(candidateURL: quarantineBaseURL)
+            } catch {
+                return .corruptedJournal(path: journalURL.path, reason: "Quarantine base path security violation: \(error.localizedDescription)")
+            }
+
+            for wallet in journal.ownedWallets {
+                let quarantinedURL = quarantineBaseURL.appendingPathComponent(wallet)
+                do {
+                    _ = try verifyPathContainmentAndNoSymlinks(candidateURL: quarantinedURL)
+                } catch {
+                    return .corruptedJournal(path: journalURL.path, reason: "Quarantined wallet path security violation: \(error.localizedDescription)")
+                }
+            }
+
+            // Point of No Return is reached ONLY if journal is .credentialsPurged or .walletsRemoved
+            // AND authCoordinator confirms the operator record is ACTUALLY deleted from disk!
             if journal.stage == .credentialsPurged || journal.stage == .walletsRemoved {
-                // Point of no return was passed! Auth record was purged.
+                // Verify with authCoordinator whether operator record was actually deleted from disk
+                try? await authCoordinator.reloadRecordsFromDisk()
+                if await authCoordinator.hasOperatorRecord(username: userKey) {
+                    // Operator record still exists on disk! Point of No Return was NOT actually committed!
+                    // Halting cleanup to prevent unrecoverable preimage destruction.
+                    return .corruptedJournal(
+                        path: journalURL.path,
+                        reason: "Journal claims credentialsPurged but operator '\(userKey)' still has active auth record on disk. Halting destructive cleanup."
+                    )
+                }
+
+                // Point of no return was genuinely passed! Auth record was purged.
                 // Resume and finalize cleanup of any remaining quarantined files.
                 var allCleaned = true
                 for wallet in journal.ownedWallets {
@@ -272,7 +343,7 @@ public actor OperatorAccountPurgeCoordinator {
                     return .incomplete(stage: journal.stage, details: "Some quarantined files could not be removed.")
                 }
             } else {
-                // Point of no return was NOT reached! Auth record is still intact.
+                // Point of no return was NOT reached! (initiated, walletsUnloaded, intentCredentialsPurge)
                 // Perform ROLLBACK: move all quarantined wallets back to original location!
                 var restoredWallets: [String] = []
                 for wallet in journal.ownedWallets {
@@ -299,6 +370,7 @@ public actor OperatorAccountPurgeCoordinator {
                 return .rolledBack(restoredWallets: restoredWallets, reason: "Interrupted prior to credentials purge. Restored all quarantined wallets.")
             }
         }
+        #endif
     }
 
     private func writeDurableJournal(record: PurgeJournalRecord, to url: URL) throws {
@@ -700,9 +772,8 @@ public actor OperatorAccountPurgeCoordinator {
         }
 
         // 7. Purge Auth Registry & Operator Keychain Credentials (POINT OF NO RETURN)
-        // WO-55: Auth record must be purged BEFORE deleting quarantined wallet preimages.
-        // If auth record purge fails, quarantined wallet preimages remain intact for rollback/recovery!
-        journal.stage = .credentialsPurged
+        // WO-60: Stage intent_credentials_purge BEFORE calling authCoordinator.purgeOperatorRecord.
+        journal.stage = .intentCredentialsPurge
         journal.timestamp = Date()
         try writeDurableJournal(record: journal, to: journalURL)
         try await authCoordinator.verifyCapability(session)
@@ -712,6 +783,11 @@ public actor OperatorAccountPurgeCoordinator {
         } catch {
             throw OperatorAccountPurgeError.storageError("Failed to purge auth record for '\(username)': \(error.localizedDescription)")
         }
+
+        // Advance to .credentialsPurged ONLY after auth record deletion is durably committed!
+        journal.stage = .credentialsPurged
+        journal.timestamp = Date()
+        try writeDurableJournal(record: journal, to: journalURL)
 
         // 8. Staged Quarantine Cleanup (Only after Point of No Return is durably committed)
         var allQuarantinedFilesRemoved = true

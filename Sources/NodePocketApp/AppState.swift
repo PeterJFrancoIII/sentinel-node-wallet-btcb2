@@ -723,7 +723,13 @@ public final class AppState: ObservableObject {
             return result
         }
 
-        let stagedAddresses = await self.stageReceiveAddresses(for: name, session: sessionBefore)
+        // WO-62: Explicitly establish initial addresses if needed, guarded by session equality
+        await self.ensureInitialReceiveAddresses(for: name, session: sessionBefore)
+        guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
+            return result
+        }
+
+        let stagedAddresses = self.stageReceiveAddresses(for: name)
         guard self.authSession?.id == sessionBefore?.id, self.authSession != nil else {
             return result
         }
@@ -1138,7 +1144,7 @@ public final class AppState: ObservableObject {
                 let snap = try? await walletManager.refreshWalletInfo(capability: sessionBefore)
                 guard self.authSession?.id == sessionBefore?.id, self.isWalletTabUnlocked else { return }
 
-                let stagedAddresses = await self.stageReceiveAddresses(for: name, session: sessionBefore)
+                let stagedAddresses = self.stageReceiveAddresses(for: name)
                 guard self.authSession?.id == sessionBefore?.id, self.isWalletTabUnlocked else { return }
 
                 let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: sessionBefore)) ?? []
@@ -1327,33 +1333,15 @@ public final class AppState: ObservableObject {
         }
     }
 
-    public func stageReceiveAddresses(
-        for walletName: String,
-        session: WalletAuthCapability?
-    ) async -> StagedReceiveAddresses {
+    /// Side-effect-free, pure read-only staging of existing receive addresses from ReceiveAddressStore.
+    /// Strictly avoids making any RPC calls or modifying node / store state.
+    public func stageReceiveAddresses(for walletName: String) -> StagedReceiveAddresses {
         guard !walletName.isEmpty else {
             return StagedReceiveAddresses(canonicalAddress: "", receiveAddress: "", activeAddresses: [], archivedAddresses: [])
         }
-
-        // 1. Establish or retrieve Canonical Receive Address (Permanent, locked to creation)
-        let canonical: String
-        if let canon = try? await walletManager.getOrCreateCanonicalAddress(for: walletName, capability: session) {
-            canonical = canon
-        } else {
-            canonical = receiveAddressStore.getCanonicalAddress(for: walletName) ?? ""
-        }
-
-        // 2. Establish or retrieve Temporary Receive Addresses (Rotatable, dynamic)
-        var temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
+        let canonical = receiveAddressStore.getCanonicalAddress(for: walletName) ?? ""
+        let temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
         let archived = receiveAddressStore.getArchivedAddresses(for: walletName)
-
-        // If no temporary addresses exist yet and none archived, generate the initial temporary address
-        if temps.isEmpty && archived.isEmpty {
-            if let _ = try? await walletManager.generateReceiveAddress(label: "Temporary Address 1", capability: session) {
-                temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
-            }
-        }
-
         let selected = temps.first?.address ?? ""
         return StagedReceiveAddresses(
             canonicalAddress: canonical,
@@ -1361,6 +1349,39 @@ public final class AppState: ObservableObject {
             activeAddresses: temps,
             archivedAddresses: archived
         )
+    }
+
+    /// Explicit, authorized generation of initial canonical or temporary addresses if missing.
+    /// Validates session equality and selected wallet identity before and after every RPC await.
+    public func ensureInitialReceiveAddresses(
+        for walletName: String,
+        session: WalletAuthCapability?
+    ) async {
+        guard let current = self.authSession,
+              current.id == session?.id,
+              self.isWalletTabUnlocked,
+              self.walletSnapshot?.name == walletName else {
+            return
+        }
+
+        // Establish canonical address if not present
+        if receiveAddressStore.getCanonicalAddress(for: walletName) == nil {
+            _ = try? await walletManager.getOrCreateCanonicalAddress(for: walletName, capability: session)
+        }
+
+        // Revalidate after await
+        guard let postCanonSession = self.authSession,
+              postCanonSession.id == session?.id,
+              self.isWalletTabUnlocked,
+              self.walletSnapshot?.name == walletName else {
+            return
+        }
+
+        let temps = receiveAddressStore.getTemporaryAddresses(for: walletName)
+        let archived = receiveAddressStore.getArchivedAddresses(for: walletName)
+        if temps.isEmpty && archived.isEmpty {
+            _ = try? await walletManager.generateReceiveAddress(label: "Temporary Address 1", capability: session)
+        }
     }
 
     @MainActor
@@ -1387,7 +1408,11 @@ public final class AppState: ObservableObject {
     @MainActor
     public func loadOrEstablishReceiveAddresses(for walletName: String) async {
         let currentSession = self.authSession
-        let staged = await stageReceiveAddresses(for: walletName, session: currentSession)
+        await ensureInitialReceiveAddresses(for: walletName, session: currentSession)
+        guard self.authSession?.id == currentSession?.id,
+              self.isWalletTabUnlocked,
+              self.walletSnapshot?.name == walletName else { return }
+        let staged = stageReceiveAddresses(for: walletName)
         commitStagedReceiveAddresses(staged, for: walletName, session: currentSession)
     }
 
@@ -1448,7 +1473,7 @@ public final class AppState: ObservableObject {
                 guard let target = currentTarget, !target.isEmpty else { return }
                 let snap = try await walletManager.refreshWalletInfo(capability: sessionBefore)
                 let txs = (try? await walletManager.fetchRecentTransactions(count: 30, capability: sessionBefore)) ?? []
-                let stagedAddresses = await stageReceiveAddresses(for: target, session: sessionBefore)
+                let stagedAddresses = stageReceiveAddresses(for: target)
 
                 await MainActor.run {
                     guard self.authSession?.id == sessionBefore.id,

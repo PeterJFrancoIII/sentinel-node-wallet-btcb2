@@ -235,6 +235,20 @@ struct ReleaseLockVerifier {
         }
         print("✓ Verified: Measured sentinel fixture (\(sentinelData.count) bytes) and directory contents before and after failed release purge: byte-for-byte identical, zero file deletions, zero file modifications, zero RPC calls. (Keychain, auth registry, and preferences non-mutation are source-inferred from pre-execution gate rejection.)")
 
+        // 8e. Direct invocation of recoverPendingPurge MUST throw OperatorAccountPurgeError.releaseModeDisabled in release binary (WO-59)
+        do {
+            _ = try await purgeCoord.recoverPendingPurge(username: "operator1")
+            fatalError("FAILURE: OperatorAccountPurgeCoordinator.recoverPendingPurge did NOT throw in release binary!")
+        } catch let err as OperatorAccountPurgeError {
+            if err == .releaseModeDisabled {
+                print("✓ Verified: OperatorAccountPurgeCoordinator.recoverPendingPurge threw OperatorAccountPurgeError.releaseModeDisabled in release binary.")
+            } else {
+                fatalError("FAILURE: recoverPendingPurge threw unexpected OperatorAccountPurgeError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: recoverPendingPurge threw unexpected error: \(error)")
+        }
+
         print("=== RELEASE BROADCAST & PURGE GATE VERIFICATION: 100% SUCCESS ===")
     }
 }
