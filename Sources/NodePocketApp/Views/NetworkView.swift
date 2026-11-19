@@ -207,7 +207,7 @@ public struct NetworkView: View {
                     Text("Range:")
                         .font(.caption)
                         .foregroundColor(.secondary)
-                    Picker("Rolling Window", selection: $state.selectedRollingWindow) {
+                    Picker("", selection: $state.selectedRollingWindow) {
                         ForEach(RollingHistoryWindow.allCases) { win in
                             Text(win.shortName).tag(win)
                         }
@@ -226,7 +226,7 @@ public struct NetworkView: View {
                 Text("MACD Parameters:")
                     .font(.caption)
                     .foregroundColor(.secondary)
-                Picker("MACD Preset", selection: $selectedPreset) {
+                Picker("", selection: $selectedPreset) {
                     ForEach(MACDPresetOption.allCases) { opt in
                         Text(opt.rawValue).tag(opt)
                     }
