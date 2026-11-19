@@ -44,10 +44,10 @@ public struct ReleaseTagValidator: Sendable {
 
     /// Validates a release tag against strict syntax and monotonic build number requirements.
     /// - Parameters:
-    ///   - tag: The candidate tag string (e.g. "v1.0.0-build5")
-    ///   - minimumBuildNumber: The highest previously published or active dev build (defaults to 4)
+    ///   - tag: The candidate tag string (e.g. "v1.0.0-build4")
+    ///   - minimumBuildNumber: The highest previously published release build (defaults to 3, allowing Build 4+)
     /// - Returns: ValidatedReleaseTag containing parsed components
-    public static func validateReleaseTag(_ tag: String, minimumBuildNumber: Int = 4) throws -> ValidatedReleaseTag {
+    public static func validateReleaseTag(_ tag: String, minimumBuildNumber: Int = 3) throws -> ValidatedReleaseTag {
         let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             throw ValidationError.emptyTag

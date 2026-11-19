@@ -77,8 +77,8 @@ jobs:
           VERSION="${VERSION%%-build*}"
           BUILD_NUM="${INPUT_TAG##*-build}"
 
-          if [ "${BUILD_NUM}" -le 4 ]; then
-            echo "ERROR: Build number ${BUILD_NUM} must be greater than 4 to maintain monotonic sequence (Build 4 is active)." >&2
+          if [ "${BUILD_NUM}" -le 3 ]; then
+            echo "ERROR: Build number ${BUILD_NUM} must be greater than 3 to maintain monotonic sequence (Build 3 is published)." >&2
             exit 1
           fi
 

@@ -6,6 +6,21 @@
         <description>Official updates and security notices for Sentinel Node Wallet BTCB2 / XBT.</description>
         <language>en</language>
         <item>
+            <title>Sentinel Node Wallet 1.0 (Build 4)</title>
+            <pubDate>Thu, 19 Nov 2026 23:10:00 +0000</pubDate>
+            <sparkle:releaseNotesLink>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build4</sparkle:releaseNotesLink>
+            <description>Sentinel Node Wallet v1.0 (Build 4): Direct-download production release for Apple Silicon (arm64). Features UI layout repairs, MACD toggle controls, Sparkle auto-update integration, and embedded Bitcoin Knots v29.4.3.knots20260508.</description>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build4/Sentinel-Node-Wallet-v1.0.0-Build4-macOS-arm64.dmg"
+                sparkle:version="4"
+                sparkle:shortVersionString="1.0"
+                sparkle:os="macos"
+                sparkle:cpu="arm64"
+                length="13927764"
+                type="application/octet-stream" />
+            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+        </item>
+        <item>
             <title>Sentinel Node Wallet 1.0 (Build 3)</title>
             <pubDate>Sun, 15 Nov 2026 00:00:00 +0000</pubDate>
             <sparkle:releaseNotesLink>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3</sparkle:releaseNotesLink>

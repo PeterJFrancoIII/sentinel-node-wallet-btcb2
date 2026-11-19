@@ -152,8 +152,8 @@ VERSION="${TAG#v}"
 VERSION="${VERSION%%-build*}"
 BUILD_NUM="${TAG##*-build}"
 
-if [ "${BUILD_NUM}" -le 4 ]; then
-    fail "Build number ${BUILD_NUM} must be greater than 4 (active development build is 4)."
+if [ "${BUILD_NUM}" -le 3 ]; then
+    fail "Build number ${BUILD_NUM} must be greater than 3 (active published build is 3)."
 fi
 
 # 1.5 Strict Sandbox Simulation Safety Invariants (WO-100 P0)

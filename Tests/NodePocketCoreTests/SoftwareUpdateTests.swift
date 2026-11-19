@@ -1005,10 +1005,10 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertNotEqual(liveBadBase64.status, 0)
         XCTAssertTrue(liveBadBase64.output.contains("not a valid canonical Base64 string"))
 
-        // 5. Non-monotonic build rejected (< 5)
+        // 5. Non-monotonic build rejected (<= 3)
         let nonMonotonic = runScript(args: ["--tag", "v1.0.0-build3", "--dry-run", "--allow-mock-for-dry-run"])
         XCTAssertNotEqual(nonMonotonic.status, 0)
-        XCTAssertTrue(nonMonotonic.output.contains("must be greater than 4"))
+        XCTAssertTrue(nonMonotonic.output.contains("must be greater than 3"))
 
         // 6. Invalid tag format rejected
         let invalidTag = runScript(args: ["--tag", "v1.0.0", "--dry-run", "--allow-mock-for-dry-run"])
