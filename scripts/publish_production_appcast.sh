@@ -9,11 +9,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 DIST_DIR="${ROOT_DIR}/dist"
 APPCAST_FILE="${DIST_DIR}/appcast.xml"
-BACKUP_FILE="${DIST_DIR}/appcast.xml.bak"
+
+# WO-89 P0: Stage exclusively in unique disposable temp outside operator repository.
+# Never touch, overwrite, or create backup files in the active source tree.
+TEMP_DIR="$(mktemp -d -t sentinel-appcast-XXXXXX)"
+cleanup() { rm -rf "${TEMP_DIR}" 2>/dev/null || true; }
+trap cleanup EXIT
 
 fail() { printf "APPCAST PUBLISHER BLOCKED: %s\n" "$*" >&2; exit 1; }
-cleanup() { rm -f "${BACKUP_FILE}" 2>/dev/null || true; }
-trap cleanup EXIT
 
 TAG=""
 DRY_RUN=1
@@ -291,13 +294,6 @@ PY
 fi
 
 # 4. Verify GitHub Release Asset HTTP Accessibility and Checksum (WO-83: Strong Asset Verification)
-TEMP_DIR="$(mktemp -d -t sentinel-appcast-XXXXXX)"
-cleanup_all() {
-    rm -rf "${TEMP_DIR}" 2>/dev/null || true
-    cleanup
-}
-trap cleanup_all EXIT
-
 TARGET_ARCHIVE=""
 ASSET_LENGTH=0
 
@@ -411,10 +407,13 @@ PY
     fi
 fi
 
-# 5. Monotonic Version Verification vs Existing Appcast Items
-cp "${APPCAST_FILE}" "${BACKUP_FILE}"
+# 5. Monotonic Version Verification vs Existing Appcast Items (WO-89: Staged in Isolated Temp)
+STAGING_ORIGINAL="${TEMP_DIR}/appcast_original.xml"
+STAGING_CANDIDATE="${TEMP_DIR}/appcast_candidate.xml"
 
-python3 - "${APPCAST_FILE}" "${BUILD_NUM}" "${VERSION}" <<'PY' || fail "Appcast monotonic version check failed."
+cp "${APPCAST_FILE}" "${STAGING_ORIGINAL}"
+
+python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" <<'PY' || fail "Appcast monotonic version check failed."
 import sys
 import xml.etree.ElementTree as ET
 
@@ -446,16 +445,16 @@ if existing_builds:
 print(f"✓ Monotonic check passed: candidate build {new_build} > existing builds {existing_builds}")
 PY
 
-# 6. Format and Insert New Item Block
+# 6. Format and Insert New Item Block into Isolated Candidate XML (WO-89: Zero Source Workspace Mutation)
 PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
 RELEASE_NOTES_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/${TAG}"
 
-python3 - "${APPCAST_FILE}" "${BACKUP_FILE}" "${BUILD_NUM}" "${VERSION}" "${RELEASE_URL}" "${ED_SIGNATURE}" "${ASSET_LENGTH}" "${PUB_DATE}" "${RELEASE_NOTES_URL}" "${DRY_RUN}" <<'PY' || fail "Failed to generate valid updated appcast.xml."
+python3 - "${STAGING_ORIGINAL}" "${STAGING_CANDIDATE}" "${BUILD_NUM}" "${VERSION}" "${RELEASE_URL}" "${ED_SIGNATURE}" "${ASSET_LENGTH}" "${PUB_DATE}" "${RELEASE_NOTES_URL}" "${DRY_RUN}" <<'PY' || fail "Failed to generate valid updated appcast.xml."
 import sys
 import xml.etree.ElementTree as ET
 
-appcast_path = sys.argv[1]
-backup_path = sys.argv[2]
+original_path = sys.argv[1]
+candidate_path = sys.argv[2]
 build_num = sys.argv[3]
 version = sys.argv[4]
 asset_url = sys.argv[5]
@@ -465,7 +464,7 @@ pub_date = sys.argv[8]
 notes_url = sys.argv[9]
 is_dry_run = sys.argv[10] == "1"
 
-with open(backup_path, "r", encoding="utf-8") as f:
+with open(original_path, "r", encoding="utf-8") as f:
     original_xml = f.read()
 
 new_item = f"""        <item>
@@ -497,39 +496,48 @@ except ET.ParseError as e:
     print(f"ERROR: Generated appcast XML failed parsing: {e}", file=sys.stderr)
     sys.exit(1)
 
-if not is_dry_run:
-    with open(appcast_path, "w", encoding="utf-8") as f:
-        f.write(updated_xml)
-    print("✓ dist/appcast.xml successfully updated.")
-else:
+# Write updated XML to isolated staging file (never active source tree)
+with open(candidate_path, "w", encoding="utf-8") as f:
+    f.write(updated_xml)
+
+if is_dry_run:
     print("=== [DRY RUN] Generated Item Block ===")
     print(new_item)
     print("======================================")
+else:
+    print(f"✓ Isolated staging appcast generated successfully at {candidate_path}")
 PY
 
-# 7. Transactional Feed Publish to Main via Isolated Git Worktree (WO-84: Zero Local Mutation)
+# 7. Transactional Feed Publish to Main via Isolated Git Worktree (WO-84, WO-89: Zero Source Workspace Mutation)
 if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
-    echo "Publishing dist/appcast.xml to main branch via isolated git worktree..."
+    echo "Publishing candidate appcast to origin/main branch via isolated git worktree..."
     WORKTREE_DIR="$(mktemp -d -t sentinel-worktree-XXXXXX)"
     cleanup_worktree() {
         git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || rm -rf "${WORKTREE_DIR}" 2>/dev/null || true
     }
-    trap 'cleanup_worktree; cleanup_all' EXIT
+    trap 'cleanup_worktree; cleanup' EXIT
 
     # Create isolated detached worktree directly from origin/main
     git worktree add --detach "${WORKTREE_DIR}" "origin/main" || fail "Failed to create isolated worktree from origin/main."
 
     mkdir -p "${WORKTREE_DIR}/dist"
-    cp "${APPCAST_FILE}" "${WORKTREE_DIR}/dist/appcast.xml"
+    cp "${STAGING_CANDIDATE}" "${WORKTREE_DIR}/dist/appcast.xml"
+
+    # Verify worktree status modifies exclusively dist/appcast.xml
+    CHANGED_FILES="$(git -C "${WORKTREE_DIR}" status --porcelain | awk '{print $2}')"
+    if [ "${CHANGED_FILES}" != "dist/appcast.xml" ]; then
+        fail "Worktree mutation invariant violated: unexpected changed files: ${CHANGED_FILES}"
+    fi
 
     git -C "${WORKTREE_DIR}" add dist/appcast.xml
-    git -C "${WORKTREE_DIR}" commit -m "chore(feed): publish Sparkle appcast for ${TAG} (WO-84)"
+    git -C "${WORKTREE_DIR}" commit -m "chore(feed): publish Sparkle appcast for ${TAG} (WO-84, WO-89)"
     git -C "${WORKTREE_DIR}" push origin HEAD:main || fail "Failed to push updated feed to origin/main."
 
     git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
     echo "✓ Production appcast published successfully to origin/main via isolated worktree."
+    echo "✓ Active working directory remained 100% untouched and unmutated."
 else
-    echo "Dry-run validation complete. Working directory and dist/appcast.xml were NOT mutated on disk."
+    echo "Dry-run validation complete. Active working directory and dist/appcast.xml were NOT mutated on disk."
 fi
 
 echo "=== Appcast Publisher Finished Successfully ==="

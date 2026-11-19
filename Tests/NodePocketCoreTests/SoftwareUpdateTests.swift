@@ -1095,5 +1095,50 @@ final class SoftwareUpdateTests: XCTestCase {
         ])
         XCTAssertNotEqual(missingToolRun.status, 0, "Missing sign_update in live mode must fail closed")
         XCTAssertTrue(missingToolRun.output.contains("sign_update binary is required in live mode"))
+
+        // MARK: - WO-89 Zero Source Workspace Mutation and Immutable Staging Tests
+
+        func gitStatusPorcelain() -> String {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.currentDirectoryURL = repoRoot
+            proc.arguments = ["status", "--porcelain=v2"]
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8) ?? ""
+        }
+
+        let preStatus = gitStatusPorcelain()
+
+        // 13. Publisher execution must leave active git workspace 100% untouched across all runs
+        _ = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+
+        let postStatusDryRun = gitStatusPorcelain()
+        XCTAssertEqual(preStatus, postStatusDryRun, "Git status must remain 100% unchanged after dry-run")
+
+        // Also verify failure run leaves workspace untouched
+        _ = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--signature", shortSignatureB64,
+            "--public-key", pubKeyB64
+        ])
+
+        let postStatusFailure = gitStatusPorcelain()
+        XCTAssertEqual(preStatus, postStatusFailure, "Git status must remain 100% unchanged after validation failure")
+
+        // Ensure no backup file was created in dist/
+        let backupFile = repoRoot.appendingPathComponent("dist/appcast.xml.bak")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupFile.path), "dist/appcast.xml.bak must never be created in working copy")
     }
 }
