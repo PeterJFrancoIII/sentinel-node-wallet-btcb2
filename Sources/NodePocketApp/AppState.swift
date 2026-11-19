@@ -44,6 +44,8 @@ public final class AppState: ObservableObject {
     @Published public var alertMessage: String?
     @Published public var showAlert: Bool = false
     @Published public var showUninstallWipeSheet: Bool = false
+    @Published public var showSettingsSheet: Bool = false
+    @Published public var activeSettingsTab: Int = 0
 
     // Ultra Power Management
     @Published public var powerState: MacPowerState = .unknown

@@ -24,14 +24,18 @@ public struct AdvancedSheet: View {
     @State private var wipeErrorMessage: String? = nil
     @State private var uninstallResult: AppState.UninstallResult? = nil
 
+    public init(initialTab: Int = 0) {
+        _settingsTab = State(initialValue: initialTab)
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Advanced Node & Storage Settings")
+                    Text(settingsTab == 1 ? "Software Updates & Maintenance" : (settingsTab == 2 ? "Full Uninstallation & Data Wipe" : "Advanced Node & Storage Settings"))
                         .font(.title2)
                         .bold()
-                    Text("Configure storage modes, pruning limits, and sync intensity")
+                    Text(settingsTab == 1 ? "Configure automatic updates, release channels, and check for new releases" : (settingsTab == 2 ? "Permanently remove blockchain data and uninstall application" : "Configure storage modes, pruning limits, and sync intensity"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
