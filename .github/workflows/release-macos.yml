@@ -1,0 +1,144 @@
+name: macOS Production Release & Sparkle Deployment
+
+on:
+  push:
+    tags:
+      - 'v*.*.*-build*'
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Git release tag to publish (e.g. v1.0.0-build4)'
+        required: true
+        type: string
+      is_draft:
+        description: 'Publish release as a Draft (recommended for verification)'
+        required: true
+        type: boolean
+        default: true
+      is_prerelease:
+        description: 'Publish release as a Pre-release (Beta channel)'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: production-release-macos
+  cancel-in-progress: false
+
+jobs:
+  qualify-and-release:
+    name: Qualify, Sign, Notarize & Publish
+    runs-on: macos-latest
+    timeout-minutes: 45
+    environment: production-release
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Display Swift toolchain
+        run: swift --version
+
+      # Gating Stage 1: Full Automated Test Suite
+      - name: Run native unit tests
+        run: swift test
+
+      # Gating Stage 2: Verify Release Broadcast Lock & Purge Safety (WO-25, WO-39, WO-44, WO-59)
+      - name: Verify release broadcast lock and spend gate enforcement
+        run: swift run -c release VerifyReleaseBroadcastLock
+
+      # Gating Stage 3: Packaging Shell Syntax Validation
+      - name: Validate script syntax
+        run: |
+          bash -n scripts/build_app.sh \
+                  scripts/build_dmg.sh \
+                  scripts/build_production_dmg.sh \
+                  scripts/sign_appcast_enclosure.sh \
+                  scripts/fetch-verify-knots.sh \
+                  scripts/package_appstore_archive.sh
+
+      # Gating Stage 4: Verify Bitcoin Knots Binary Provenance
+      - name: Cache & verify official Bitcoin Knots binaries
+        run: bash scripts/fetch-verify-knots.sh
+
+      # Gating Stage 5: Environment & Secrets Verification
+      - name: Verify production signing prerequisites
+        id: check-secrets
+        run: |
+          HAS_DEV_ID="false"
+          HAS_NOTARY="false"
+          HAS_SPARKLE_KEY="false"
+
+          if [ -n "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ] && [ -n "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ]; then
+            HAS_DEV_ID="true"
+          fi
+          if [ -n "${{ secrets.NOTARY_API_KEY_BASE64 }}" ] && [ -n "${{ secrets.NOTARY_KEY_ID }}" ] && [ -n "${{ secrets.NOTARY_ISSUER_ID }}" ]; then
+            HAS_NOTARY="true"
+          fi
+          if [ -n "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}" ] && [ -n "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}" ]; then
+            HAS_SPARKLE_KEY="true"
+          fi
+
+          echo "has_dev_id=${HAS_DEV_ID}" >> $GITHUB_OUTPUT
+          echo "has_notary=${HAS_NOTARY}" >> $GITHUB_OUTPUT
+          echo "has_sparkle_key=${HAS_SPARKLE_KEY}" >> $GITHUB_OUTPUT
+
+          if [ "${HAS_DEV_ID}" != "true" ] || [ "${HAS_NOTARY}" != "true" ] || [ "${HAS_SPARKLE_KEY}" != "true" ]; then
+            echo "WARNING: Production signing credentials incomplete."
+            echo "  Developer ID Certificate: ${HAS_DEV_ID}"
+            echo "  Notarization API Key:    ${HAS_NOTARY}"
+            echo "  Sparkle Ed25519 Keys:    ${HAS_SPARKLE_KEY}"
+            echo "Production binary signing and notarization will be blocked fail-closed."
+          fi
+
+      # Build Stage
+      - name: Build macOS App Bundle
+        env:
+          SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          SENTINEL_REQUIRE_SPARKLE_KEY: ${{ steps.check-secrets.outputs.has_sparkle_key == 'true' && '1' || '0' }}
+        run: |
+          bash scripts/build_app.sh
+          plutil -lint "dist/Sentinel Node Wallet.app/Contents/Info.plist"
+
+      # Packaging Stage
+      - name: Build and Package DMG
+        run: bash scripts/build_dmg.sh
+
+      # Sparkle Signing & Appcast Generation
+      - name: Sign DMG with Sparkle EdDSA Key
+        if: steps.check-secrets.outputs.has_sparkle_key == 'true'
+        env:
+          SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
+        run: |
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64.dmg | head -n 1)"
+          bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
+          cat dist/SPARKLE_ENCLOSURE.txt
+
+      # Release Asset Upload
+      - name: Publish GitHub Release
+        if: steps.check-secrets.outputs.has_dev_id == 'true' && steps.check-secrets.outputs.has_notary == 'true' && steps.check-secrets.outputs.has_sparkle_key == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          DRAFT_FLAG=""
+          if [ "${{ github.event.inputs.is_draft }}" = "true" ]; then
+            DRAFT_FLAG="--draft"
+          fi
+          PRERELEASE_FLAG=""
+          if [ "${{ github.event.inputs.is_prerelease }}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "${TAG}" \
+            dist/Sentinel-Node-Wallet-*-macOS-arm64.dmg \
+            dist/SHA256SUMS.txt \
+            dist/BUILD_MANIFEST.json \
+            --title "Sentinel Node Wallet (${TAG})" \
+            --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
+            ${DRAFT_FLAG} ${PRERELEASE_FLAG}

@@ -78,13 +78,21 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     // MARK: - SPUUpdaterDelegate
 
     public func bestValidUpdate(in appcast: SUAppcast, for updater: SPUUpdater) -> SUAppcastItem? {
-        guard let target = selectedRelease else { return nil }
+        guard let target = selectedRelease else {
+            // Returning nil instructs Sparkle to use its built-in comparator to select
+            // the newest valid, compatible, and unskipped update item from the appcast.
+            return nil
+        }
         for item in appcast.items {
             if item.versionString == target.version.rawString ||
-               item.displayVersionString == target.version.shortDescription {
+               item.displayVersionString == target.version.shortDescription ||
+               item.versionString == target.tagName ||
+               (target.version.build != nil && item.versionString == "\(target.version.build!)") {
                 return item
             }
         }
+        // If the explicit operator selection is not present in the appcast,
+        // return nil to fall back to Sparkle's standard resolution rather than blocking.
         return nil
     }
 

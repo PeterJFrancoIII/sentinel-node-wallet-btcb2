@@ -8,7 +8,9 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${ROOT_DIR}"
 
-BUNDLE_ID="${SENTINEL_BUNDLE_ID:-app.nodepocket.btcb2}"
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
+SHORT_VERSION="${SENTINEL_SHORT_VERSION:-1.0.0}"
+BUILD_NUMBER="${SENTINEL_BUILD_NUMBER:-4}"
 
 # Build release configuration with Swift Package Manager
 swift build -c release --arch arm64
@@ -86,9 +88,9 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${SHORT_VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>${BUILD_NUMBER}</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
@@ -96,9 +98,9 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.finance</string>
     <key>SUEnableAutomaticChecks</key>
-    <false/>
+    <true/>
     <key>SUAllowsAutomaticUpdates</key>
-    <false/>
+    <true/>
     <key>SUFeedURL</key>
     <string>https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml</string>
 </dict>
@@ -107,7 +109,10 @@ EOF
 
 if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
     echo "Injecting SUPublicEDKey into Info.plist..."
-    /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_PUBLIC_ED_KEY}" "${APP_BUNDLE}/Contents/Info.plist" 2>/dev/null || true
+    /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_PUBLIC_ED_KEY}" "${APP_BUNDLE}/Contents/Info.plist"
+elif [ "${SENTINEL_REQUIRE_SPARKLE_KEY:-0}" = "1" ]; then
+    echo "ERROR: SUPublicEDKey is strictly required for production release but SPARKLE_PUBLIC_ED_KEY is not set." >&2
+    exit 1
 fi
 
 # Code sign with Apple Development identity or ad-hoc fallback

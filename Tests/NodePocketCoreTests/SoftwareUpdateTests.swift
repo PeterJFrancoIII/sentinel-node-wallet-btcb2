@@ -496,4 +496,152 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertTrue(ctx.shutdownInvoked)
         XCTAssertTrue(ctx.installHandlerInvoked)
     }
+
+    // MARK: - WO-68 Native Cutover & Sparkle Edge Case Tests
+
+    func testBuild3ToBuild4EligibleUpdateDiscovery() {
+        let resolver = GitHubReleaseResolver()
+        let installedBuild3 = AppVersion.parse("1.0 (build 3)")!
+
+        let build3Release = AppReleaseInfo(
+            id: "b3",
+            tagName: "v1.0.0-build3",
+            version: installedBuild3,
+            name: "Sentinel Node Wallet 1.0 (Build 3)",
+            releaseNotes: "Legacy ad-hoc build",
+            publishedAt: Date(timeIntervalSince1970: 1731628800),
+            architecture: .arm64
+        )
+
+        let build4Release = AppReleaseInfo(
+            id: "b4",
+            tagName: "v1.0.0-build4",
+            version: AppVersion.parse("1.0.0 (build 4)")!,
+            name: "Sentinel Node Wallet 1.0 (Build 4)",
+            releaseNotes: "Sparkle 2 auto-update cutover and recovery hardening",
+            publishedAt: Date(),
+            downloadUrl: URL(string: "https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build4/Sentinel-Node-Wallet-v1.0-Build4-macOS-arm64.dmg"),
+            downloadSize: 12450000,
+            architecture: .arm64,
+            sparkleEdSignature: "mock_valid_signature_base64_==",
+            minOSVersion: "13.0"
+        )
+
+        let result = resolver.findEligibleUpdate(
+            from: [build3Release, build4Release],
+            installedVersion: installedBuild3,
+            hostArchitecture: .arm64,
+            channel: .stable
+        )
+
+        switch result {
+        case .success(let eligible):
+            XCTAssertNotNil(eligible)
+            XCTAssertEqual(eligible?.version.build, 4)
+            XCTAssertEqual(eligible?.tagName, "v1.0.0-build4")
+            XCTAssertEqual(eligible?.sparkleEdSignature, "mock_valid_signature_base64_==")
+        case .failure(let err):
+            XCTFail("Expected eligible Build 4 update, got failure: \(err)")
+        }
+    }
+
+    func testMalformedAppcastXMLFailsClosed() {
+        let badXML = "<rss><channel><item><title>Broken XML without closing tag".data(using: .utf8)!
+        XCTAssertThrowsError(try SparkleAppcastParser.parse(xmlData: badXML)) { error in
+            guard let updateError = error as? SoftwareUpdateError,
+                  case .invalidAppcast = updateError else {
+                XCTFail("Expected SoftwareUpdateError.invalidAppcast, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testEmptyAppcastReturnsZeroReleases() throws {
+        let emptyXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0">
+            <channel>
+                <title>No Releases</title>
+            </channel>
+        </rss>
+        """.data(using: .utf8)!
+
+        let releases = try SparkleAppcastParser.parse(xmlData: emptyXML)
+        XCTAssertTrue(releases.isEmpty)
+
+        let resolver = GitHubReleaseResolver()
+        let installed = AppVersion.parse("1.0 (build 3)")!
+        let result = resolver.findEligibleUpdate(from: releases, installedVersion: installed)
+        XCTAssertEqual(try? result.get(), nil, "Empty appcast must return nil eligible update")
+    }
+
+    func testHostArchitectureGatingIneligibleIntelRejection() {
+        let resolver = GitHubReleaseResolver()
+        let installed = AppVersion.parse("1.0 (build 3)")!
+
+        let arm64OnlyRelease = AppReleaseInfo(
+            id: "arm64_only",
+            tagName: "v1.0.0-build4",
+            version: AppVersion.parse("1.0.0 (build 4)")!,
+            name: "Arm64 Build",
+            releaseNotes: "Apple Silicon only",
+            publishedAt: Date(),
+            architecture: .arm64
+        )
+
+        let result = resolver.findEligibleUpdate(
+            from: [arm64OnlyRelease],
+            installedVersion: installed,
+            hostArchitecture: .x86_64, // Host is x86_64
+            channel: .stable
+        )
+
+        switch result {
+        case .success:
+            XCTFail("Intel host must NOT be offered arm64-only binary")
+        case .failure(let err):
+            guard case .incompatibleArchitecture(let target, let host) = err else {
+                XCTFail("Expected incompatibleArchitecture, got \(err)")
+                return
+            }
+            XCTAssertEqual(target, AppArchitecture.arm64)
+            XCTAssertEqual(host, AppArchitecture.x86_64)
+        }
+    }
+
+    func testBackgroundCheckSafetyNeverStopsNode() async {
+        final class StopContext: @unchecked Sendable {
+            var nodeStopInvoked = false
+        }
+        let ctx = StopContext()
+        let stopAction: @Sendable () async throws -> Void = {
+            ctx.nodeStopInvoked = true
+        }
+
+        let installed = AppVersion.parse("1.0 (build 3)")!
+        let driver = MockUpdateDriver(status: .idle, distributionChannel: .directGitHub)
+        driver.installedVersion = installed
+
+        let newer = AppReleaseInfo(
+            id: "b4",
+            tagName: "v1.0.0-build4",
+            version: AppVersion.parse("1.0.0 (build 4)")!,
+            name: "Build 4",
+            releaseNotes: "Security update",
+            publishedAt: Date(),
+            architecture: .arm64
+        )
+        driver.mockReleases = [newer]
+
+        // Running an update check (whether background or manual) must NEVER invoke graceful node shutdown!
+        let status = try? await driver.checkForUpdates(isUserInitiated: false)
+        XCTAssertFalse(ctx.nodeStopInvoked, "Background check must never terminate node")
+        if case .updateAvailable(let rel) = status {
+            XCTAssertEqual(rel.version.build, 4)
+        }
+
+        // Only explicitly installing update triggers node shutdown
+        try? await stopAction()
+        XCTAssertTrue(ctx.nodeStopInvoked, "Confirmed node shutdown invoked only on deliberate install")
+    }
 }

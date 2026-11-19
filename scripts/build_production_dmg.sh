@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 DIST="${ROOT_DIR}/dist"
-BUNDLE_ID="${SENTINEL_BUNDLE_ID:-app.nodepocket.btcb2}"
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
 fail() { printf "RELEASE BLOCKED: %s\n" "$*" >&2; exit 1; }
 require() { local key="$1"; [ -n "${!key:-}" ] || fail "Missing required setting ${key}"; }
 
@@ -52,6 +52,8 @@ PY
 plutil -lint "${APP}/Contents/Info.plist" >/dev/null
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist" 2>/dev/null || echo "${BUNDLE_ID}")"
 [ "${ACTUAL_BUNDLE_ID}" = "${BUNDLE_ID}" ] || fail "CFBundleIdentifier in Info.plist (${ACTUAL_BUNDLE_ID}) does not match expected BUNDLE_ID (${BUNDLE_ID})"
+PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${APP}/Contents/Info.plist" 2>/dev/null || true)"
+[ -n "${PUBLIC_KEY}" ] || fail "App bundle Info.plist missing mandatory SUPublicEDKey for production auto-update."
 
 ENTITLEMENTS="${DIST}/Production.entitlements.plist"
 cat > "${ENTITLEMENTS}" <<EOF
