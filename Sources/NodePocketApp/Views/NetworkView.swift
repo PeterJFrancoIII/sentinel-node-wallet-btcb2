@@ -177,27 +177,30 @@ public struct NetworkView: View {
 
         return VStack(alignment: .leading, spacing: 14) {
             // Header Row: Title, Badge, Sample Count, and Window Selector
-            HStack(alignment: .center) {
+            HStack(alignment: .center, spacing: 12) {
                 HStack(spacing: 8) {
                     Image(systemName: "chart.dots.scatter")
                         .font(.system(size: 16, weight: .semibold))
                         .foregroundColor(.cyan)
                     Text("Rolling Hashrate History (\(window.rawValue)-Block Dot Plot)")
                         .font(.headline)
+                        .lineLimit(1)
                     Text("\(window.rawValue)-Block MACD Indicator")
                         .font(.caption)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
                         .background(Capsule().fill(Color.cyan.opacity(0.15)))
                         .foregroundColor(.cyan)
+                        .lineLimit(1)
                     if macdReport.points.count < window.rawValue {
                         Text("(\(macdReport.points.count)/\(window.rawValue) blocks)")
                             .font(.caption2)
                             .foregroundColor(.secondary)
+                            .lineLimit(1)
                     }
                 }
 
-                Spacer()
+                Spacer(minLength: 12)
 
                 // Rolling Window Selector [30, 60, 120, 240, 480, 960]
                 HStack(spacing: 6) {
@@ -210,10 +213,12 @@ public struct NetworkView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .labelsHidden()
                     .controlSize(.small)
-                    .frame(maxWidth: 240)
+                    .fixedSize()
                     .accessibilityLabel("Select rolling block history range")
                 }
+                .layoutPriority(1)
             }
 
             // Controls Sub-Row: MACD Preset Picker & Descriptions
@@ -228,8 +233,8 @@ public struct NetworkView: View {
                         }
                     }
                     .pickerStyle(.menu)
+                    .labelsHidden()
                     .controlSize(.small)
-                    .frame(maxWidth: 280)
                     .accessibilityLabel("Select MACD indicator preset")
                 }
 
