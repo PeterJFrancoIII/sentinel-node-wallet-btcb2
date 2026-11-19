@@ -16,7 +16,7 @@
                 sparkle:shortVersionString="1.0"
                 sparkle:os="macos"
                 sparkle:cpu="arm64"
-                length="13927764"
+                length="13927630"
                 type="application/octet-stream" />
             <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
         </item>
