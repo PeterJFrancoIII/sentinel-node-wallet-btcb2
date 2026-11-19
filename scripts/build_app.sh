@@ -117,13 +117,15 @@ fi
 
 # Code sign with Apple Development identity or ad-hoc fallback
 DEV_IDENTITY="${SENTINEL_DEVELOPER_IDENTITY:-Apple Development: Peter Franco (89V8F6QJC2)}"
-ENTITLEMENTS_FLAG=()
-
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "${DEV_IDENTITY}"; then
-    echo "Signing with Developer Identity: ${DEV_IDENTITY}"
+# Provisioned or explicit entitlements handling:
+# On macOS, keychain-access-groups requires an Apple-signed embedded provisioning profile.
+# Without a provisioning profile, embedding keychain-access-groups causes AMFI code signature
+# validation failure (exit code 137 SIGKILL) under hardened runtime on Apple Silicon.
+ENTITLEMENTS_PATH=""
+if [ -n "${SENTINEL_ENTITLEMENTS_FILE:-}" ] && [ -f "${SENTINEL_ENTITLEMENTS_FILE}" ]; then
+    ENTITLEMENTS_PATH="${SENTINEL_ENTITLEMENTS_FILE}"
+elif [ -f "${APP_BUNDLE}/Contents/embedded.provisionprofile" ]; then
     DEV_TEAM_ID="${SENTINEL_APPLE_TEAM_ID:-S8QMQZA656}"
-    
-    # WO-23: Expand $(TeamIdentifierPrefix) into actual concrete Team ID so codesign embeds valid access group
     DEV_ENTITLEMENTS="${ROOT_DIR}/dist/Development.entitlements.plist"
     cat <<EOF > "${DEV_ENTITLEMENTS}"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -137,14 +139,21 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "${DEV_IDENTIT
 </dict>
 </plist>
 EOF
-    ENTITLEMENTS_FLAG=(--entitlements "${DEV_ENTITLEMENTS}")
+    ENTITLEMENTS_PATH="${DEV_ENTITLEMENTS}"
+fi
 
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "${DEV_IDENTITY}"; then
+    echo "Signing with Developer Identity: ${DEV_IDENTITY}"
     if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
         find "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" -type f -perm +111 -exec \
             codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" {} +
         codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
     fi
-    codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${ENTITLEMENTS_FLAG[@]}" "${APP_BUNDLE}"
+    if [ -n "${ENTITLEMENTS_PATH}" ]; then
+        codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime --entitlements "${ENTITLEMENTS_PATH}" "${APP_BUNDLE}"
+    else
+        codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
+    fi
 else
     echo "Signing with ad-hoc identity"
     if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
