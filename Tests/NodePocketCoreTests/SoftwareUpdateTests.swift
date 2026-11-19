@@ -730,4 +730,110 @@ final class SoftwareUpdateTests: XCTestCase {
             XCTFail("Unexpected failure on stale feed check: \(err)")
         }
     }
+
+    // MARK: - WO-76 Release Tag Grammar, Monotonic Build & Operator Approval Validation
+
+    func testReleaseTagStrictRegexAndGrammarValidation() throws {
+        // Valid tags matching ^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$ with build > 4
+        let validTags = [
+            "v1.0.0-build5",
+            "v1.0.1-build6",
+            "v2.0.0-build10",
+            "v10.20.30-build100"
+        ]
+        for tag in validTags {
+            XCTAssertNoThrow(try ReleaseTagValidator.validateReleaseTag(tag, minimumBuildNumber: 4))
+            let validated = try ReleaseTagValidator.validateReleaseTag(tag, minimumBuildNumber: 4)
+            XCTAssertEqual(validated.rawTag, tag)
+            XCTAssertGreaterThan(validated.buildNumber, 4)
+        }
+
+        // Invalid tags: missing 'v' prefix, missing build, prerelease string, injection tokens, empty
+        let invalidTags = [
+            "",
+            "   ",
+            "1.0.0-build5",          // missing leading 'v'
+            "v1.0.0",                // missing build suffix
+            "v1.0.0-build",          // non-numeric build
+            "v1.0.0-beta-build5",    // prerelease token disallowed in strict release regex
+            "v1.0-build5",           // two-component version
+            "v1.0.0.0-build5",       // four-component version
+            "v1.0.0-build5; rm -rf /", // shell injection payload
+            "v1.0.0-build5\n",       // trailing newline
+            "refs/tags/v1.0.0-build5" // ref path
+        ]
+        for tag in invalidTags {
+            XCTAssertThrowsError(try ReleaseTagValidator.validateReleaseTag(tag, minimumBuildNumber: 4)) { error in
+                guard let valError = error as? ReleaseTagValidator.ValidationError else {
+                    XCTFail("Expected ReleaseTagValidator.ValidationError, got \(error)")
+                    return
+                }
+                if tag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    XCTAssertEqual(valError, .emptyTag)
+                } else {
+                    XCTAssertEqual(valError, .invalidFormat(tag))
+                }
+            }
+        }
+    }
+
+    func testMonotonicReleaseBuildEnforcement() {
+        // Active dev build is 4. Candidate production release builds must be strictly > 4.
+        let nonMonotonicTags = [
+            "v1.0.0-build0",
+            "v1.0.0-build1",
+            "v1.0.0-build3",
+            "v1.0.0-build4"
+        ]
+        for tag in nonMonotonicTags {
+            XCTAssertThrowsError(try ReleaseTagValidator.validateReleaseTag(tag, minimumBuildNumber: 4)) { error in
+                guard case .nonMonotonicBuild(let build, let min) = error as? ReleaseTagValidator.ValidationError else {
+                    XCTFail("Expected nonMonotonicBuild, got \(error)")
+                    return
+                }
+                XCTAssertEqual(min, 4)
+                XCTAssertLessThanOrEqual(build, 4)
+            }
+        }
+
+        // Monotonic builds > 4 succeed
+        XCTAssertNoThrow(try ReleaseTagValidator.validateReleaseTag("v1.0.0-build5", minimumBuildNumber: 4))
+        XCTAssertNoThrow(try ReleaseTagValidator.validateReleaseTag("v1.0.0-build6", minimumBuildNumber: 4))
+    }
+
+    func testOperatorReleaseAuthorizationValidation() {
+        // Only exact uppercase "YES" is accepted
+        XCTAssertNoThrow(try ReleaseTagValidator.validateOperatorApproval("YES"))
+
+        let invalidApprovals = [
+            "NO",
+            "yes",
+            "Yes",
+            "true",
+            "1",
+            "",
+            "CONFIRM",
+            "APPROVED"
+        ]
+        for approval in invalidApprovals {
+            XCTAssertThrowsError(try ReleaseTagValidator.validateOperatorApproval(approval)) { error in
+                guard case .operatorApprovalMissing(let received) = error as? ReleaseTagValidator.ValidationError else {
+                    XCTFail("Expected operatorApprovalMissing, got \(error)")
+                    return
+                }
+                XCTAssertEqual(received, approval)
+            }
+        }
+    }
+
+    func testTagParsingExtractsVersionAndBuild() throws {
+        let tag = "v1.2.3-build42"
+        let validated = try ReleaseTagValidator.validateReleaseTag(tag, minimumBuildNumber: 4)
+        XCTAssertEqual(validated.rawTag, "v1.2.3-build42")
+        XCTAssertEqual(validated.version, "1.2.3")
+        XCTAssertEqual(validated.major, 1)
+        XCTAssertEqual(validated.minor, 2)
+        XCTAssertEqual(validated.patch, 3)
+        XCTAssertEqual(validated.buildNumber, 42)
+    }
 }

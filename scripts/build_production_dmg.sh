@@ -117,7 +117,8 @@ cat > "${DIST}/BUILD_MANIFEST.json" <<EOF
 EOF
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")"
-DMG="${DIST}/Sentinel-Node-Wallet-BTCB2-v${VERSION}-macOS-arm64-notarized.dmg"
+BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP}/Contents/Info.plist" 2>/dev/null || echo "0")"
+DMG="${DIST}/Sentinel-Node-Wallet-BTCB2-v${VERSION}-build${BUILD}-macOS-arm64-notarized.dmg"
 STAGING="${DIST}/dmg_staging"
 mkdir -p "${STAGING}"
 cp -R "${APP}" "${STAGING}/"
@@ -138,6 +139,11 @@ PY
 xcrun stapler staple "${DMG}"
 xcrun stapler validate "${DMG}"
 hdiutil verify "${DMG}" >/dev/null
+
+# Verify Gatekeeper compliance on signed application bundle
+spctl --assess --type open --context context:primary-signature --verbose "${APP}" ||
+    fail "Gatekeeper spctl assessment failed on signed app bundle."
+
 shasum -a 256 "${DMG}" > "${DIST}/SHA256SUMS.txt"
 printf "Notarized build candidate: %s\n" "${DMG}"
 printf "No production deployment or real-funds authorization is implied.\n"

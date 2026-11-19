@@ -1,15 +1,17 @@
 name: macOS Production Release & Sparkle Deployment
 
 on:
-  push:
-    tags:
-      - 'v*.*.*-build*'
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Git release tag to publish (e.g. v1.0.0-build4)'
+        description: 'Git release tag to publish (e.g. v1.0.0-build5)'
         required: true
         type: string
+      operator_approval_confirmed:
+        description: 'Explicit human operator release approval confirmation (type YES to confirm)'
+        required: true
+        type: string
+        default: 'NO'
       is_draft:
         description: 'Publish release as a Draft (recommended for verification)'
         required: true
@@ -67,15 +69,23 @@ jobs:
 
       # Gating Stage 5: Environment & Secrets Verification (Fail-Closed)
       - name: Verify production signing prerequisites (Fail-Closed)
+        env:
+          APPLE_CERT_B64: "${{ secrets.APPLE_CERTIFICATE_BASE64 }}"
+          APPLE_CERT_PASS: "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+          NOTARY_KEY_B64: "${{ secrets.NOTARY_API_KEY_BASE64 }}"
+          NOTARY_KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
+          NOTARY_ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
+          SPARKLE_PRIV_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
+          SPARKLE_PUB_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           MISSING=""
-          if [ -z "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ] || [ -z "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ]; then
+          if [ -z "${APPLE_CERT_B64}" ] || [ -z "${APPLE_CERT_PASS}" ]; then
             MISSING="${MISSING} APPLE_CERTIFICATE"
           fi
-          if [ -z "${{ secrets.NOTARY_API_KEY_BASE64 }}" ] || [ -z "${{ secrets.NOTARY_KEY_ID }}" ] || [ -z "${{ secrets.NOTARY_ISSUER_ID }}" ]; then
+          if [ -z "${NOTARY_KEY_B64}" ] || [ -z "${NOTARY_KEY_ID}" ] || [ -z "${NOTARY_ISSUER_ID}" ]; then
             MISSING="${MISSING} NOTARY_CREDENTIALS"
           fi
-          if [ -z "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}" ] || [ -z "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}" ]; then
+          if [ -z "${SPARKLE_PRIV_KEY}" ] || [ -z "${SPARKLE_PUB_KEY}" ]; then
             MISSING="${MISSING} SPARKLE_KEYS"
           fi
 
@@ -85,15 +95,53 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Git tag matches checked-out commit
+      # Gating Stage 6: Validate Release Tag and Operator Release Authorization (Fail-Closed)
+      - name: Validate Release Tag and Operator Release Authorization (Fail-Closed)
+        env:
+          INPUT_TAG: "${{ github.event.inputs.tag_name }}"
+          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
         run: |
-          TARGET_TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
-          TAG_COMMIT="$(git rev-list -n 1 "${TARGET_TAG}" 2>/dev/null || echo "")"
-          HEAD_COMMIT="$(git rev-parse HEAD)"
-          if [ -n "${TAG_COMMIT}" ] && [ "${TAG_COMMIT}" != "${HEAD_COMMIT}" ]; then
-            echo "ERROR: Target tag ${TARGET_TAG} (${TAG_COMMIT}) does not match HEAD commit (${HEAD_COMMIT})." >&2
+          if [ "${OPERATOR_APPROVAL}" != "YES" ]; then
+            echo "ERROR: Operator release authorization missing or invalid. Received '${OPERATOR_APPROVAL}', expected 'YES'." >&2
             exit 1
           fi
+
+          if [ -z "${INPUT_TAG}" ]; then
+            echo "ERROR: Target release tag cannot be empty." >&2
+            exit 1
+          fi
+
+          TAG_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$'
+          if ! [[ "${INPUT_TAG}" =~ ${TAG_REGEX} ]]; then
+            echo "ERROR: Release tag '${INPUT_TAG}' does not match required format: ^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$" >&2
+            exit 1
+          fi
+
+          VERSION="${INPUT_TAG#v}"
+          VERSION="${VERSION%%-build*}"
+          BUILD_NUM="${INPUT_TAG##*-build}"
+
+          if [ "${BUILD_NUM}" -le 4 ]; then
+            echo "ERROR: Build number ${BUILD_NUM} must be greater than 4 to maintain monotonic sequence (Build 4 is active)." >&2
+            exit 1
+          fi
+
+          TAG_COMMIT="$(git rev-list -n 1 "${INPUT_TAG}" 2>/dev/null || echo "")"
+          if [ -z "${TAG_COMMIT}" ]; then
+            echo "ERROR: Release tag '${INPUT_TAG}' does not exist in repository git history." >&2
+            exit 1
+          fi
+
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "${TAG_COMMIT}" != "${HEAD_COMMIT}" ]; then
+            echo "ERROR: Target tag commit (${TAG_COMMIT}) does not match current HEAD commit (${HEAD_COMMIT})." >&2
+            exit 1
+          fi
+
+          echo "VERIFIED_TAG=${INPUT_TAG}" >> "$GITHUB_ENV"
+          echo "SENTINEL_SHORT_VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "SENTINEL_BUILD_NUMBER=${BUILD_NUM}" >> "$GITHUB_ENV"
+          echo "Operator release approval and tag validation passed: ${INPUT_TAG} (v${VERSION} build ${BUILD_NUM}) -> ${HEAD_COMMIT}"
 
       # Configure Ephemeral Keychain for Developer ID Application
       - name: Configure ephemeral keychain and Developer ID identity
@@ -140,6 +188,8 @@ jobs:
           SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
           SENTINEL_REQUIRE_SPARKLE_KEY: "1"
+          SENTINEL_SHORT_VERSION: "${{ env.SENTINEL_SHORT_VERSION }}"
+          SENTINEL_BUILD_NUMBER: "${{ env.SENTINEL_BUILD_NUMBER }}"
         run: |
           bash scripts/build_production_dmg.sh
 
@@ -156,14 +206,16 @@ jobs:
       - name: Publish GitHub Release
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ env.VERIFIED_TAG }}"
+          IS_DRAFT: "${{ github.event.inputs.is_draft }}"
+          IS_PRERELEASE: "${{ github.event.inputs.is_prerelease }}"
         run: |
-          TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
           DRAFT_FLAG=""
-          if [ "${{ github.event.inputs.is_draft }}" = "true" ]; then
+          if [ "${IS_DRAFT}" = "true" ]; then
             DRAFT_FLAG="--draft"
           fi
           PRERELEASE_FLAG=""
-          if [ "${{ github.event.inputs.is_prerelease }}" = "true" ]; then
+          if [ "${IS_PRERELEASE}" = "true" ]; then
             PRERELEASE_FLAG="--prerelease"
           fi
 
@@ -179,4 +231,8 @@ jobs:
       - name: Clean up ephemeral credentials
         if: always()
         run: |
-          security delete-keychain "${RUNNER_TEMP}/build.keychain" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/cert.p12" "${RUNNER_TEMP}/AuthKey_"*.p8 2>/dev/null || true
+          KEYCHAIN_PATH="${RUNNER_TEMP}/build.keychain"
+          if [ -f "${KEYCHAIN_PATH}" ]; then
+            security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true
+          fi
