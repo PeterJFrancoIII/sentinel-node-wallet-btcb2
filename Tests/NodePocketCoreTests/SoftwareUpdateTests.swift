@@ -836,4 +836,90 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertEqual(validated.patch, 3)
         XCTAssertEqual(validated.buildNumber, 42)
     }
+
+    // MARK: - WO-77 Public Sparkle Feed Publication Gating & Enclosure Integrity
+
+    func testAppcastPublisherMonotonicBuildCheckAndEnclosureValidation() throws {
+        let baseAppcastXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <channel>
+                <title>Sentinel Node Wallet Updates</title>
+                <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+                <description>Official updates</description>
+                <language>en</language>
+                <item>
+                    <title>Build 3</title>
+                    <enclosure url="https://example.com/app3.dmg" sparkle:version="3" sparkle:shortVersionString="1.0" length="12000000" type="application/octet-stream" />
+                </item>
+            </channel>
+        </rss>
+        """
+
+        let existingReleases = try SparkleAppcastParser.parse(xmlData: baseAppcastXML.data(using: .utf8)!)
+        XCTAssertEqual(existingReleases.count, 1)
+        XCTAssertEqual(existingReleases.first?.version.build, 3)
+
+        // Monotonic check: candidate Build 4 must fail against active dev build 4, while candidate Build 5 must succeed
+        XCTAssertThrowsError(try ReleaseTagValidator.validateReleaseTag("v1.0.0-build4", minimumBuildNumber: 4))
+        XCTAssertThrowsError(try ReleaseTagValidator.validateReleaseTag("v1.0.0-build3", minimumBuildNumber: 4))
+        let validated = try ReleaseTagValidator.validateReleaseTag("v1.0.0-build5", minimumBuildNumber: 4)
+        XCTAssertEqual(validated.buildNumber, 5)
+
+        // Construct candidate updated appcast with signed enclosure
+        let mockEdSignature = "KzM39JvY+Q8r1f8z0A3wH5MockSignature12345678901234567890123456789012345678901234567890=="
+        let updatedAppcastXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+            <channel>
+                <title>Sentinel Node Wallet Updates</title>
+                <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+                <description>Official updates</description>
+                <language>en</language>
+                <item>
+                    <title>Sentinel Node Wallet v1.0.0 (Build 5)</title>
+                    <pubDate>Thu, 19 Nov 2026 06:00:00 +0000</pubDate>
+                    <sparkle:releaseNotesLink>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build5</sparkle:releaseNotesLink>
+                    <enclosure
+                        url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build5/Sentinel-Node-Wallet-BTCB2-v1.0.0-build5-macOS-arm64-notarized.dmg"
+                        sparkle:version="5"
+                        sparkle:shortVersionString="1.0.0"
+                        sparkle:os="macos"
+                        sparkle:cpu="arm64"
+                        sparkle:edSignature="\(mockEdSignature)"
+                        length="12450000"
+                        type="application/octet-stream" />
+                    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+                </item>
+                <item>
+                    <title>Build 3</title>
+                    <enclosure url="https://example.com/app3.dmg" sparkle:version="3" sparkle:shortVersionString="1.0" length="12000000" type="application/octet-stream" />
+                </item>
+            </channel>
+        </rss>
+        """
+
+        let updatedReleases = try SparkleAppcastParser.parse(xmlData: updatedAppcastXML.data(using: .utf8)!)
+        XCTAssertEqual(updatedReleases.count, 2)
+
+        let newestRelease = updatedReleases[0]
+        XCTAssertEqual(newestRelease.version.build, 5)
+        XCTAssertEqual(newestRelease.version.major, 1)
+        XCTAssertEqual(newestRelease.sparkleEdSignature, mockEdSignature)
+        XCTAssertEqual(newestRelease.architecture, .arm64)
+        XCTAssertEqual(newestRelease.downloadSize, 12450000)
+
+        // Eligible update discovery from installed Build 4 to published Build 5
+        let installedBuild4 = AppVersion.parse("1.0.0 (build 4)")!
+        let resolver = GitHubReleaseResolver()
+        let eligible = resolver.findEligibleUpdate(from: updatedReleases, installedVersion: installedBuild4)
+        switch eligible {
+        case .success(let candidate):
+            XCTAssertNotNil(candidate)
+            XCTAssertEqual(candidate?.version.build, 5)
+            XCTAssertEqual(candidate?.sparkleEdSignature, mockEdSignature)
+        case .failure(let err):
+            XCTFail("Unexpected error: \(err)")
+        }
+    }
 }

@@ -60,6 +60,7 @@ jobs:
                   scripts/build_dmg.sh \
                   scripts/build_production_dmg.sh \
                   scripts/sign_appcast_enclosure.sh \
+                  scripts/publish_production_appcast.sh \
                   scripts/fetch-verify-knots.sh \
                   scripts/package_appstore_archive.sh
 
