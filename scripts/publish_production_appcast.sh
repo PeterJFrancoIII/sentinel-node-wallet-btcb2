@@ -29,7 +29,6 @@ LOCAL_ARCHIVE=""
 SANDBOX_SIMULATION=0
 ALLOW_MOCK_FOR_DRY_RUN=0
 PUBLIC_KEY_OVERRIDE=""
-PRIVATE_KEY_OVERRIDE=""
 APP_BUNDLE_PATH=""
 SIGN_UPDATE_OVERRIDE=""
 ED_KEY_FILE=""
@@ -45,13 +44,12 @@ Options:
   --signature <sig>          EdDSA signature for the archive
   --signature-file <file>    File containing the EdDSA signature
   --public-key <base64>      Ed25519 public key (SUPublicEDKey) for cryptographic verification
-  --private-key <key>        Sparkle private key for sign_update verification
+  --ed-key-file <file>       Private key file for Sparkle sign_update tool verification (secret-in-argv --private-key is prohibited)
   --app-bundle <path>        Path to .app bundle to extract & verify SUPublicEDKey and bundle identity
   --archive <dmg-file>       Archive file (simulation/dry-run) or local artifact to cross-check (live)
   --local-archive <dmg-file> Local signed build artifact to cross-check byte-for-byte against downloaded release
   --sandbox-simulation       Run in isolated test sandbox (offline bare git remote simulation)
   --sign-update <path>       Path to Sparkle sign_update binary override
-  --ed-key-file <file>       Private key file for Sparkle sign_update tool verification
   --publish-to-main          Commit and push updated appcast.xml directly to origin/main via isolated worktree
   --dry-run                  Simulate validation and print appcast diff (default)
   --allow-mock-for-dry-run   Explicitly permits synthetic signature in dry-run mode only (STRICTLY FORBIDDEN IN LIVE MODE)
@@ -88,9 +86,7 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         --private-key)
-            [ $# -ge 2 ] || fail "Missing value for --private-key"
-            PRIVATE_KEY_OVERRIDE="$2"
-            shift 2
+            fail "Security stop (WO-104): --private-key is prohibited on the command line to prevent secret exposure in process lists. Use SPARKLE_PRIVATE_ED_KEY environment variable or --ed-key-file instead."
             ;;
         --app-bundle)
             [ $# -ge 2 ] || fail "Missing value for --app-bundle"
@@ -240,49 +236,7 @@ except Exception:
     echo "✓ Verified Sparkle pinned version 2.10.1 and sign_update executable: ${SIGN_UPDATE}"
 fi
 
-# Resolve and Validate Public Key (SUPublicEDKey) and App Bundle Identity (WO-95)
-PUBLIC_KEY=""
-BUNDLE_SUPUBLIC_KEY=""
-
-# If app bundle path is provided or discovered in dist/, verify identity and extract SUPublicEDKey
-BUNDLE_CANDIDATE="${APP_BUNDLE_PATH}"
-if [ -z "${BUNDLE_CANDIDATE}" ] && [ -d "${DIST_DIR}/Sentinel Node Wallet.app" ]; then
-    BUNDLE_CANDIDATE="${DIST_DIR}/Sentinel Node Wallet.app"
-fi
-
-if [ -n "${BUNDLE_CANDIDATE}" ] && [ -d "${BUNDLE_CANDIDATE}" ]; then
-    INFO_PLIST="${BUNDLE_CANDIDATE}/Contents/Info.plist"
-    if [ -f "${INFO_PLIST}" ]; then
-        BUNDLE_SUPUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${INFO_PLIST}" 2>/dev/null || echo "")"
-        BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST}" 2>/dev/null || echo "")"
-        BUNDLE_SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}" 2>/dev/null || echo "")"
-        BUNDLE_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${INFO_PLIST}" 2>/dev/null || echo "")"
-
-        [ "${BUNDLE_ID}" = "pool.sentineldefensetechnologies.co.za" ] ||
-            fail "Bundle ID mismatch in ${BUNDLE_CANDIDATE}: expected 'pool.sentineldefensetechnologies.co.za', got '${BUNDLE_ID}'."
-        [ "${BUNDLE_SHORT_VER}" = "${VERSION}" ] ||
-            fail "Version mismatch in ${BUNDLE_CANDIDATE}: expected '${VERSION}', got '${BUNDLE_SHORT_VER}'."
-        [ "${BUNDLE_BUILD}" = "${BUILD_NUM}" ] ||
-            fail "Build number mismatch in ${BUNDLE_CANDIDATE}: expected '${BUILD_NUM}', got '${BUNDLE_BUILD}'."
-
-        echo "✓ Verified bundle identity and metadata: ${BUNDLE_ID} v${BUNDLE_SHORT_VER} (Build ${BUNDLE_BUILD})"
-    fi
-fi
-
-if [ -n "${PUBLIC_KEY_OVERRIDE}" ]; then
-    PUBLIC_KEY="${PUBLIC_KEY_OVERRIDE}"
-    if [ -n "${BUNDLE_SUPUBLIC_KEY}" ] && [ "${PUBLIC_KEY}" != "${BUNDLE_SUPUBLIC_KEY}" ]; then
-        fail "SUPublicEDKey mismatch: App bundle key (${BUNDLE_SUPUBLIC_KEY}) does not match supplied public key (${PUBLIC_KEY})."
-    fi
-elif [ -n "${BUNDLE_SUPUBLIC_KEY}" ]; then
-    PUBLIC_KEY="${BUNDLE_SUPUBLIC_KEY}"
-elif [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
-    PUBLIC_KEY="${SPARKLE_PUBLIC_ED_KEY}"
-elif [ -n "${PUB_KEY:-}" ]; then
-    PUBLIC_KEY="${PUB_KEY}"
-fi
-
-# 3. Resolve & Validate EdDSA Signature (WO-82, WO-88: Strict 64-Byte Ed25519 & No-Mock)
+# 2.5 Resolve & Validate EdDSA Signature (WO-82, WO-88: Strict 64-Byte Ed25519 & No-Mock)
 ED_SIGNATURE=""
 if [ -n "${PROVIDED_SIGNATURE}" ]; then
     ED_SIGNATURE="${PROVIDED_SIGNATURE}"
@@ -313,11 +267,6 @@ if [ "${DRY_RUN}" = "0" ]; then
     if ! [[ "${ED_SIGNATURE}" =~ ^[A-Za-z0-9+/=]{64,128}$ ]]; then
         fail "Production publish aborted: Signature '${ED_SIGNATURE}' is not a valid canonical Base64 string."
     fi
-
-    # Public key is strictly required in live mode to verify signature authenticity
-    if [ -z "${PUBLIC_KEY}" ]; then
-        fail "Production publish aborted: SUPublicEDKey is strictly required in live mode to verify signature authenticity before publishing feed. Pass --public-key, --app-bundle, or set SPARKLE_PUBLIC_ED_KEY."
-    fi
 else
     # DRY RUN MODE:
     if [ -z "${ED_SIGNATURE}" ]; then
@@ -332,6 +281,69 @@ else
         if ! [[ "${ED_SIGNATURE}" =~ ^[A-Za-z0-9+/=]{64,128}$ ]]; then
             fail "Dry run aborted: Signature '${ED_SIGNATURE}' is not a valid canonical Base64 string."
         fi
+    fi
+fi
+
+# 3. Resolve and Validate Public Key (SUPublicEDKey) and App Bundle Identity (WO-95, WO-101)
+PUBLIC_KEY=""
+BUNDLE_SUPUBLIC_KEY=""
+
+BUNDLE_CANDIDATE="${APP_BUNDLE_PATH}"
+
+if [ -n "${APP_BUNDLE_PATH}" ]; then
+    # When explicitly provided, bundle must exist and be valid
+    [ -d "${BUNDLE_CANDIDATE}" ] || fail "App bundle specified with --app-bundle does not exist: '${BUNDLE_CANDIDATE}'."
+    INFO_PLIST="${BUNDLE_CANDIDATE}/Contents/Info.plist"
+    [ -f "${INFO_PLIST}" ] || fail "Info.plist not found in app bundle at '${INFO_PLIST}'."
+
+    BUNDLE_SUPUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${INFO_PLIST}" 2>/dev/null || echo "")"
+    [ -n "${BUNDLE_SUPUBLIC_KEY}" ] || fail "Missing mandatory SUPublicEDKey in '${INFO_PLIST}'. App bundle must embed the Sparkle public Ed25519 key."
+
+    BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${INFO_PLIST}" 2>/dev/null || echo "")"
+    BUNDLE_SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${INFO_PLIST}" 2>/dev/null || echo "")"
+    BUNDLE_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${INFO_PLIST}" 2>/dev/null || echo "")"
+
+    [ "${BUNDLE_ID}" = "pool.sentineldefensetechnologies.co.za" ] ||
+        fail "Bundle ID mismatch in ${BUNDLE_CANDIDATE}: expected 'pool.sentineldefensetechnologies.co.za', got '${BUNDLE_ID}'."
+    [ "${BUNDLE_SHORT_VER}" = "${VERSION}" ] ||
+        fail "Version mismatch in ${BUNDLE_CANDIDATE}: expected '${VERSION}', got '${BUNDLE_SHORT_VER}'."
+    [ "${BUNDLE_BUILD}" = "${BUILD_NUM}" ] ||
+        fail "Build number mismatch in ${BUNDLE_CANDIDATE}: expected '${BUILD_NUM}', got '${BUNDLE_BUILD}'."
+
+    # Validate TeamIdentifier if codesigned
+    if command -v codesign >/dev/null 2>&1; then
+        CODESIGN_TEAM="$(codesign -dv "${BUNDLE_CANDIDATE}" 2>&1 | grep "TeamIdentifier=" | cut -d= -f2 || echo "")"
+        if [ -n "${CODESIGN_TEAM}" ] && [ "${CODESIGN_TEAM}" != "not set" ]; then
+            if [ "${CODESIGN_TEAM}" != "S8QMQZA656" ] && [ "${CODESIGN_TEAM}" != "89V8F6QJC2" ]; then
+                fail "TeamIdentifier mismatch in ${BUNDLE_CANDIDATE}: unrecognized Team ID '${CODESIGN_TEAM}'."
+            fi
+            echo "✓ Verified code signing TeamIdentifier: ${CODESIGN_TEAM}"
+        fi
+    fi
+
+    echo "✓ Verified bundle identity and metadata: ${BUNDLE_ID} v${BUNDLE_SHORT_VER} (Build ${BUNDLE_BUILD})"
+elif [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
+    # In live production mode, app bundle candidate is strictly required (WO-101)
+    fail "Production publish aborted (WO-101): App bundle is mandatory in live mode (--app-bundle <path>)."
+fi
+
+if [ -n "${PUBLIC_KEY_OVERRIDE}" ]; then
+    PUBLIC_KEY="${PUBLIC_KEY_OVERRIDE}"
+    if [ -n "${BUNDLE_SUPUBLIC_KEY}" ] && [ "${PUBLIC_KEY}" != "${BUNDLE_SUPUBLIC_KEY}" ]; then
+        fail "SUPublicEDKey mismatch: App bundle key (${BUNDLE_SUPUBLIC_KEY}) does not match supplied public key (${PUBLIC_KEY})."
+    fi
+elif [ -n "${BUNDLE_SUPUBLIC_KEY}" ]; then
+    PUBLIC_KEY="${BUNDLE_SUPUBLIC_KEY}"
+elif [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+    PUBLIC_KEY="${SPARKLE_PUBLIC_ED_KEY}"
+elif [ -n "${PUB_KEY:-}" ]; then
+    PUBLIC_KEY="${PUB_KEY}"
+fi
+
+if [ "${DRY_RUN}" = "0" ]; then
+    # Public key is strictly required in live mode to verify signature authenticity
+    if [ -z "${PUBLIC_KEY}" ]; then
+        fail "Production publish aborted: SUPublicEDKey is strictly required in live mode to verify signature authenticity before publishing feed. Pass --public-key, --app-bundle, or set SPARKLE_PUBLIC_ED_KEY."
     fi
 fi
 
@@ -414,6 +426,60 @@ if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
         cmp -s "${TARGET_ARCHIVE}" "${LOCAL_COMPARE}" || fail "Downloaded release archive differs byte-for-byte from local build artifact."
         echo "✓ Verified byte-for-byte identity between local build artifact and public remote GitHub release asset."
     fi
+
+    # WO-101: Extract and verify embedded .app from downloaded release DMG
+    if command -v hdiutil >/dev/null 2>&1; then
+        echo "Mounting downloaded release DMG to verify embedded distribution bundle (WO-101)..."
+        DMG_MOUNT="$(mktemp -d -t sentinel-dmg-mount-XXXXXX)"
+        if hdiutil attach -readonly -nobrowse -mountpoint "${DMG_MOUNT}" "${TARGET_ARCHIVE}" >/dev/null 2>&1; then
+            DMG_APP="${DMG_MOUNT}/Sentinel Node Wallet.app"
+            if [ ! -d "${DMG_APP}" ]; then
+                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+                fail "Integrity violation (WO-101): Downloaded DMG does not contain 'Sentinel Node Wallet.app'."
+            fi
+            DMG_PLIST="${DMG_APP}/Contents/Info.plist"
+            if [ ! -f "${DMG_PLIST}" ]; then
+                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+                fail "Integrity violation (WO-101): Embedded .app in downloaded DMG lacks Contents/Info.plist."
+            fi
+            DMG_PUB_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${DMG_PLIST}" 2>/dev/null || echo "")"
+            DMG_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${DMG_PLIST}" 2>/dev/null || echo "")"
+            DMG_SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${DMG_PLIST}" 2>/dev/null || echo "")"
+            DMG_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${DMG_PLIST}" 2>/dev/null || echo "")"
+
+            if [ "${DMG_PUB_KEY}" != "${PUBLIC_KEY}" ]; then
+                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+                fail "Integrity violation (WO-101): Embedded SUPublicEDKey in downloaded DMG (${DMG_PUB_KEY}) does not match authorized public key (${PUBLIC_KEY})."
+            fi
+            if [ "${DMG_BUNDLE_ID}" != "pool.sentineldefensetechnologies.co.za" ]; then
+                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+                fail "Integrity violation (WO-101): Embedded bundle ID in downloaded DMG (${DMG_BUNDLE_ID}) does not match 'pool.sentineldefensetechnologies.co.za'."
+            fi
+            if [ "${DMG_SHORT_VER}" != "${VERSION}" ] || [ "${DMG_BUILD}" != "${BUILD_NUM}" ]; then
+                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+                fail "Integrity violation (WO-101): Embedded version in downloaded DMG (v${DMG_SHORT_VER} Build ${DMG_BUILD}) does not match release tag (${TAG})."
+            fi
+
+            # Gatekeeper / Notarization check if spctl is available
+            if command -v spctl >/dev/null 2>&1; then
+                SPCTL_OUT="$(spctl -a -t exec -vv "${DMG_APP}" 2>&1 || true)"
+                if echo "${SPCTL_OUT}" | grep -qi "rejected"; then
+                    hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+                    rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+                    fail "Gatekeeper rejected embedded app in downloaded DMG (WO-101): ${SPCTL_OUT}"
+                fi
+            fi
+
+            hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
+            rm -rf "${DMG_MOUNT}" 2>/dev/null || true
+            echo "✓ Verified embedded distribution bundle in downloaded DMG matches all trust invariants (WO-101)."
+        fi
+    fi
 elif [ "${SANDBOX_SIMULATION}" = "1" ]; then
     # SANDBOX SIMULATION MODE: Used exclusively by isolated test harness
     if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
@@ -494,8 +560,8 @@ do {{
 print("✓ Cryptographic Ed25519 signature verified successfully against archive bytes.")
 PY
 
-    # Cross-verify via Sparkle sign_update tool if private key or key file is available
-    SPARKLE_PRIV="${PRIVATE_KEY_OVERRIDE:-${SPARKLE_PRIVATE_ED_KEY:-${PRIV_KEY:-}}}"
+    # Cross-verify via Sparkle sign_update tool if private key file or environment secret is available (WO-104)
+    SPARKLE_PRIV="${SPARKLE_PRIVATE_ED_KEY:-${PRIV_KEY:-}}"
     if [ -n "${SIGN_UPDATE}" ] && [ -x "${SIGN_UPDATE}" ]; then
         if [ -n "${ED_KEY_FILE}" ] && [ -f "${ED_KEY_FILE}" ]; then
             echo "Cross-verifying via Sparkle sign_update --verify with key file..."

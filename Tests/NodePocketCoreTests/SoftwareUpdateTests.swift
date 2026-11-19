@@ -1160,21 +1160,8 @@ final class SoftwareUpdateTests: XCTestCase {
         let backupFile = repoRoot.appendingPathComponent("dist/appcast.xml.bak")
         XCTAssertFalse(FileManager.default.fileExists(atPath: backupFile.path), "dist/appcast.xml.bak must never be created in working copy")
 
-        // MARK: - WO-94 & WO-95 Remote Asset Enforcement & App Bundle Binding Tests
+        // MARK: - WO-94, WO-95 & WO-101 Remote Asset Enforcement & App Bundle Binding Tests
 
-        // 14. WO-94 P0: Live mode without --sandbox-simulation attempts remote download and fails closed on missing remote asset
-        let liveMissingRemote = runScript(args: [
-            "--tag", "v1.0.0-build5",
-            "--publish-to-main",
-            "--archive", tempArchiveURL.path,
-            "--signature", signatureB64,
-            "--public-key", pubKeyB64,
-            "--operator-approval", "YES"
-        ])
-        XCTAssertNotEqual(liveMissingRemote.status, 0, "Live mode must fail closed when remote GitHub Release asset is not available")
-        XCTAssertTrue(liveMissingRemote.output.contains("Remote release asset at") || liveMissingRemote.output.contains("Release must be publicly accessible"), "Must enforce remote asset availability: \(liveMissingRemote.output)")
-
-        // 15. WO-95 P0: App bundle SUPublicEDKey mismatch against provided public key fails closed
         let tempBundleURL = FileManager.default.temporaryDirectory.appendingPathComponent("Sentinel Node Wallet-\(UUID().uuidString).app")
         let contentsURL = tempBundleURL.appendingPathComponent("Contents")
         try FileManager.default.createDirectory(at: contentsURL, withIntermediateDirectories: true)
@@ -1197,6 +1184,33 @@ final class SoftwareUpdateTests: XCTestCase {
         </plist>
         """
         try testInfoPlist.write(to: contentsURL.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+
+        // 14. WO-94 P0: Live mode without --sandbox-simulation attempts remote download and fails closed on missing remote asset
+        let liveMissingRemote = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", tempBundleURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(liveMissingRemote.status, 0, "Live mode must fail closed when remote GitHub Release asset is not available")
+        XCTAssertTrue(liveMissingRemote.output.contains("Remote release asset at") || liveMissingRemote.output.contains("Release must be publicly accessible"), "Must enforce remote asset availability: \(liveMissingRemote.output)")
+
+        // 14b. WO-101 P0: Live mode without --app-bundle fails closed
+        let liveMissingBundle = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES"
+        ])
+        XCTAssertNotEqual(liveMissingBundle.status, 0, "Live mode without --app-bundle must fail closed")
+        XCTAssertTrue(liveMissingBundle.output.contains("App bundle is mandatory in live mode"), "Must require app bundle in live mode: \(liveMissingBundle.output)")
+
+        // 15. WO-95 P0: App bundle SUPublicEDKey mismatch against provided public key fails closed
 
         let keyMismatchRun = runScript(args: [
             "--tag", "v1.0.0-build5",
@@ -1287,6 +1301,81 @@ final class SoftwareUpdateTests: XCTestCase {
         ], cwd: unverifiedClone)
         XCTAssertNotEqual(unverifiedRun.status, 0, "Unverified bare remote must fail closed without fixture marker")
         XCTAssertTrue(unverifiedRun.output.contains("SENTINEL_TEST_FIXTURE_MARKER"), "Must cite missing fixture marker: \(unverifiedRun.output)")
+
+        // MARK: - WO-101 Bundle Identity Binding & Fail-Closed Distribution Gating Tests
+
+        // 21. WO-101 P0: Nonexistent --app-bundle path fails closed
+        let missingBundleRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", "/nonexistent/Sentinel Node Wallet.app",
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(missingBundleRun.status, 0, "Nonexistent app bundle path must fail closed")
+        XCTAssertTrue(missingBundleRun.output.contains("App bundle specified with --app-bundle does not exist"), "Must report nonexistent app bundle: \(missingBundleRun.output)")
+
+        // 22. WO-101 P0: Bundle directory lacking Contents/Info.plist fails closed
+        let emptyBundleURL = FileManager.default.temporaryDirectory.appendingPathComponent("EmptyBundle-\(UUID().uuidString).app")
+        try FileManager.default.createDirectory(at: emptyBundleURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: emptyBundleURL) }
+        let noPlistRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", emptyBundleURL.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(noPlistRun.status, 0, "Bundle without Info.plist must fail closed")
+        XCTAssertTrue(noPlistRun.output.contains("Info.plist not found in app bundle"), "Must report missing Info.plist: \(noPlistRun.output)")
+
+        // 23. WO-101 P0: Bundle with Info.plist lacking SUPublicEDKey fails closed
+        let noKeyPlistBundle = FileManager.default.temporaryDirectory.appendingPathComponent("NoKeyBundle-\(UUID().uuidString).app")
+        let noKeyContents = noKeyPlistBundle.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: noKeyContents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: noKeyPlistBundle) }
+        let noKeyPlist = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>CFBundleIdentifier</key>
+            <string>pool.sentineldefensetechnologies.co.za</string>
+            <key>CFBundleShortVersionString</key>
+            <string>1.0.0</string>
+            <key>CFBundleVersion</key>
+            <string>5</string>
+        </dict>
+        </plist>
+        """
+        try noKeyPlist.write(to: noKeyContents.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+        let noKeyRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", noKeyPlistBundle.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(noKeyRun.status, 0, "Bundle without SUPublicEDKey must fail closed")
+        XCTAssertTrue(noKeyRun.output.contains("Missing mandatory SUPublicEDKey"), "Must report missing SUPublicEDKey: \(noKeyRun.output)")
+
+        // MARK: - WO-104 Secret Hygiene & Process List Exposure Prevention
+
+        // 25. WO-104 P0: Prohibit --private-key on CLI to prevent credential leakage in argv/ps
+        let privateKeyOnArgvRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--private-key", "secret_key_in_process_arguments",
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertNotEqual(privateKeyOnArgvRun.status, 0, "--private-key on CLI must fail closed")
+        XCTAssertTrue(privateKeyOnArgvRun.output.contains("Security stop (WO-104)"), "Must halt with security stop: \(privateKeyOnArgvRun.output)")
+        XCTAssertTrue(privateKeyOnArgvRun.output.contains("--private-key is prohibited on the command line"), "Must cite argv prohibition: \(privateKeyOnArgvRun.output)")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test
