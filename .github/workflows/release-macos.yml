@@ -65,63 +65,95 @@ jobs:
       - name: Cache & verify official Bitcoin Knots binaries
         run: bash scripts/fetch-verify-knots.sh
 
-      # Gating Stage 5: Environment & Secrets Verification
-      - name: Verify production signing prerequisites
-        id: check-secrets
+      # Gating Stage 5: Environment & Secrets Verification (Fail-Closed)
+      - name: Verify production signing prerequisites (Fail-Closed)
         run: |
-          HAS_DEV_ID="false"
-          HAS_NOTARY="false"
-          HAS_SPARKLE_KEY="false"
-
-          if [ -n "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ] && [ -n "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ]; then
-            HAS_DEV_ID="true"
+          MISSING=""
+          if [ -z "${{ secrets.APPLE_CERTIFICATE_BASE64 }}" ] || [ -z "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}" ]; then
+            MISSING="${MISSING} APPLE_CERTIFICATE"
           fi
-          if [ -n "${{ secrets.NOTARY_API_KEY_BASE64 }}" ] && [ -n "${{ secrets.NOTARY_KEY_ID }}" ] && [ -n "${{ secrets.NOTARY_ISSUER_ID }}" ]; then
-            HAS_NOTARY="true"
+          if [ -z "${{ secrets.NOTARY_API_KEY_BASE64 }}" ] || [ -z "${{ secrets.NOTARY_KEY_ID }}" ] || [ -z "${{ secrets.NOTARY_ISSUER_ID }}" ]; then
+            MISSING="${MISSING} NOTARY_CREDENTIALS"
           fi
-          if [ -n "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}" ] && [ -n "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}" ]; then
-            HAS_SPARKLE_KEY="true"
+          if [ -z "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}" ] || [ -z "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}" ]; then
+            MISSING="${MISSING} SPARKLE_KEYS"
           fi
 
-          echo "has_dev_id=${HAS_DEV_ID}" >> $GITHUB_OUTPUT
-          echo "has_notary=${HAS_NOTARY}" >> $GITHUB_OUTPUT
-          echo "has_sparkle_key=${HAS_SPARKLE_KEY}" >> $GITHUB_OUTPUT
-
-          if [ "${HAS_DEV_ID}" != "true" ] || [ "${HAS_NOTARY}" != "true" ] || [ "${HAS_SPARKLE_KEY}" != "true" ]; then
-            echo "WARNING: Production signing credentials incomplete."
-            echo "  Developer ID Certificate: ${HAS_DEV_ID}"
-            echo "  Notarization API Key:    ${HAS_NOTARY}"
-            echo "  Sparkle Ed25519 Keys:    ${HAS_SPARKLE_KEY}"
-            echo "Production binary signing and notarization will be blocked fail-closed."
+          if [ -n "${MISSING}" ]; then
+            echo "ERROR: Production release blocked fail-closed. Missing mandatory signing credentials:${MISSING}." >&2
+            echo "Official production distribution requires an Apple Developer ID Application certificate, Apple Notary credentials, and Sparkle Ed25519 keypair." >&2
+            exit 1
           fi
 
-      # Build Stage
-      - name: Build macOS App Bundle
+      - name: Verify Git tag matches checked-out commit
+        run: |
+          TARGET_TAG="${{ github.event.inputs.tag_name || github.ref_name }}"
+          TAG_COMMIT="$(git rev-list -n 1 "${TARGET_TAG}" 2>/dev/null || echo "")"
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ -n "${TAG_COMMIT}" ] && [ "${TAG_COMMIT}" != "${HEAD_COMMIT}" ]; then
+            echo "ERROR: Target tag ${TARGET_TAG} (${TAG_COMMIT}) does not match HEAD commit (${HEAD_COMMIT})." >&2
+            exit 1
+          fi
+
+      # Configure Ephemeral Keychain for Developer ID Application
+      - name: Configure ephemeral keychain and Developer ID identity
         env:
-          SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
-          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
-          SENTINEL_REQUIRE_SPARKLE_KEY: ${{ steps.check-secrets.outputs.has_sparkle_key == 'true' && '1' || '0' }}
+          CERT_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         run: |
-          bash scripts/build_app.sh
-          plutil -lint "dist/Sentinel Node Wallet.app/Contents/Info.plist"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/build.keychain"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
 
-      # Packaging Stage
-      - name: Build and Package DMG
-        run: bash scripts/build_dmg.sh
+          CERT_FILE="${RUNNER_TEMP}/cert.p12"
+          echo "${CERT_BASE64}" | base64 --decode > "${CERT_FILE}"
+          security import "${CERT_FILE}" -k "${KEYCHAIN_PATH}" -P "${CERT_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+          rm -f "${CERT_FILE}"
 
-      # Sparkle Signing & Appcast Generation
+      # Configure Apple Notary Service Credentials
+      - name: Configure Apple Notary credentials
+        env:
+          KEY_BASE64: ${{ secrets.NOTARY_API_KEY_BASE64 }}
+          KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          API_KEY_PATH="${RUNNER_TEMP}/AuthKey_${KEY_ID}.p8"
+          echo "${KEY_BASE64}" | base64 --decode > "${API_KEY_PATH}"
+          xcrun notarytool store-credentials "sentinel-notary-profile" \
+            --key "${API_KEY_PATH}" \
+            --key-id "${KEY_ID}" \
+            --issuer "${ISSUER_ID}"
+          rm -f "${API_KEY_PATH}"
+
+      # Production Build, Sign, and Notarize (Hardened Runtime, Developer ID, Staple)
+      - name: Build, Sign, and Notarize Production DMG
+        env:
+          SENTINEL_RELEASE_SECURITY_APPROVED: "1"
+          SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
+          SENTINEL_DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION_NAME || 'Developer ID Application: Peter Franco' }}
+          SENTINEL_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}
+          SENTINEL_WEBCREDENTIALS_DOMAIN: pool.sentineldefensetechnologies.co.za
+          SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
+          SPARKLE_PUBLIC_ED_KEY: ${{ secrets.SPARKLE_PUBLIC_ED_KEY }}
+          SENTINEL_REQUIRE_SPARKLE_KEY: "1"
+        run: |
+          bash scripts/build_production_dmg.sh
+
+      # Sparkle Signing & Appcast Enclosure Generation
       - name: Sign DMG with Sparkle EdDSA Key
-        if: steps.check-secrets.outputs.has_sparkle_key == 'true'
         env:
           SPARKLE_PRIVATE_ED_KEY: ${{ secrets.SPARKLE_PRIVATE_ED_KEY }}
         run: |
-          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64.dmg | head -n 1)"
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
 
-      # Release Asset Upload
+      # Release Asset Upload (Fail-Closed)
       - name: Publish GitHub Release
-        if: steps.check-secrets.outputs.has_dev_id == 'true' && steps.check-secrets.outputs.has_notary == 'true' && steps.check-secrets.outputs.has_sparkle_key == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -136,9 +168,15 @@ jobs:
           fi
 
           gh release create "${TAG}" \
-            dist/Sentinel-Node-Wallet-*-macOS-arm64.dmg \
+            dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg \
             dist/SHA256SUMS.txt \
             dist/BUILD_MANIFEST.json \
             --title "Sentinel Node Wallet (${TAG})" \
             --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
             ${DRAFT_FLAG} ${PRERELEASE_FLAG}
+
+      # Cleanup Credentials
+      - name: Clean up ephemeral credentials
+        if: always()
+        run: |
+          security delete-keychain "${RUNNER_TEMP}/build.keychain" 2>/dev/null || true

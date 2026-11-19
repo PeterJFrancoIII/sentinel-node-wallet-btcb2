@@ -686,4 +686,48 @@ final class SoftwareUpdateTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    // MARK: - WO-72 Cryptographic Feed & Stale / Canary Rollback Defense
+
+    func testAppcastEnclosureSignatureValidation() throws {
+        let unsignedAppcast = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+                <title>Sentinel Updates</title>
+                <item>
+                    <title>Build 4</title>
+                    <enclosure url="https://example.com/app.dmg" sparkle:version="4" sparkle:shortVersionString="1.0" type="application/octet-stream" />
+                </item>
+            </channel>
+        </rss>
+        """.data(using: .utf8)!
+
+        let releases = try SparkleAppcastParser.parse(xmlData: unsignedAppcast)
+        XCTAssertEqual(releases.count, 1)
+        XCTAssertNil(releases.first?.sparkleEdSignature, "Unsigned appcast must have nil sparkleEdSignature")
+    }
+
+    func testCanaryRollbackAndStaleFeedDetection() {
+        let resolver = GitHubReleaseResolver()
+        let installed = AppVersion.parse("1.0.0 (build 4)")!
+
+        // Stale or rollback feed containing only older Build 3
+        let olderRelease = AppReleaseInfo(
+            id: "b3",
+            tagName: "v1.0.0-build3",
+            version: AppVersion.parse("1.0.0 (build 3)")!,
+            name: "Build 3",
+            releaseNotes: "Older",
+            publishedAt: Date()
+        )
+
+        let result = resolver.findEligibleUpdate(from: [olderRelease], installedVersion: installed)
+        switch result {
+        case .success(let eligible):
+            XCTAssertNil(eligible, "Stale or rollback feed containing older build must return nil eligible update")
+        case .failure(let err):
+            XCTFail("Unexpected failure on stale feed check: \(err)")
+        }
+    }
 }
