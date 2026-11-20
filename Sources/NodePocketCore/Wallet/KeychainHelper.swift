@@ -17,6 +17,9 @@ public enum KeychainError: Error, LocalizedError, Sendable {
         case .itemNotFound:
             return "Item not found in macOS Keychain."
         case .unexpectedStatus(let status):
+            if status == errSecMissingEntitlement || status == -34018 {
+                return "macOS Keychain missing entitlement (-34018): OS-enforced hardware user presence requires valid Keychain Access Group provisioning. Uncheck 'Save Passphrase in macOS Keychain' for offline manual passphrase custody, or run a signed/notarized build."
+            }
             return "Keychain error status: \(status)"
         case .invalidData:
             return "Invalid data retrieved from Keychain."

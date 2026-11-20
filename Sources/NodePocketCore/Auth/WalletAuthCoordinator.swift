@@ -2,6 +2,46 @@ import Foundation
 import CommonCrypto
 import Security
 import LocalAuthentication
+import Darwin
+
+public enum AuthRegistryStorageError: LocalizedError, Sendable, Equatable {
+    case unreadableFile(path: String, underlyingError: String)
+    case malformedJSON(path: String, underlyingError: String)
+    case versionIncompatible(version: Int, supportedVersions: [Int])
+    case writeFailed(path: String, underlyingError: String)
+    case missingRegistryInEstablishedNode(path: String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .unreadableFile(let path, let underlying):
+            return "Unable to read auth registry file at \(path): \(underlying)"
+        case .malformedJSON(let path, let underlying):
+            return "Auth registry at \(path) contains corrupted or malformed data: \(underlying)"
+        case .versionIncompatible(let ver, let supported):
+            let supp = supported.map(String.init).joined(separator: ", ")
+            return "Auth registry version \(ver) is incompatible with supported versions [\(supp)]."
+        case .writeFailed(let path, let underlying):
+            return "Failed to write auth registry to \(path): \(underlying)"
+        case .missingRegistryInEstablishedNode(let path):
+            return "Authentication registry is missing at \(path) in an established node environment. Halting to prevent unauthenticated overwrite or unauthorized access."
+        }
+    }
+}
+
+/// Internal diagnostic failure stage classification preserving generic public user-facing errors
+/// to eliminate credential oracle leakage while maintaining detailed observability.
+public enum AuthFailureStage: String, Sendable, Equatable {
+    case emptyUsername = "EMPTY_USERNAME"
+    case unknownOperator = "UNKNOWN_OPERATOR"
+    case accountLockedOut = "ACCOUNT_LOCKED_OUT"
+    case passwordMismatch = "PASSWORD_MISMATCH"
+    case keychainAccessDenied = "KEYCHAIN_ACCESS_DENIED"
+    case totpCodeInvalid = "TOTP_CODE_INVALID"
+    case totpTimestepReplayed = "TOTP_TIMESTEP_REPLAYED"
+    case recoveryCodeInvalid = "RECOVERY_CODE_INVALID"
+    case registryUnavailable = "REGISTRY_UNAVAILABLE"
+    case deviceOwnerAborted = "DEVICE_OWNER_ABORTED"
+}
 
 public enum WalletAuthError: LocalizedError, Sendable, Equatable {
     case unauthenticated
@@ -18,6 +58,7 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
     case weakPassword(String)
     case cryptographicError(String)
     case storageError(String)
+    case registryStorageError(AuthRegistryStorageError)
     case unauthorizedHighRiskAction(String)
     case approvalExpired
     case authAbortedByLock
@@ -54,6 +95,8 @@ public enum WalletAuthError: LocalizedError, Sendable, Equatable {
             return "Cryptographic operation failed: \(reason)"
         case .storageError(let reason):
             return "Secure storage operation failed: \(reason)"
+        case .registryStorageError(let err):
+            return err.localizedDescription
         case .unauthorizedHighRiskAction(let reason):
             return "High-risk action rejected: \(reason)"
         case .approvalExpired:
@@ -232,6 +275,21 @@ public actor WalletAuthCoordinator {
     private var isAuthInFlight: Bool = false
     private var recordGeneration: UInt64 = 0
     private var currentAuthEpoch: UInt64 = 0
+    public private(set) var registryLoadError: AuthRegistryStorageError? = nil
+    public private(set) var lastFailureStage: AuthFailureStage? = nil
+
+    private func recordAuthFailure(_ stage: AuthFailureStage) {
+        self.lastFailureStage = stage
+    }
+
+    private func recordAuthSuccess() {
+        self.lastFailureStage = nil
+    }
+
+    public var isRegistryHealthy: Bool {
+        registryLoadError == nil
+    }
+
     public static let sessionDurationSeconds: TimeInterval = 15 * 60 // 15 minutes
 
     // P0-3: Private registry of unforgeable, single-use high-risk approvals
@@ -286,35 +344,47 @@ public actor WalletAuthCoordinator {
         inMemoryPasswordsForTesting.removeAll()
         allowInMemoryMockForTesting = false
         simulatedKeychainFailureStatus = nil
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
     }
 #endif
 
     public init(dataDirectory: URL) {
         self.dataDirectory = dataDirectory
         self.registryURL = dataDirectory.appendingPathComponent("auth_registry.json")
-        self.records = Self.loadRecords(from: registryURL)
+        do {
+            self.records = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.records = [:]
+            self.registryLoadError = err
+        } catch {
+            self.records = [:]
+            self.registryLoadError = .unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+        }
 
         guard let secret = try? Self.randomBytes(count: 32) else {
             fatalError("Cryptographic failure: unable to obtain 32 secure random bytes for HMAC key.")
         }
         self.hmacSecret = secret
 
-        // Non-destructive migration of legacy TOTP secret if present across any accounts
-        for (key, rec) in self.records {
-            if let legacySecret = rec.legacyTotpSecretBase32 {
-                do {
-                    try Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
-                    let readBack = try Self.loadTOTPSecretFromKeychain(username: rec.username)
-                    if readBack == legacySecret {
-                        var updated = rec
-                        updated.legacyTotpSecretBase32 = nil
-                        updated.isTotpInKeychain = true
-                        self.records[key] = updated
-                        try Self.persistRecords(self.records, to: registryURL, in: dataDirectory)
+        // Non-destructive migration of legacy TOTP secret if present across any accounts, only if registry is healthy
+        if self.registryLoadError == nil {
+            for (key, rec) in self.records {
+                if let legacySecret = rec.legacyTotpSecretBase32 {
+                    do {
+                        try Self.saveTOTPSecretToKeychain(username: rec.username, secretBase32: legacySecret)
+                        let readBack = try Self.loadTOTPSecretFromKeychain(username: rec.username)
+                        if readBack == legacySecret {
+                            var updated = rec
+                            updated.legacyTotpSecretBase32 = nil
+                            updated.isTotpInKeychain = true
+                            self.records[key] = updated
+                            try Self.persistRecords(self.records, to: registryURL, in: dataDirectory)
+                        }
+                    } catch {
+                        // If Keychain write or read-back verification fails, preserve legacyTotpSecretBase32
+                        // on disk so the operator is never locked out from their credentials.
                     }
-                } catch {
-                    // If Keychain write or read-back verification fails, preserve legacyTotpSecretBase32
-                    // on disk so the operator is never locked out from their credentials.
                 }
             }
         }
@@ -322,6 +392,21 @@ public actor WalletAuthCoordinator {
 
     public var isEnrolled: Bool {
         !records.isEmpty
+    }
+
+    public func reloadRecordsFromDisk() throws {
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            throw err
+        } catch {
+            let err = AuthRegistryStorageError.unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = err
+            throw err
+        }
     }
 
     /// Backwards compatibility property returning the primary/first enrolled record.
@@ -411,6 +496,19 @@ public actor WalletAuthCoordinator {
         guard !cleanUser.isEmpty else {
             throw WalletAuthError.invalidCredentials
         }
+
+        // Ensure registry is readable and uncorrupted before enrolling
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is damaged or unreadable (\(err.localizedDescription)). Aborting enrollment to protect existing credentials.")
+        } catch {
+            throw WalletAuthError.storageError("Cannot enroll new operator: existing auth registry is unreadable (\(error.localizedDescription)). Aborting enrollment to protect existing credentials.")
+        }
+
         let userKey = cleanUser.lowercased()
         guard records[userKey] == nil else {
             throw WalletAuthError.alreadyEnrolled
@@ -459,6 +557,7 @@ public actor WalletAuthCoordinator {
         self.recordGeneration += 1
         self.records[userKey] = newRecord
         try saveRecords()
+        UserDefaults.standard.set(true, forKey: "hasCompletedInitialEnrollment")
 
         let session = WalletAuthCapability(
             username: cleanUser,
@@ -489,21 +588,41 @@ public actor WalletAuthCoordinator {
             }
         }
 
+        // Authoritatively reload records from disk before validating credentials
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            recordAuthFailure(.registryUnavailable)
+            throw WalletAuthError.registryStorageError(err)
+        } catch {
+            let err = AuthRegistryStorageError.unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = err
+            recordAuthFailure(.registryUnavailable)
+            throw WalletAuthError.registryStorageError(err)
+        }
+
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
+            recordAuthFailure(.emptyUsername)
             throw WalletAuthError.invalidCredentials
         }
         guard !records.isEmpty else {
+            recordAuthFailure(.registryUnavailable)
             throw WalletAuthError.notEnrolled
         }
         let userKey = cleanUser.lowercased()
         guard var rec = records[userKey] ?? records.values.first(where: { $0.username.lowercased() == userKey }) else {
+            recordAuthFailure(.unknownOperator)
             throw WalletAuthError.invalidCredentials
         }
 
         if let lockDate = rec.lockedUntil {
             let remaining = Int(lockDate.timeIntervalSince(Date()))
             if remaining > 0 {
+                recordAuthFailure(.accountLockedOut)
                 throw WalletAuthError.rateLimited(secondsRemaining: remaining)
             } else {
                 rec.lockedUntil = nil
@@ -512,17 +631,20 @@ public actor WalletAuthCoordinator {
         }
 
         guard cleanUser.lowercased() == rec.username.lowercased() else {
+            recordAuthFailure(.unknownOperator)
             throw registerFailedAttempt(&rec)
         }
 
         guard let salt = Self.hexToData(rec.saltHex),
               let expectedHash = Self.hexToData(rec.passwordHashHex) else {
+            recordAuthFailure(.passwordMismatch)
             throw registerFailedAttempt(&rec)
         }
 
         let computedHash = try Self.deriveKey(password: password, salt: salt)
         // P0-6: Constant-time password hash comparison
         guard Self.constantTimeCompare(computedHash, expectedHash) else {
+            recordAuthFailure(.passwordMismatch)
             throw registerFailedAttempt(&rec)
         }
 
@@ -536,12 +658,14 @@ public actor WalletAuthCoordinator {
                 if let hook = mockDeviceOwnerHook {
                     let success = try await hook()
                     guard success else {
+                        recordAuthFailure(.deviceOwnerAborted)
                         throw WalletAuthError.deviceOwnerAuthCanceled
                     }
                 } else if !mockDeviceOwnerSuccessForTesting {
                     let context = LAContext()
                     var authError: NSError?
                     guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                        recordAuthFailure(.deviceOwnerAborted)
                         throw WalletAuthError.deviceOwnerAuthFailed(
                             authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable for unmigrated credential."
                         )
@@ -553,14 +677,17 @@ public actor WalletAuthCoordinator {
                             localizedReason: "Authorize fallback to unmigrated credential for " + rec.username
                         )
                         guard success else {
+                            recordAuthFailure(.deviceOwnerAborted)
                             throw WalletAuthError.deviceOwnerAuthCanceled
                         }
                     } catch let laError as LAError {
+                        recordAuthFailure(.deviceOwnerAborted)
                         if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
                             throw WalletAuthError.deviceOwnerAuthCanceled
                         }
                         throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
                     } catch {
+                        recordAuthFailure(.deviceOwnerAborted)
                         throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
                     }
                 }
@@ -568,6 +695,7 @@ public actor WalletAuthCoordinator {
                 let context = LAContext()
                 var authError: NSError?
                 guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                    recordAuthFailure(.deviceOwnerAborted)
                     throw WalletAuthError.deviceOwnerAuthFailed(
                         authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable for unmigrated credential."
                     )
@@ -579,25 +707,30 @@ public actor WalletAuthCoordinator {
                         localizedReason: "Authorize fallback to unmigrated credential for " + rec.username
                     )
                     guard success else {
+                        recordAuthFailure(.deviceOwnerAborted)
                         throw WalletAuthError.deviceOwnerAuthCanceled
                     }
                 } catch let laError as LAError {
+                    recordAuthFailure(.deviceOwnerAborted)
                     if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
                         throw WalletAuthError.deviceOwnerAuthCanceled
                     }
                     throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
                 } catch {
+                    recordAuthFailure(.deviceOwnerAborted)
                     throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
                 }
                 #endif
                 secret = legacy
             } else {
+                recordAuthFailure(.keychainAccessDenied)
                 throw error
             }
         }
 
         // Audit 039: Guard against lock/logout or record invalidation during asynchronous device-owner challenge
         guard self.currentAuthEpoch == capturedEpoch, self.recordGeneration == capturedGeneration else {
+            recordAuthFailure(.deviceOwnerAborted)
             throw WalletAuthError.authAbortedByLock
         }
 
@@ -605,19 +738,23 @@ public actor WalletAuthCoordinator {
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
         guard var freshRec = self.records[userKey] ?? self.records.values.first(where: { $0.username.lowercased() == userKey }) else {
+            recordAuthFailure(.unknownOperator)
             throw WalletAuthError.notEnrolled
         }
 
         if let lockDate = freshRec.lockedUntil, lockDate > Date() {
             let remaining = Int(lockDate.timeIntervalSince(Date()))
+            recordAuthFailure(.accountLockedOut)
             throw WalletAuthError.rateLimited(secondsRemaining: remaining)
         }
 
         guard valid else {
+            recordAuthFailure(.totpCodeInvalid)
             throw registerFailedAttempt(&freshRec)
         }
 
         guard timeStep > freshRec.lastUsedTimeStep else {
+            recordAuthFailure(.totpTimestepReplayed)
             throw WalletAuthError.replayedTOTPTimestep
         }
 
@@ -641,6 +778,7 @@ public actor WalletAuthCoordinator {
         // Automatically update/save operator login password in macOS Keychain / Apple Passwords
         try? Self.saveOperatorPasswordToKeychain(username: freshRec.username, password: password)
 
+        recordAuthSuccess()
         let session = WalletAuthCapability(
             username: freshRec.username,
             expiresAt: Date().addingTimeInterval(Self.sessionDurationSeconds)
@@ -667,21 +805,41 @@ public actor WalletAuthCoordinator {
             }
         }
 
+        // Authoritatively reload records from disk before validating credentials
+        do {
+            let reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            self.records = reloaded
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.registryLoadError = err
+            recordAuthFailure(.registryUnavailable)
+            throw WalletAuthError.registryStorageError(err)
+        } catch {
+            let err = AuthRegistryStorageError.unreadableFile(path: registryURL.path, underlyingError: error.localizedDescription)
+            self.registryLoadError = err
+            recordAuthFailure(.registryUnavailable)
+            throw WalletAuthError.registryStorageError(err)
+        }
+
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
+            recordAuthFailure(.emptyUsername)
             throw WalletAuthError.invalidCredentials
         }
         guard !records.isEmpty else {
+            recordAuthFailure(.registryUnavailable)
             throw WalletAuthError.notEnrolled
         }
         let userKey = cleanUser.lowercased()
         guard var rec = records[userKey] ?? records.values.first(where: { $0.username.lowercased() == userKey }) else {
+            recordAuthFailure(.unknownOperator)
             throw WalletAuthError.invalidCredentials
         }
 
         if let lockDate = rec.lockedUntil {
             let remaining = Int(lockDate.timeIntervalSince(Date()))
             if remaining > 0 {
+                recordAuthFailure(.accountLockedOut)
                 throw WalletAuthError.rateLimited(secondsRemaining: remaining)
             } else {
                 rec.lockedUntil = nil
@@ -690,6 +848,7 @@ public actor WalletAuthCoordinator {
         }
 
         guard cleanUser.lowercased() == rec.username.lowercased() else {
+            recordAuthFailure(.unknownOperator)
             throw registerFailedAttempt(&rec)
         }
 
@@ -718,6 +877,7 @@ public actor WalletAuthCoordinator {
         }
 
         guard let match = matchedIndex else {
+            recordAuthFailure(.recoveryCodeInvalid)
             throw registerFailedAttempt(&rec)
         }
 
@@ -726,12 +886,14 @@ public actor WalletAuthCoordinator {
         if let hook = mockDeviceOwnerHook {
             let success = try await hook()
             guard success else {
+                recordAuthFailure(.deviceOwnerAborted)
                 throw WalletAuthError.deviceOwnerAuthCanceled
             }
         } else if !mockDeviceOwnerSuccessForTesting {
             let context = LAContext()
             var authError: NSError?
             guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+                recordAuthFailure(.deviceOwnerAborted)
                 throw WalletAuthError.deviceOwnerAuthFailed(
                     authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
                 )
@@ -740,14 +902,17 @@ public actor WalletAuthCoordinator {
             do {
                 let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: deviceOwnerReason)
                 guard success else {
+                    recordAuthFailure(.deviceOwnerAborted)
                     throw WalletAuthError.deviceOwnerAuthCanceled
                 }
             } catch let laError as LAError {
+                recordAuthFailure(.deviceOwnerAborted)
                 if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
                     throw WalletAuthError.deviceOwnerAuthCanceled
                 }
                 throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
             } catch {
+                recordAuthFailure(.deviceOwnerAborted)
                 throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
             }
         }
@@ -755,6 +920,7 @@ public actor WalletAuthCoordinator {
         let context = LAContext()
         var authError: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+            recordAuthFailure(.deviceOwnerAborted)
             throw WalletAuthError.deviceOwnerAuthFailed(
                 authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
             )
@@ -763,36 +929,43 @@ public actor WalletAuthCoordinator {
         do {
             let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: deviceOwnerReason)
             guard success else {
+                recordAuthFailure(.deviceOwnerAborted)
                 throw WalletAuthError.deviceOwnerAuthCanceled
             }
         } catch let laError as LAError {
+            recordAuthFailure(.deviceOwnerAborted)
             if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
                 throw WalletAuthError.deviceOwnerAuthCanceled
             }
             throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
         } catch {
+            recordAuthFailure(.deviceOwnerAborted)
             throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
         }
         #endif
 
         // Audit 039: Guard against lock/logout or record invalidation during asynchronous device-owner challenge
         guard self.currentAuthEpoch == capturedEpoch, self.recordGeneration == capturedGeneration else {
+            recordAuthFailure(.deviceOwnerAborted)
             throw WalletAuthError.authAbortedByLock
         }
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
         guard var freshRec = self.records[userKey] ?? self.records.values.first(where: { $0.username.lowercased() == userKey }) else {
+            recordAuthFailure(.unknownOperator)
             throw WalletAuthError.notEnrolled
         }
 
         if let lockDate = freshRec.lockedUntil, lockDate > Date() {
             let remaining = Int(lockDate.timeIntervalSince(Date()))
+            recordAuthFailure(.accountLockedOut)
             throw WalletAuthError.rateLimited(secondsRemaining: remaining)
         }
 
         // Single-use durable consumption
         if match >= 0 {
             guard match < freshRec.recoveryCodes.count else {
+                recordAuthFailure(.recoveryCodeInvalid)
                 throw WalletAuthError.invalidCredentials
             }
             freshRec.recoveryCodes.remove(at: match)
@@ -803,6 +976,7 @@ public actor WalletAuthCoordinator {
         self.records[userKey] = freshRec
         try saveRecords()
 
+        recordAuthSuccess()
         let session = WalletAuthCapability(
             username: freshRec.username,
             expiresAt: Date().addingTimeInterval(Self.sessionDurationSeconds)
@@ -1192,7 +1366,10 @@ public actor WalletAuthCoordinator {
         time: TimeInterval = Date().timeIntervalSince1970,
         toleranceSteps: Int = 1
     ) -> (valid: Bool, timeStep: Int64) {
-        let cleanCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCode = code
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanCode.count == 6, Int(cleanCode) != nil else {
             return (false, 0)
         }
@@ -1295,7 +1472,7 @@ public actor WalletAuthCoordinator {
         var dataTypeRef: AnyObject?
         var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
 
-        if status == errSecAuthFailed || status == -25293 {
+        if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
             // Supply authentication context with localized reason for items with .userPresence ACL
             let context = LAContext()
             context.localizedReason = "Authenticate to unlock Sentinel Node Wallet 2FA secret"
@@ -1306,9 +1483,6 @@ public actor WalletAuthCoordinator {
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
             throw WalletAuthError.storageError("Failed to load TOTP secret from Keychain: status \(status)")
         }
-
-        // Seamless migration: re-save with WhenUnlockedThisDeviceOnly so future reads never fail on -25293
-        try? saveTOTPSecretToKeychain(username: username, secretBase32: str)
 
         return str
     }
@@ -1400,7 +1574,14 @@ public actor WalletAuthCoordinator {
         ]
 
         var dataTypeRef: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
+            let context = LAContext()
+            context.localizedReason = "Authenticate to unlock Sentinel Node Wallet saved password"
+            var interactiveQuery = query
+            interactiveQuery[kSecUseAuthenticationContext as String] = context
+            status = SecItemCopyMatching(interactiveQuery as CFDictionary, &dataTypeRef)
+        }
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
             throw WalletAuthError.storageError("Failed to load operator password from Keychain: status \(status)")
         }
@@ -1423,18 +1604,102 @@ public actor WalletAuthCoordinator {
 
     // MARK: - Registry Storage
 
-    private static func loadRecords(from url: URL) -> [String: AuthRegistryRecord] {
-        guard let data = try? Data(contentsOf: url) else { return [:] }
+    public static func loadRecordsStrict(from url: URL, in dataDirectory: URL? = nil) throws -> [String: AuthRegistryRecord] {
+        let parentDir = dataDirectory ?? url.deletingLastPathComponent()
+
+        var statBuf = stat()
+        if lstat(url.path, &statBuf) == 0 {
+            if (statBuf.st_mode & S_IFMT) == S_IFLNK {
+                throw AuthRegistryStorageError.unreadableFile(
+                    path: url.path,
+                    underlyingError: "Symbolic links are not permitted for authentication registry."
+                )
+            }
+            if (statBuf.st_mode & S_IFMT) == S_IFDIR {
+                throw AuthRegistryStorageError.unreadableFile(
+                    path: url.path,
+                    underlyingError: "Path is a directory, expected a regular file."
+                )
+            }
+        } else if errno == ENOENT {
+            // File does not exist. Check if this is an established node or pre-existing operator installation.
+            let establishedMarkers = [
+                "bitcoin.conf",
+                "wallets_metadata.json",
+                "wallets",
+                "blocks",
+                "chainstate",
+                "indexes"
+            ]
+            let hasNodeMarkers = establishedMarkers.contains { marker in
+                FileManager.default.fileExists(atPath: parentDir.appendingPathComponent(marker).path)
+            }
+            let hasCompletedEnrollment = UserDefaults.standard.bool(forKey: "hasCompletedInitialEnrollment")
+
+            if hasNodeMarkers || hasCompletedEnrollment {
+                throw AuthRegistryStorageError.missingRegistryInEstablishedNode(path: url.path)
+            }
+            return [:]
+        }
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            throw AuthRegistryStorageError.unreadableFile(
+                path: url.path,
+                underlyingError: error.localizedDescription
+            )
+        }
+
+        guard !data.isEmpty else {
+            throw AuthRegistryStorageError.malformedJSON(
+                path: url.path,
+                underlyingError: "File is empty (0 bytes)."
+            )
+        }
+
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+
+        // 1. Try decoding MultiAuthRegistry (version 2)
         if let multi = try? decoder.decode(MultiAuthRegistry.self, from: data) {
+            guard multi.version >= 1 && multi.version <= 2 else {
+                throw AuthRegistryStorageError.versionIncompatible(
+                    version: multi.version,
+                    supportedVersions: [1, 2]
+                )
+            }
             return multi.users
         }
+
+        // 2. Try decoding single AuthRegistryRecord (legacy version 1)
         if let single = try? decoder.decode(AuthRegistryRecord.self, from: data) {
             let key = single.username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return [key: single]
         }
-        return [:]
+
+        // 3. Neither schema matched. Determine if JSON is syntactically invalid or schema-incompatible.
+        do {
+            let json = try JSONSerialization.jsonObject(with: data, options: [])
+            if let dict = json as? [String: Any], let ver = dict["version"] as? Int, ver > 2 {
+                throw AuthRegistryStorageError.versionIncompatible(
+                    version: ver,
+                    supportedVersions: [1, 2]
+                )
+            }
+            throw AuthRegistryStorageError.malformedJSON(
+                path: url.path,
+                underlyingError: "Schema validation failed: root object does not match MultiAuthRegistry or AuthRegistryRecord."
+            )
+        } catch let storageErr as AuthRegistryStorageError {
+            throw storageErr
+        } catch {
+            throw AuthRegistryStorageError.malformedJSON(
+                path: url.path,
+                underlyingError: error.localizedDescription
+            )
+        }
     }
 
     private static func persistRecords(
@@ -1450,7 +1715,10 @@ public actor WalletAuthCoordinator {
         do {
             data = try encoder.encode(registry)
         } catch {
-            throw WalletAuthError.storageError("JSON encoding failed: \(error.localizedDescription)")
+            throw AuthRegistryStorageError.writeFailed(
+                path: registryURL.path,
+                underlyingError: "JSON encoding failed: \(error.localizedDescription)"
+            )
         }
 
         do {
@@ -1458,7 +1726,10 @@ public actor WalletAuthCoordinator {
             try data.write(to: registryURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: registryURL.path)
         } catch {
-            throw WalletAuthError.storageError("Writing auth_registry.json failed: \(error.localizedDescription)")
+            throw AuthRegistryStorageError.writeFailed(
+                path: registryURL.path,
+                underlyingError: error.localizedDescription
+            )
         }
     }
 

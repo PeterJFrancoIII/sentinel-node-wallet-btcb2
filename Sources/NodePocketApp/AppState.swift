@@ -65,6 +65,7 @@ public final class AppState: ObservableObject {
     @Published public var isWalletTabUnlocked: Bool = false
     @Published public var isMigrationPending: Bool = false
     @Published public var authErrorMessage: String? = nil
+    @Published public var authRegistryError: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
 
     public let nodeManager: NodeManager
@@ -315,6 +316,7 @@ public final class AppState: ObservableObject {
             self.enrolledUsername = await authCoordinator.enrolledUsername
             self.enrolledUsernames = await authCoordinator.enrolledUsernames
             self.isMigrationPending = await authCoordinator.isMigrationPending
+            self.authRegistryError = await authCoordinator.registryLoadError?.localizedDescription
             if let cur = await authCoordinator.currentSession {
                 self.authSession = cur
                 self.isWalletTabUnlocked = true
