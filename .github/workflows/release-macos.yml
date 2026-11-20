@@ -248,10 +248,11 @@ jobs:
           SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
         run: |
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
-          bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
+          bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" --signature-file-output dist/SPARKLE_SIGNATURE.base64 > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
+          test -s dist/SPARKLE_SIGNATURE.base64 || { echo "ERROR: dist/SPARKLE_SIGNATURE.base64 is missing or empty." >&2; exit 1; }
 
-      # Generate Authenticated Release Attestation (WO-117, WO-121)
+      # Generate Authenticated Release Attestation (WO-117, WO-121, WO-122-R3)
       - name: Generate Authenticated Release Attestation
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
@@ -270,7 +271,58 @@ jobs:
           DMG_NAME="$(basename "${DMG_FILE}")"
           DMG_SHA="$(shasum -a 256 "${DMG_FILE}" | awk '{print $1}')"
           DMG_LEN="$(stat -f%z "${DMG_FILE}" 2>/dev/null || stat -c%s "${DMG_FILE}")"
-          ED_SIG="$(grep "sparkle:edSignature" dist/SPARKLE_ENCLOSURE.txt | head -n 1 | sed -E 's/.*sparkle:edSignature="([^"]+)".*/\1/' || echo "")"
+
+          if [ ! -f "dist/SPARKLE_SIGNATURE.base64" ]; then
+            echo "ERROR: dist/SPARKLE_SIGNATURE.base64 sidecar missing." >&2
+            exit 1
+          fi
+          ED_SIG="$(tr -d '\r\n ' < dist/SPARKLE_SIGNATURE.base64)"
+
+          # Pre-release cryptographic verification of EdDSA signature against DMG bytes (WO-122-R3)
+          python3 - "${SPARKLE_PUBLIC_ED_KEY}" "${ED_SIG}" "${DMG_FILE}" <<'PY' || exit 1
+          import base64, sys, subprocess
+
+          pub_b64, sig_b64, dmg_path = sys.argv[1:4]
+
+          # Validate Base64 lengths
+          try:
+              raw_pub = base64.b64decode(pub_b64, validate=True)
+              if len(raw_pub) != 32:
+                  print(f"ERROR: Decoded public key length is {len(raw_pub)} bytes (expected 32 bytes).", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: Failed to Base64 decode SPARKLE_PUBLIC_ED_KEY: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              raw_sig = base64.b64decode(sig_b64, validate=True)
+              if len(raw_sig) != 64:
+                  print(f"ERROR: Decoded signature length is {len(raw_sig)} bytes (expected 64 bytes).", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: Failed to Base64 decode ED_SIG: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          swift_verify = f"""
+          import Foundation
+          import CryptoKit
+
+          guard let pubData = Data(base64Encoded: "{pub_b64}"),
+                let sigData = Data(base64Encoded: "{sig_b64}"),
+                let fileData = try? Data(contentsOf: URL(fileURLWithPath: "{dmg_path}")) else {{
+              exit(1)
+          }}
+          guard let pubKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubData),
+                pubKey.isValidSignature(sigData, for: fileData) else {{
+              exit(2)
+          }}
+          """
+          res = subprocess.run(["swift", "-e", swift_verify], capture_output=True)
+          if res.returncode != 0:
+              print(f"ERROR: Pre-release Swift CryptoKit Ed25519 signature verification failed for {dmg_path}.", file=sys.stderr)
+              sys.exit(1)
+          print("✓ Pre-release Swift CryptoKit Ed25519 signature verified successfully against exact notarized DMG bytes.")
+          PY
 
           # Verify notarization ticket is actually stapled before recording in attestation (WO-121)
           if xcrun stapler validate "${DMG_FILE}" >/dev/null 2>&1; then
@@ -327,6 +379,7 @@ jobs:
               dist/SHA256SUMS.txt \
               dist/BUILD_MANIFEST.json \
               dist/RELEASE_ATTESTATION.json \
+              dist/SPARKLE_SIGNATURE.base64 \
               dist/SPARKLE_ENCLOSURE.txt \
               --title "Sentinel Node Wallet (${TAG})" \
               --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
@@ -475,6 +528,17 @@ jobs:
 
           if att.get("sparkle_public_ed_key") != expected_pub:
               print(f"ERROR: Attestation public key mismatch: expected {expected_pub}, got {att.get('sparkle_public_ed_key')}", file=sys.stderr)
+              sys.exit(1)
+
+          # Verify machine-readable public signature sidecar matches attestation (WO-122-R3)
+          sig_sidecar_path = "dist/staged-assets/SPARKLE_SIGNATURE.base64"
+          if not os.path.isfile(sig_sidecar_path):
+              print(f"ERROR: Machine-readable signature sidecar '{sig_sidecar_path}' missing from draft release assets.", file=sys.stderr)
+              sys.exit(1)
+          with open(sig_sidecar_path) as sf:
+              sidecar_sig = sf.read().strip()
+          if sidecar_sig != att.get("sparkle_ed_signature"):
+              print(f"ERROR: Sidecar signature mismatch: sidecar='{sidecar_sig}', attestation='{att.get('sparkle_ed_signature')}'", file=sys.stderr)
               sys.exit(1)
 
           # Verify Ed25519 signature of DMG bytes against public key using Swift CryptoKit

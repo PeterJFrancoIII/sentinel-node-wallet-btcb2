@@ -2103,4 +2103,189 @@ exit 0
         XCTAssertTrue(autoResolvedRes.output.contains("STATUS: DEPLOYED"),
                       "Auto-resolved feed must report STATUS: DEPLOYED: \(autoResolvedRes.output)")
     }
+
+    // MARK: - WO-122-R3 Sparkle Signer Sidecar Attestation & CryptoKit Verification
+
+    func testSparkleSignerSidecarAttestationAndCryptoKitVerificationWO122R3() throws {
+        let currentFile = URL(fileURLWithPath: #file)
+        let repoRoot = currentFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let signerScript = repoRoot.appendingPathComponent("scripts/sign_appcast_enclosure.sh").path
+
+        guard FileManager.default.isExecutableFile(atPath: signerScript) else {
+            XCTFail("scripts/sign_appcast_enclosure.sh not found or not executable at \(signerScript)")
+            return
+        }
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-wo122-r3-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        // 1. Generate disposable Ed25519 keypair using Swift CryptoKit
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let publicKey = privateKey.publicKey
+        let pubKeyData = publicKey.rawRepresentation
+        let pubKeyB64 = pubKeyData.base64EncodedString()
+        let privKeyB64 = privateKey.rawRepresentation.base64EncodedString()
+
+        XCTAssertEqual(pubKeyData.count, 32, "Ed25519 public key raw representation must be exactly 32 bytes")
+
+        let keyFile = tempBase.appendingPathComponent("disposable_sparkle.key")
+        try privKeyB64.write(to: keyFile, atomically: true, encoding: .utf8)
+
+        // 2. Create synthetic archive file with known bytes
+        let archiveFile = tempBase.appendingPathComponent("Sentinel-Node-Wallet-1.0.0-build5-macOS-arm64-notarized.dmg")
+        let archiveBytes = "SENTINEL_WO122_R3_SYNTHETIC_DMG_PAYLOAD_\(UUID().uuidString)".data(using: .utf8)!
+        try archiveBytes.write(to: archiveFile)
+        let archiveLen = archiveBytes.count
+        let archiveSHA = SHA256.hash(data: archiveBytes).map { String(format: "%02x", $0) }.joined()
+
+        let sidecarFile = tempBase.appendingPathComponent("SPARKLE_SIGNATURE.base64")
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil, env: [String: String]? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            if let env = env {
+                var procEnv = ProcessInfo.processInfo.environment
+                for (k, v) in env { procEnv[k] = v }
+                proc.environment = procEnv
+            }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // 3. Execute scripts/sign_appcast_enclosure.sh with --signature-file-output
+        let signRes = runCmd("/bin/bash", [
+            signerScript,
+            "sign",
+            archiveFile.path,
+            "--key-file", keyFile.path,
+            "--signature-file-output", sidecarFile.path
+        ])
+
+        XCTAssertEqual(signRes.status, 0, "Signer script must exit with 0: \(signRes.output)")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sidecarFile.path), "Dedicated signature sidecar must be created")
+
+        // 4. Verify sidecar content is pure Base64 and decodes to exactly 64 bytes
+        let sidecarRaw = try String(contentsOf: sidecarFile, encoding: .utf8)
+        let sidecarSig = sidecarRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertFalse(sidecarSig.contains("\n"), "Sidecar signature must not contain newlines")
+        XCTAssertFalse(sidecarSig.contains(" "), "Sidecar signature must not contain spaces")
+
+        guard let decodedSig = Data(base64Encoded: sidecarSig) else {
+            XCTFail("Sidecar signature must be valid Base64: '\(sidecarSig)'")
+            return
+        }
+        XCTAssertEqual(decodedSig.count, 64, "Decoded Ed25519 signature must be exactly 64 bytes")
+
+        // 5. Verify stdout enclosure metadata and XML snippet
+        XCTAssertTrue(signRes.output.contains("File: \(archiveFile.lastPathComponent)"), "Metadata must contain filename")
+        XCTAssertTrue(signRes.output.contains("Length: \(archiveLen) bytes"), "Metadata must contain byte length")
+        XCTAssertTrue(signRes.output.contains("SHA-256: \(archiveSHA)"), "Metadata must contain SHA-256")
+        XCTAssertTrue(signRes.output.contains("EdDSA Signature (Base64): \(sidecarSig)"), "Metadata must contain EdDSA Signature line")
+        XCTAssertTrue(signRes.output.contains("sparkle:edSignature=\"\(sidecarSig)\""), "XML snippet must contain exact sidecar signature")
+        XCTAssertTrue(signRes.output.contains("length=\"\(archiveLen)\""), "XML snippet must contain exact length")
+
+        // 6. Positive Verification: Verify signature against exact archive bytes using Swift CryptoKit
+        guard let decodedPubKeyData = Data(base64Encoded: pubKeyB64),
+              let pubKey = try? Curve25519.Signing.PublicKey(rawRepresentation: decodedPubKeyData) else {
+            XCTFail("Failed to instantiate Curve25519.Signing.PublicKey from Base64 public key data: \(pubKeyB64)")
+            return
+        }
+        XCTAssertEqual(decodedPubKeyData.count, 32, "Decoded public key must be exactly 32 bytes")
+        XCTAssertTrue(pubKey.isValidSignature(decodedSig, for: archiveBytes),
+                      "Swift CryptoKit must successfully verify the Ed25519 signature from the sidecar against exact archive bytes")
+
+        // 7. Verify --signature-only output mode
+        let sigOnlyRes = runCmd("/bin/bash", [
+            signerScript,
+            "sign",
+            archiveFile.path,
+            "--key-file", keyFile.path,
+            "--signature-only"
+        ])
+        XCTAssertEqual(sigOnlyRes.status, 0, "Signer script --signature-only must exit with 0")
+        XCTAssertEqual(sigOnlyRes.output.trimmingCharacters(in: .whitespacesAndNewlines), sidecarSig,
+                       "--signature-only output must match sidecar signature exactly")
+
+        // 8. Negative Test A: Original Mixed Stdout Parser Bug Reproduction
+        // Reproduce the old failure mode where line 64 'sparkle:edSignature: <SIG>' preceded 'sparkle:edSignature="<SIG>"'
+        let buggyOldStdout = """
+        === Sparkle 2 Enclosure Metadata ===
+        File: \(archiveFile.lastPathComponent)
+        Length: \(archiveLen) bytes
+        SHA-256: \(archiveSHA)
+        sparkle:edSignature: \(sidecarSig)
+
+        XML Enclosure Snippet:
+        <enclosure
+            url="https://example.com/download.dmg"
+            sparkle:edSignature="\(sidecarSig)"
+            sparkle:version="5" />
+        """
+        let buggyOldExtractRes = runCmd("/bin/bash", ["-c", """
+        echo '\(buggyOldStdout)' | grep "sparkle:edSignature" | head -n 1 | sed -E 's/.*sparkle:edSignature="([^"]+)".*/\\1/'
+        """])
+        let corruptedSig = buggyOldExtractRes.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(corruptedSig, "sparkle:edSignature: \(sidecarSig)",
+                       "Original grep|head -1|sed parser must reproduce bug by capturing descriptive metadata line")
+        XCTAssertNil(Data(base64Encoded: corruptedSig),
+                     "Original corrupted extracted signature must fail Base64 decoding")
+
+        // In contrast, extracting directly from the sidecar guarantees pure Base64
+        let directExtractRes = runCmd("/bin/bash", ["-c", "tr -d '\\r\\n ' < '\(sidecarFile.path)'"])
+        XCTAssertEqual(directExtractRes.output.trimmingCharacters(in: .whitespacesAndNewlines), sidecarSig,
+                       "Sidecar extraction must produce clean, pure Base64 without narrative text")
+
+        // 9. Negative Test B: Malformed / Non-Base64 Signature Rejection
+        let malformedSigString = "sparkle:edSignature: NOT_BASE_64_AT_ALL!!!"
+        XCTAssertNil(Data(base64Encoded: malformedSigString), "Non-Base64 string must fail decoding")
+
+        // 10. Negative Test C: Wrong Decoded Signature Length (!= 64 bytes)
+        let shortSigB64 = Data(repeating: 0x41, count: 32).base64EncodedString()
+        let decodedShort = Data(base64Encoded: shortSigB64)!
+        XCTAssertEqual(decodedShort.count, 32)
+        XCTAssertNotEqual(decodedShort.count, 64, "Short signature must not equal 64 bytes")
+        // CryptoKit requires exactly 64 bytes for Ed25519 signature
+        XCTAssertFalse(pubKey.isValidSignature(decodedShort, for: archiveBytes),
+                       "CryptoKit must reject signature of incorrect length")
+
+        let longSigB64 = Data(repeating: 0x42, count: 65).base64EncodedString()
+        let decodedLong = Data(base64Encoded: longSigB64)!
+        XCTAssertEqual(decodedLong.count, 65)
+        XCTAssertNotEqual(decodedLong.count, 64, "Long signature must not equal 64 bytes")
+        XCTAssertFalse(pubKey.isValidSignature(decodedLong, for: archiveBytes),
+                       "CryptoKit must reject 65-byte signature")
+
+        // 11. Negative Test D: Wrong Public Key Length (!= 32 bytes)
+        let shortPubData = Data(repeating: 0x50, count: 31)
+        XCTAssertNil(try? Curve25519.Signing.PublicKey(rawRepresentation: shortPubData),
+                     "Curve25519.Signing.PublicKey must throw/fail for raw data != 32 bytes")
+        let longPubData = Data(repeating: 0x51, count: 33)
+        XCTAssertNil(try? Curve25519.Signing.PublicKey(rawRepresentation: longPubData),
+                     "Curve25519.Signing.PublicKey must throw/fail for raw data != 32 bytes")
+
+        // 12. Negative Test E: Wrong Public Key (From Different Keypair)
+        let wrongPrivateKey = Curve25519.Signing.PrivateKey()
+        let wrongPublicKey = wrongPrivateKey.publicKey
+        XCTAssertFalse(wrongPublicKey.isValidSignature(decodedSig, for: archiveBytes),
+                       "Valid signature for one keypair must fail validation under a different public key")
+
+        // 13. Negative Test F: Tampered Archive Bytes
+        var tamperedBytes = archiveBytes
+        tamperedBytes.append(Data([0xEE, 0xFF]))
+        XCTAssertFalse(pubKey.isValidSignature(decodedSig, for: tamperedBytes),
+                       "Tampered archive bytes must fail signature validation")
+
+        // 14. Negative Test G: Empty Signature
+        let emptySigData = Data()
+        XCTAssertFalse(pubKey.isValidSignature(emptySigData, for: archiveBytes),
+                       "Empty signature must fail validation")
+    }
 }
