@@ -42,9 +42,10 @@ jobs:
       short_version: ${{ steps.validate_tag.outputs.short_version }}
       build_number: ${{ steps.validate_tag.outputs.build_number }}
     steps:
-      - name: Checkout repository
+      - name: Checkout repository at candidate release tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.tag_name }}
           fetch-depth: 0
 
       - name: Display Swift toolchain
@@ -131,9 +132,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Checkout repository at candidate release tag
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.inputs.tag_name }}
           fetch-depth: 0
 
       # Gating Stage 6: Environment & Secrets Verification (Fail-Closed)
@@ -223,30 +225,46 @@ jobs:
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
 
-      # Release Asset Upload (Fail-Closed)
-      - name: Publish GitHub Release
+      # Release Asset Upload (Two-Phase Promotion, WO-108)
+      - name: Publish or Promote GitHub Release
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           IS_DRAFT: "${{ github.event.inputs.is_draft }}"
           IS_PRERELEASE: "${{ github.event.inputs.is_prerelease }}"
         run: |
-          DRAFT_FLAG=""
-          if [ "${IS_DRAFT}" = "true" ]; then
-            DRAFT_FLAG="--draft"
-          fi
-          PRERELEASE_FLAG=""
-          if [ "${IS_PRERELEASE}" = "true" ]; then
-            PRERELEASE_FLAG="--prerelease"
-          fi
+          EXISTING_RELEASE="$(gh release view "${TAG}" --json isDraft,tagName 2>/dev/null || echo "")"
+          if [ -n "${EXISTING_RELEASE}" ]; then
+            IS_DRAFT_STATUS="$(echo "${EXISTING_RELEASE}" | python3 -c "import sys, json; print(json.load(sys.stdin).get('isDraft', False))")"
+            if [ "${IS_DRAFT_STATUS}" = "True" ]; then
+              if [ "${IS_DRAFT}" = "false" ]; then
+                echo "Promoting existing verified draft release ${TAG} to public (Phase B, WO-108)..."
+                gh release edit "${TAG}" --draft=false
+              else
+                echo "Draft release ${TAG} already exists. Retaining staged draft assets."
+              fi
+            else
+              echo "Release ${TAG} is already published as public. Preserving immutable release assets."
+            fi
+          else
+            echo "Creating new release ${TAG} (draft=${IS_DRAFT})..."
+            DRAFT_FLAG=""
+            if [ "${IS_DRAFT}" = "true" ]; then
+              DRAFT_FLAG="--draft"
+            fi
+            PRERELEASE_FLAG=""
+            if [ "${IS_PRERELEASE}" = "true" ]; then
+              PRERELEASE_FLAG="--prerelease"
+            fi
 
-          gh release create "${TAG}" \
-            dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg \
-            dist/SHA256SUMS.txt \
-            dist/BUILD_MANIFEST.json \
-            --title "Sentinel Node Wallet (${TAG})" \
-            --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
-            ${DRAFT_FLAG} ${PRERELEASE_FLAG}
+            gh release create "${TAG}" \
+              dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg \
+              dist/SHA256SUMS.txt \
+              dist/BUILD_MANIFEST.json \
+              --title "Sentinel Node Wallet (${TAG})" \
+              --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
+              ${DRAFT_FLAG} ${PRERELEASE_FLAG}
+          fi
 
       # Gating Stage 7: Sparkle Production Appcast Publication (WO-77, WO-84, WO-85, WO-89, WO-94, WO-95)
       - name: Publish or Validate Sparkle Production Appcast Feed

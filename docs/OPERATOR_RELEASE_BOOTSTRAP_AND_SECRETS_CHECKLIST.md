@@ -1,6 +1,6 @@
 # Operator Release Bootstrap & Secrets Provisioning Checklist
 **Document Reference:** `docs/OPERATOR_RELEASE_BOOTSTRAP_AND_SECRETS_CHECKLIST.md`  
-**Governing Directives:** WO-102, WO-105 (`MSG:chatgpt-sentinel-postwo99-production-updater-cutover-workorders-20261119-gpt6-224`)  
+**Governing Directives:** WO-102, WO-105, WO-107, WO-108, WO-109 (`MSG:chatgpt-sentinel-postwo105-production-trust-bootstrap-orders-20261119-gpt6-225`)  
 **Status:** **DISPATCH UNAVAILABLE / PRODUCTION RELEASE NO-GO** (Pending Human Operator Provisioning)
 
 ---
@@ -33,36 +33,91 @@ Navigate to **GitHub Repository Settings -> Environments -> New environment**:
 
 ---
 
-## 3. Minimal Workflow Activation Bootstrap (WO-102)
+## 3. Coherent Release-Only Default-Branch Bootstrap Package (WO-107)
 To enable manual `workflow_dispatch` execution in GitHub Actions, the workflow file `.github/workflows/release-macos.yml` must exist on the default branch (`main`).
 
-To avoid an unverified "blanket merge" of the full 61-file PR #27, the owner can bootstrap the workflow via a minimal branch:
+To ensure that the release pipeline operates with 100% coherence and does not suffer from tag-HEAD mismatch or missing script dependencies, the release workflow implements a **pinned candidate tag checkout architecture**:
+- The workflow runner checks out the exact target tag (`ref: ${{ github.event.inputs.tag_name }}`) with `fetch-depth: 0`.
+- Every script (`scripts/publish_production_appcast.sh`, `scripts/build_production_dmg.sh`, etc.), pinned dependency (`Package.resolved`), and release documentation (`docs/RELEASE_NOTES_CANDIDATE.md`) is guaranteed to match the exact reviewed commit of that tag.
+
+If the operator chooses to stage a separate, minimal release-only bootstrap PR onto `main` rather than merging full PR #27, the following cohesive file set must be included:
 ```bash
 # From local repository clone:
 git checkout main
 git pull origin main
-git checkout -b chore/bootstrap-release-workflow
-git checkout integration/pre-release-qualification-20261116 -- .github/workflows/release-macos.yml
-git commit -m "chore(ci): bootstrap macOS release workflow on main branch (WO-102)"
-git push origin chore/bootstrap-release-workflow
-# Open and merge minimal PR into main
+git checkout -b chore/bootstrap-release-pipeline
+
+# Check out complete release pipeline package from integration branch:
+git checkout integration/pre-release-qualification-20261116 -- \
+  .github/workflows/release-macos.yml \
+  scripts/build_app.sh \
+  scripts/build_dmg.sh \
+  scripts/build_production_dmg.sh \
+  scripts/sign_appcast_enclosure.sh \
+  scripts/publish_production_appcast.sh \
+  scripts/fetch-verify-knots.sh \
+  scripts/package_appstore_archive.sh \
+  Package.resolved \
+  docs/RELEASE_NOTES_CANDIDATE.md \
+  docs/OPERATOR_RELEASE_BOOTSTRAP_AND_SECRETS_CHECKLIST.md
+
+git commit -m "chore(ci): bootstrap coherent macOS release pipeline on main branch (WO-107)"
+git push origin chore/bootstrap-release-pipeline
+# Open and merge minimal release pipeline PR into main
 ```
 
-Until this minimal workflow exists on `origin/main`, GitHub Actions UI will report `workflow_dispatch` as **DISPATCH UNAVAILABLE**.
+Until `.github/workflows/release-macos.yml` exists on `origin/main`, GitHub Actions UI will report `workflow_dispatch` as **DISPATCH UNAVAILABLE**.
 
 ---
 
-## 4. Controlled Public Release & Feed Publication Flow (WO-103)
-Once secrets and the workflow are provisioned on `main`:
-1. **Trigger Workflow Dispatch:**
+## 4. Two-Phase Immutable Release Promotion & Feed Activation (WO-108)
+To eliminate collision errors, avoid re-signing verified binaries, and ensure immutable asset provenance, production releases follow a strict **Two-Phase Promotion** process:
+
+### Phase A: Candidate Draft Staging (`is_draft: true`)
+1. **Tag Candidate Commit:**
+   ```bash
+   git tag -s v1.0.0-build5 <reviewed-commit-sha> -m "Sentinel Node Wallet v1.0.0 (Build 5)"
+   git push origin v1.0.0-build5
+   ```
+2. **Trigger Workflow Dispatch (Phase A):**
    - In GitHub Actions -> Select **macOS Production Release & Sparkle Deployment** -> **Run workflow**.
-   - Input tag: e.g. `v1.0.0-build5`
+   - Input tag: `v1.0.0-build5`
    - Operator approval confirmed: `YES`
-   - Publish as draft: `true` (RECOMMENDED: generates signed, notarized DMG and dry-run feed without modifying public feed).
-2. **Review Draft Release:**
-   - Review draft release on GitHub Releases page.
-   - Verify notarization ticket and Gatekeeper acceptance.
-   - Verify `SHA256SUMS.txt` against local build artifacts.
-3. **Public Promotion & Feed Cutover:**
-   - Once confirmed, promote release from draft to public.
-   - Re-run workflow with `is_draft: false` (or execute `publish_production_appcast.sh --publish-to-main`) to transactionally push the updated `appcast.xml` to `origin/main`.
+   - Publish as draft: `true` (Phase A default).
+3. **Automated Verification:**
+   - Unprivileged tests (`swift test`) execute and verify all gates.
+   - Bitcoin Knots binary provenance is verified against embedded SHA-256 digests.
+   - Artifacts are built, signed with Developer ID (`S8QMQZA656`), notarized by Apple, and stapled.
+   - GitHub Release is created as a **Draft** via `gh release create --draft`.
+   - Sparkle feed publisher runs in `--dry-run` mode against the notarized DMG.
+   - **Result:** Immutable draft release staged; public feed on `main` remains untouched.
+
+### Phase B: Owner Promotion & Live Feed Cutover (`is_draft: false`)
+1. **Operator Verification of Draft:**
+   - Download draft DMG from GitHub Releases.
+   - Verify Gatekeeper acceptance: `spctl -a -t exec -vv "/Volumes/.../Sentinel Node Wallet.app"` exits `0` with `accepted`.
+   - Verify TeamIdentifier: `codesign -dv "/Volumes/.../Sentinel Node Wallet.app"` reports `TeamIdentifier=S8QMQZA656`.
+   - Verify notarization ticket: `stapler validate Sentinel-Node-Wallet-*.dmg`.
+2. **Trigger Workflow Dispatch (Phase B):**
+   - Run workflow with `tag_name: v1.0.0-build5`, `operator_approval_confirmed: YES`, and `is_draft: false`.
+   - Workflow executes `gh release edit v1.0.0-build5 --draft=false` to promote the existing draft to public (NO re-build, NO re-sign, NO asset collision).
+   - Workflow runs `publish_production_appcast.sh --publish-to-main` which:
+     - Downloads and verifies public asset HTTP 200 and SHA-256 match.
+     - Mounts downloaded DMG and validates Gatekeeper, Team ID `S8QMQZA656`, and nested executables (`bitcoind`, `bitcoin-cli`, `Sparkle.framework`).
+     - Fetches verified baseline feed from `origin/main:dist/appcast.xml` (or initializes pristine feed if absent, WO-109).
+     - Verifies monotonic sequence (`new_build > max_existing`).
+     - Appends cryptographically signed item and commits atomically to `origin/main` via isolated worktree.
+     - Performs independent live CDN read-back (`https://raw.githubusercontent.com/.../dist/appcast.xml`).
+
+### Idempotent Feed Retry
+If a network hiccup or CDN delay occurs after the release is public:
+- Re-running Phase B (`is_draft: false`) detects that the release is already public, skips release mutation, and retries feed publication idempotently without touching binary release assets.
+
+---
+
+## 5. Feed Input Authenticity & Monotonic Ordering (WO-109)
+The feed publisher (`scripts/publish_production_appcast.sh`) enforces strict baseline authenticity:
+1. **Remote Baseline First:** Baseline XML is derived directly from `origin/main:dist/appcast.xml`, preventing draft branch artifacts from polluting the production feed.
+2. **Pristine Initialization:** If the feed is absent on `main` (404), a pristine feed containing only the authorized, signed candidate item is initialized. Unauthenticated legacy draft items are never imported.
+3. **Monotonic Enforcement:** `new_build` must be strictly greater than all existing builds in the baseline feed.
+4. **Independent Read-Back:** Live publication reads back the raw GitHub CDN feed URL and validates HTTP 200 before exiting.

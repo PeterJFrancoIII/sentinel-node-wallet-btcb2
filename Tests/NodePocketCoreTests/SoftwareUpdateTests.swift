@@ -1376,6 +1376,25 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertNotEqual(privateKeyOnArgvRun.status, 0, "--private-key on CLI must fail closed")
         XCTAssertTrue(privateKeyOnArgvRun.output.contains("Security stop (WO-104)"), "Must halt with security stop: \(privateKeyOnArgvRun.output)")
         XCTAssertTrue(privateKeyOnArgvRun.output.contains("--private-key is prohibited on the command line"), "Must cite argv prohibition: \(privateKeyOnArgvRun.output)")
+
+        // MARK: - WO-106 Real Final-DMG Trust & Fail-Closed Gatekeeper / Team ID
+
+        // 26. WO-106 P0: Bundle with valid Info.plist and public key passes dry-run
+        let validAppBundle = FileManager.default.temporaryDirectory.appendingPathComponent("ValidTest-\(UUID().uuidString).app")
+        let validContents = validAppBundle.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: validContents, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: validAppBundle) }
+        try testInfoPlist.write(to: validContents.appendingPathComponent("Info.plist"), atomically: true, encoding: .utf8)
+
+        let validBundleRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", validAppBundle.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64
+        ])
+        XCTAssertEqual(validBundleRun.status, 0, "Valid Info.plist and public key pass dry run: \(validBundleRun.output)")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test

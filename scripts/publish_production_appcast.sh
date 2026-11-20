@@ -197,7 +197,9 @@ command -v shasum >/dev/null || fail "shasum is required."
 command -v python3 >/dev/null || fail "python3 is required."
 command -v git >/dev/null || fail "git is required."
 
-[ -f "${APPCAST_FILE}" ] || fail "Appcast file not found at ${APPCAST_FILE}"
+if [ -n "${APPCAST_OVERRIDE:-}" ]; then
+    [ -f "${APPCAST_FILE}" ] || fail "Specified appcast file not found at ${APPCAST_FILE}"
+fi
 
 # Resolve Sparkle sign_update binary and enforce pinned provenance (WO-88)
 if [ -n "${SIGN_UPDATE_OVERRIDE}" ]; then
@@ -310,13 +312,12 @@ if [ -n "${APP_BUNDLE_PATH}" ]; then
     [ "${BUNDLE_BUILD}" = "${BUILD_NUM}" ] ||
         fail "Build number mismatch in ${BUNDLE_CANDIDATE}: expected '${BUILD_NUM}', got '${BUNDLE_BUILD}'."
 
-    # Validate TeamIdentifier if codesigned
+    # Validate TeamIdentifier if codesigned (WO-101, WO-106: strictly pinned to single authorized Developer ID team S8QMQZA656)
     if command -v codesign >/dev/null 2>&1; then
         CODESIGN_TEAM="$(codesign -dv "${BUNDLE_CANDIDATE}" 2>&1 | grep "TeamIdentifier=" | cut -d= -f2 || echo "")"
         if [ -n "${CODESIGN_TEAM}" ] && [ "${CODESIGN_TEAM}" != "not set" ]; then
-            if [ "${CODESIGN_TEAM}" != "S8QMQZA656" ] && [ "${CODESIGN_TEAM}" != "89V8F6QJC2" ]; then
-                fail "TeamIdentifier mismatch in ${BUNDLE_CANDIDATE}: unrecognized Team ID '${CODESIGN_TEAM}'."
-            fi
+            [ "${CODESIGN_TEAM}" = "S8QMQZA656" ] ||
+                fail "TeamIdentifier mismatch in ${BUNDLE_CANDIDATE}: expected single authorized Developer ID Team ID 'S8QMQZA656', got '${CODESIGN_TEAM}'."
             echo "✓ Verified code signing TeamIdentifier: ${CODESIGN_TEAM}"
         fi
     fi
@@ -427,59 +428,118 @@ if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
         echo "✓ Verified byte-for-byte identity between local build artifact and public remote GitHub release asset."
     fi
 
-    # WO-101: Extract and verify embedded .app from downloaded release DMG
-    if command -v hdiutil >/dev/null 2>&1; then
-        echo "Mounting downloaded release DMG to verify embedded distribution bundle (WO-101)..."
-        DMG_MOUNT="$(mktemp -d -t sentinel-dmg-mount-XXXXXX)"
-        if hdiutil attach -readonly -nobrowse -mountpoint "${DMG_MOUNT}" "${TARGET_ARCHIVE}" >/dev/null 2>&1; then
-            DMG_APP="${DMG_MOUNT}/Sentinel Node Wallet.app"
-            if [ ! -d "${DMG_APP}" ]; then
-                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-                fail "Integrity violation (WO-101): Downloaded DMG does not contain 'Sentinel Node Wallet.app'."
-            fi
-            DMG_PLIST="${DMG_APP}/Contents/Info.plist"
-            if [ ! -f "${DMG_PLIST}" ]; then
-                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-                fail "Integrity violation (WO-101): Embedded .app in downloaded DMG lacks Contents/Info.plist."
-            fi
-            DMG_PUB_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${DMG_PLIST}" 2>/dev/null || echo "")"
-            DMG_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${DMG_PLIST}" 2>/dev/null || echo "")"
-            DMG_SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${DMG_PLIST}" 2>/dev/null || echo "")"
-            DMG_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${DMG_PLIST}" 2>/dev/null || echo "")"
-
-            if [ "${DMG_PUB_KEY}" != "${PUBLIC_KEY}" ]; then
-                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-                fail "Integrity violation (WO-101): Embedded SUPublicEDKey in downloaded DMG (${DMG_PUB_KEY}) does not match authorized public key (${PUBLIC_KEY})."
-            fi
-            if [ "${DMG_BUNDLE_ID}" != "pool.sentineldefensetechnologies.co.za" ]; then
-                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-                fail "Integrity violation (WO-101): Embedded bundle ID in downloaded DMG (${DMG_BUNDLE_ID}) does not match 'pool.sentineldefensetechnologies.co.za'."
-            fi
-            if [ "${DMG_SHORT_VER}" != "${VERSION}" ] || [ "${DMG_BUILD}" != "${BUILD_NUM}" ]; then
-                hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-                rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-                fail "Integrity violation (WO-101): Embedded version in downloaded DMG (v${DMG_SHORT_VER} Build ${DMG_BUILD}) does not match release tag (${TAG})."
-            fi
-
-            # Gatekeeper / Notarization check if spctl is available
-            if command -v spctl >/dev/null 2>&1; then
-                SPCTL_OUT="$(spctl -a -t exec -vv "${DMG_APP}" 2>&1 || true)"
-                if echo "${SPCTL_OUT}" | grep -qi "rejected"; then
-                    hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-                    rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-                    fail "Gatekeeper rejected embedded app in downloaded DMG (WO-101): ${SPCTL_OUT}"
-                fi
-            fi
-
-            hdiutil detach "${DMG_MOUNT}" -force 2>/dev/null || true
-            rm -rf "${DMG_MOUNT}" 2>/dev/null || true
-            echo "✓ Verified embedded distribution bundle in downloaded DMG matches all trust invariants (WO-101)."
-        fi
+    # WO-101, WO-106: Extract and verify embedded .app from downloaded release DMG
+    if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
+        command -v hdiutil >/dev/null 2>&1 || fail "Integrity violation (WO-106): hdiutil is required in live mode."
+        command -v codesign >/dev/null 2>&1 || fail "Integrity violation (WO-106): codesign is required in live mode."
+        command -v spctl >/dev/null 2>&1 || fail "Integrity violation (WO-106): spctl is required in live mode."
     fi
+
+    # WO-106: In live production mode, verification tools are strictly mandatory
+    command -v hdiutil >/dev/null 2>&1 || fail "Integrity violation (WO-106): hdiutil is required in live mode."
+    command -v codesign >/dev/null 2>&1 || fail "Integrity violation (WO-106): codesign is required in live mode."
+    command -v spctl >/dev/null 2>&1 || fail "Integrity violation (WO-106): spctl is required in live mode."
+
+    echo "Mounting downloaded release DMG to verify embedded distribution bundle (WO-101, WO-106)..."
+    DMG_MOUNT="$(mktemp -d -t sentinel-dmg-mount-XXXXXX)"
+    unmount_dmg() {
+        if [ -n "${DMG_MOUNT:-}" ] && [ -d "${DMG_MOUNT}" ]; then
+            hdiutil detach "${DMG_MOUNT}" -force >/dev/null 2>&1 || true
+            rm -rf "${DMG_MOUNT}" >/dev/null 2>&1 || true
+        fi
+    }
+    trap 'unmount_dmg; cleanup' EXIT
+
+    if ! hdiutil attach -readonly -nobrowse -mountpoint "${DMG_MOUNT}" "${TARGET_ARCHIVE}" >/dev/null 2>&1; then
+        unmount_dmg
+        fail "Integrity violation (WO-106): Failed to mount downloaded release DMG '${TARGET_ARCHIVE}'."
+    fi
+
+    DMG_APP="${DMG_MOUNT}/Sentinel Node Wallet.app"
+    if [ ! -d "${DMG_APP}" ]; then
+        unmount_dmg
+        fail "Integrity violation (WO-101/WO-106): Downloaded DMG does not contain 'Sentinel Node Wallet.app'."
+    fi
+    DMG_PLIST="${DMG_APP}/Contents/Info.plist"
+    if [ ! -f "${DMG_PLIST}" ]; then
+        unmount_dmg
+        fail "Integrity violation (WO-101/WO-106): Embedded .app in downloaded DMG lacks Contents/Info.plist."
+    fi
+
+    # WO-106: Verify nested executables and frameworks exist and are executable
+    [ -x "${DMG_APP}/Contents/MacOS/SentinelNodeWallet" ] || {
+        unmount_dmg
+        fail "Integrity violation (WO-106): Missing executable SentinelNodeWallet in DMG."
+    }
+    [ -x "${DMG_APP}/Contents/MacOS/bitcoind" ] || {
+        unmount_dmg
+        fail "Integrity violation (WO-106): Missing executable bitcoind in DMG."
+    }
+    [ -x "${DMG_APP}/Contents/MacOS/bitcoin-cli" ] || {
+        unmount_dmg
+        fail "Integrity violation (WO-106): Missing executable bitcoin-cli in DMG."
+    }
+    [ -d "${DMG_APP}/Contents/Frameworks/Sparkle.framework" ] || {
+        unmount_dmg
+        fail "Integrity violation (WO-106): Missing Sparkle.framework in DMG."
+    }
+
+    DMG_PUB_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${DMG_PLIST}" 2>/dev/null || echo "")"
+    DMG_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${DMG_PLIST}" 2>/dev/null || echo "")"
+    DMG_SHORT_VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${DMG_PLIST}" 2>/dev/null || echo "")"
+    DMG_BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${DMG_PLIST}" 2>/dev/null || echo "")"
+
+    if [ "${DMG_PUB_KEY}" != "${PUBLIC_KEY}" ]; then
+        unmount_dmg
+        fail "Integrity violation (WO-101/WO-106): Embedded SUPublicEDKey in downloaded DMG (${DMG_PUB_KEY}) does not match authorized public key (${PUBLIC_KEY})."
+    fi
+    if [ "${DMG_BUNDLE_ID}" != "pool.sentineldefensetechnologies.co.za" ]; then
+        unmount_dmg
+        fail "Integrity violation (WO-101/WO-106): Embedded bundle ID in downloaded DMG (${DMG_BUNDLE_ID}) does not match 'pool.sentineldefensetechnologies.co.za'."
+    fi
+    if [ "${DMG_SHORT_VER}" != "${VERSION}" ] || [ "${DMG_BUILD}" != "${BUILD_NUM}" ]; then
+        unmount_dmg
+        fail "Integrity violation (WO-101/WO-106): Embedded version in downloaded DMG (v${DMG_SHORT_VER} Build ${DMG_BUILD}) does not match release tag (${TAG})."
+    fi
+
+    # WO-106: Strict codesign verification on embedded DMG app and nested components
+    codesign --verify --strict --deep "${DMG_APP}" >/dev/null 2>&1 || {
+        unmount_dmg
+        fail "Integrity violation (WO-106): Strict codesign verification failed on embedded DMG app."
+    }
+
+    DMG_TEAM="$(codesign -dv "${DMG_APP}" 2>&1 | grep "TeamIdentifier=" | cut -d= -f2 || echo "")"
+    [ -n "${DMG_TEAM}" ] && [ "${DMG_TEAM}" != "not set" ] || {
+        unmount_dmg
+        fail "Integrity violation (WO-106): TeamIdentifier missing in embedded DMG app."
+    }
+    if [ "${DMG_TEAM}" != "S8QMQZA656" ]; then
+        unmount_dmg
+        fail "Integrity violation (WO-106): Embedded DMG app TeamIdentifier ('${DMG_TEAM}') does not match authorized Developer ID team 'S8QMQZA656'."
+    fi
+
+    # WO-106: Gatekeeper assessment check (must exit 0 with accepted verdict)
+    set +e
+    SPCTL_OUT="$(spctl -a -t exec -vv "${DMG_APP}" 2>&1)"
+    SPCTL_STATUS=$?
+    set -e
+    if [ ${SPCTL_STATUS} -ne 0 ] || ! echo "${SPCTL_OUT}" | grep -qi "accepted"; then
+        unmount_dmg
+        fail "Gatekeeper assessment failed for embedded app in downloaded DMG (WO-101/WO-106, exit ${SPCTL_STATUS}): ${SPCTL_OUT}"
+    fi
+
+    # WO-106: Stapler notarization ticket verification if stapler tool is present
+    if command -v stapler >/dev/null 2>&1; then
+        if ! stapler validate "${TARGET_ARCHIVE}" >/dev/null 2>&1 && ! stapler validate "${DMG_APP}" >/dev/null 2>&1; then
+            unmount_dmg
+            fail "Integrity violation (WO-106): Stapled notarization ticket validation failed on downloaded DMG."
+        fi
+        echo "✓ Verified stapled notarization ticket (WO-106)."
+    fi
+
+    unmount_dmg
+    trap cleanup EXIT
+    echo "✓ Verified embedded distribution bundle in downloaded DMG matches all trust invariants (WO-101, WO-106)."
 elif [ "${SANDBOX_SIMULATION}" = "1" ]; then
     # SANDBOX SIMULATION MODE: Used exclusively by isolated test harness
     if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ]; then
@@ -577,11 +637,50 @@ PY
     fi
 fi
 
-# 5. Monotonic Version Verification vs Existing Appcast Items (WO-89: Staged in Isolated Temp)
+# 5. Monotonic Version Verification vs Existing Appcast Items (WO-89: Staged in Isolated Temp, WO-109: Authenticated Baseline)
 STAGING_ORIGINAL="${TEMP_DIR}/appcast_original.xml"
 STAGING_CANDIDATE="${TEMP_DIR}/appcast_candidate.xml"
 
-cp "${APPCAST_FILE}" "${STAGING_ORIGINAL}"
+# In live mode, derive baseline feed directly from origin/main to prevent importing unauthenticated draft branch items (WO-109)
+if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
+    if git show origin/main:dist/appcast.xml > "${STAGING_ORIGINAL}" 2>/dev/null && [ -s "${STAGING_ORIGINAL}" ]; then
+        echo "✓ Fetched verified baseline appcast from origin/main:dist/appcast.xml"
+    elif [ -n "${APPCAST_OVERRIDE:-}" ] && [ -f "${APPCAST_OVERRIDE:-}" ]; then
+        cp "${APPCAST_OVERRIDE}" "${STAGING_ORIGINAL}"
+    elif [ -f "${APPCAST_FILE}" ]; then
+        echo "Baseline appcast not on origin/main; using local template at ${APPCAST_FILE}..."
+        cp "${APPCAST_FILE}" "${STAGING_ORIGINAL}"
+    else
+        echo "Baseline appcast absent on origin/main; creating pristine authenticated feed (WO-109)..."
+        cat <<'EOF' > "${STAGING_ORIGINAL}"
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <channel>
+        <title>Sentinel Node Wallet Updates</title>
+        <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+        <description>Official updates and security notices for Sentinel Node Wallet BTCB2 / XBT.</description>
+        <language>en</language>
+    </channel>
+</rss>
+EOF
+    fi
+elif [ -n "${APPCAST_OVERRIDE:-}" ] && [ -f "${APPCAST_OVERRIDE:-}" ]; then
+    cp "${APPCAST_OVERRIDE}" "${STAGING_ORIGINAL}"
+elif [ -f "${APPCAST_FILE}" ]; then
+    cp "${APPCAST_FILE}" "${STAGING_ORIGINAL}"
+else
+    cat <<'EOF' > "${STAGING_ORIGINAL}"
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Sentinel Node Wallet Updates</title>
+        <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+        <description>Official updates</description>
+        <language>en</language>
+    </channel>
+</rss>
+EOF
+fi
 
 python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" <<'PY' || fail "Appcast monotonic version check failed."
 import sys
@@ -714,6 +813,22 @@ if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
     git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
     echo "✓ Production appcast published successfully to origin/main via isolated worktree."
     echo "✓ Active working directory remained 100% untouched and unmutated."
+
+    if [ "${SANDBOX_SIMULATION}" = "0" ]; then
+        echo "Verifying published appcast live via raw GitHub CDN..."
+        CDN_URL="https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml"
+        sleep 2
+        CDN_STATUS="$(curl -s -o "${TEMP_DIR}/cdn_appcast.xml" -w "%{http_code}" "${CDN_URL}" || echo "000")"
+        if [ "${CDN_STATUS}" = "200" ]; then
+            if grep -q "sparkle:version=\"${BUILD_NUM}\"" "${TEMP_DIR}/cdn_appcast.xml"; then
+                echo "✓ Live CDN verification successful: Build ${BUILD_NUM} visible at ${CDN_URL} (HTTP 200)."
+            else
+                echo "⚠ Live CDN returned HTTP 200, but Build ${BUILD_NUM} not yet propagated in edge cache."
+            fi
+        else
+            echo "⚠ Live CDN returned HTTP ${CDN_STATUS} during immediate post-publish read-back."
+        fi
+    fi
 else
     echo "Dry-run validation complete. Active working directory and dist/appcast.xml were NOT mutated on disk."
 fi
