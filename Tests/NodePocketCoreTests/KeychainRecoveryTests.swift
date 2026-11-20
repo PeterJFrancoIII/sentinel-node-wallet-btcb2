@@ -67,4 +67,8 @@ final class KeychainRecoveryTests: XCTestCase {
             }
         }
     }
+
+    func testKeychainSharedInstanceFailsClosedWithoutSilentFallback() {
+        XCTAssertFalse(KeychainHelper.shared.allowFallbackForTesting, "KeychainHelper.shared must NEVER have fallback enabled in production")
+    }
 }
