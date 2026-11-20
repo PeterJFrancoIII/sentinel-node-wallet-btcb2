@@ -88,4 +88,95 @@ final class ConsensusSecurityDefaultsTests: XCTestCase {
             XCTAssertEqual(SyncProfile.preset(for: type).pruneMB, StorageMode.defaultPruneMB)
         }
     }
+
+    func testDefaultOnBroadcastRestrictedAtNodeManagerAndRPCClientLayers() async throws {
+        // 1. Verify BitcoinRPCClient default constructor enforces broadcast restriction
+        let defaultRPC = BitcoinRPCClient(user: "user", password: "pass")
+        XCTAssertTrue(defaultRPC.isBroadcastRestricted, "BitcoinRPCClient must default to isBroadcastRestricted == true")
+
+        // 2. Verify NodeManager default rpcClient enforces broadcast restriction
+        let nodeManager = NodeManager(config: NodeConfig(dataDirectory: tempDir()))
+        XCTAssertTrue(nodeManager.rpcClient.isBroadcastRestricted, "NodeManager.rpcClient must have isBroadcastRestricted == true by default")
+
+        // 3. Negative RPC-not-called tests: verify all restricted spend methods fail closed
+        let spendMethods = [
+            "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
+            "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
+            "signrawtransactionwithwallet", "signrawtransactionwithkey", "finalizepsbt"
+        ]
+
+        for method in spendMethods {
+            do {
+                let _: String = try await defaultRPC.call(method: method, params: ["param1"], walletName: "test_wallet")
+                XCTFail("Restricted RPC method '\(method)' must fail closed before executing network call")
+            } catch let error as RPCClientError {
+                guard case .transactionBroadcastDisabled = error else {
+                    XCTFail("Expected .transactionBroadcastDisabled for '\(method)', got: \(error)")
+                    continue
+                }
+            } catch {
+                XCTFail("Unexpected error for '\(method)': \(error)")
+            }
+        }
+
+        // 4. Verify WalletManager fails closed at the manager layer
+        let tmp = tempDir()
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+
+        let manager = WalletManager(
+            rpcClient: defaultRPC,
+            dataDirectory: tmp,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "zero_funds_wallet"
+        )
+
+        let preview = FundedTxPreview(
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 50000,
+            feeSats: 1000,
+            satPerVB: 5,
+            estimatedVSize: 140
+        )
+
+        do {
+            _ = try await manager.executeAuthorizedSend(preview: preview, capability: nil, approval: nil)
+            XCTFail("WalletManager.executeAuthorizedSend must fail closed when isBroadcastRestricted is true")
+        } catch let error as WalletSecurityError {
+            guard case .signingPathUnverified = error else {
+                XCTFail("Expected .signingPathUnverified, got: \(error)")
+                return
+            }
+        }
+
+        do {
+            _ = try await manager.send(to: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 0.0005)
+            XCTFail("WalletManager.send must fail closed when isBroadcastRestricted is true")
+        } catch let error as WalletSecurityError {
+            guard case .signingPathUnverified = error else {
+                XCTFail("Expected .signingPathUnverified, got: \(error)")
+                return
+            }
+        }
+
+        do {
+            _ = try await manager.bumpFee(txid: "0000000000000000000000000000000000000000000000000000000000000000")
+            XCTFail("WalletManager.bumpFee must fail closed when isBroadcastRestricted is true")
+        } catch let error as WalletSecurityError {
+            guard case .signingPathUnverified = error else {
+                XCTFail("Expected .signingPathUnverified, got: \(error)")
+                return
+            }
+        }
+
+        // 5. Verify legitimate read-only RPC methods are unaffected by spend gate
+        do {
+            let _: String = try await defaultRPC.call(method: "getblockchaininfo")
+        } catch let error as RPCClientError {
+            // Must NOT throw transactionBroadcastDisabled
+            if case .transactionBroadcastDisabled = error {
+                XCTFail("Legitimate read-only RPC method 'getblockchaininfo' must not be blocked by spend gate")
+            }
+        } catch {}
+    }
 }
