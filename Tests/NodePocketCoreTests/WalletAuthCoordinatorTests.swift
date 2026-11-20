@@ -425,7 +425,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             _ = try await coordinator.loginWithRecoveryCode(username: "operator", code: firstRecoveryCode)
             XCTFail("Consumed recovery code must fail")
         } catch let err as WalletAuthError {
-            XCTAssertEqual(err, .invalidCredentials)
+            XCTAssertEqual(err, .invalidRecoveryCode)
         }
     }
 
@@ -1430,6 +1430,102 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertEqual(creds.password, "BioSecurePassword123!@#", "Operator password must be retrieved from Keychain upon successful biometric auth")
         XCTAssertNotNil(creds.totpCode, "2FA TOTP code must be generated from Keychain upon successful biometric auth")
         XCTAssertEqual(creds.totpCode?.count, 6)
+    }
+
+    func testInvalidTOTPReturnsInvalidTOTPError() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_totp_err_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "totp_operator")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        _ = try await coordinator.enroll(
+            username: "totp_operator",
+            password: "CorrectPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Valid password + wrong TOTP must throw .invalidTOTP, NOT .invalidCredentials
+        do {
+            _ = try await coordinator.login(
+                username: "totp_operator",
+                password: "CorrectPassword123!@#",
+                totpCode: "999999"
+            )
+            XCTFail("Wrong TOTP must fail")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .invalidTOTP, "Mismatched TOTP code must throw .invalidTOTP so operator knows password was correct")
+        }
+    }
+
+    func testTOTPWhitespaceAndHyphenNormalization() {
+        let secret = "JBSWY3DPEHPK3PXP"
+        let now = Date().timeIntervalSince1970
+        let cleanCode = WalletAuthCoordinator.generateTOTP(secret: secret, time: now)
+
+        let first3 = String(cleanCode.prefix(3))
+        let last3 = String(cleanCode.suffix(3))
+
+        let spaced = "\(first3) \(last3)"
+        let hyphenated = "\(first3)-\(last3)"
+        let padded = "  \(cleanCode)  "
+
+        let (validSpaced, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: spaced, time: now)
+        XCTAssertTrue(validSpaced, "Spaced TOTP code from Apple Passwords / Google Authenticator must verify")
+
+        let (validHyphen, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: hyphenated, time: now)
+        XCTAssertTrue(validHyphen, "Hyphenated TOTP code must verify")
+
+        let (validPadded, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: padded, time: now)
+        XCTAssertTrue(validPadded, "Whitespace padded TOTP code must verify")
+    }
+
+    func testReloadRecordsFromDiskReflectsExternalChanges() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_reload_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "reload_user")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        _ = try await coordinator.enroll(
+            username: "reload_user",
+            password: "ReloadPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Induce a failed attempt
+        do {
+            _ = try await coordinator.login(username: "reload_user", password: "WrongPassword!", totpCode: enrollCode)
+        } catch {}
+
+        // Modify registry on disk to reset failed attempts
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        let data = try Data(contentsOf: registryURL)
+        var json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        var users = json["users"] as! [String: [String: Any]]
+        users["reload_user"]!["failedAttempts"] = 0
+        json["users"] = users
+        let updatedData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted])
+        try updatedData.write(to: registryURL, options: .atomic)
+
+        // Calling reloadRecordsFromDisk should reload disk state
+        await coordinator.reloadRecordsFromDisk()
+        let names = await coordinator.enrolledUsernames
+        XCTAssertTrue(names.contains("reload_user"))
     }
 }
 

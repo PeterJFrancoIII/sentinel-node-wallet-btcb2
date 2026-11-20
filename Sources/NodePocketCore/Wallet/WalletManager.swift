@@ -560,6 +560,14 @@ public actor WalletManager {
         let existsOnDisk = walletDir.wallets.contains(where: { $0.name == name })
 
         if isLoaded || existsOnDisk {
+            // Check multi-operator ownership first: if owned by a different operator, reject immediately
+            if let user = capability?.username, !user.isEmpty {
+                if let existingOwner = await walletInventory.getOwner(for: name),
+                   existingOwner.lowercased() != user.lowercased() {
+                    throw WalletAuthError.unauthorizedHighRiskAction("Operator '\(user)' is not authorized to access wallet '\(name)'.")
+                }
+            }
+
             // Idempotent recovery: If an interrupted previous attempt succeeded on bitcoind,
             // verify whether it is a valid encrypted descriptor wallet matching this passphrase.
             if !isLoaded && existsOnDisk {
@@ -575,6 +583,9 @@ public actor WalletManager {
                     // Successfully unlocked with matching passphrase! Adopt idempotently.
                     if storeInKeychain {
                         try await ensurePassphraseCustody(passphrase, account: name)
+                    }
+                    if let user = capability?.username, !user.isEmpty {
+                        await walletInventory.setOwner(for: name, owner: user)
                     }
                     self.currentWalletName = name
                     _ = try await refreshWalletInfo(capability: capability)
@@ -641,15 +652,15 @@ public actor WalletManager {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
 
+        // Record operator ownership for multi-operator isolation BEFORE refreshWalletInfo
+        if let user = capability?.username, !user.isEmpty {
+            await walletInventory.setOwner(for: name, owner: user)
+        }
+
         self.currentWalletName = name
         let snapshot = try await refreshWalletInfo(capability: capability)
         guard snapshot.isEncrypted, snapshot.descriptors else {
             throw WalletSecurityError.walletCreationVerificationFailed
-        }
-
-        // Record operator ownership for multi-operator isolation
-        if let user = capability?.username, !user.isEmpty {
-            await walletInventory.setOwner(for: name, owner: user)
         }
 
         // Generate and lock Canonical Receive Address for new wallet

@@ -67,4 +67,8 @@ final class KeychainRecoveryTests: XCTestCase {
             }
         }
     }
+
+    func testKeychainSharedInstanceHasFallbackEnabled() {
+        XCTAssertTrue(KeychainHelper.shared.allowDeviceOwnerFallback, "KeychainHelper.shared must have fallback enabled across all configurations")
+    }
 }

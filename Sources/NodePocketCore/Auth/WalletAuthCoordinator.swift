@@ -324,6 +324,10 @@ public actor WalletAuthCoordinator {
         !records.isEmpty
     }
 
+    public func reloadRecordsFromDisk() {
+        self.records = Self.loadRecords(from: registryURL)
+    }
+
     /// Backwards compatibility property returning the primary/first enrolled record.
     public var record: AuthRegistryRecord? {
         records.values.first
@@ -489,6 +493,9 @@ public actor WalletAuthCoordinator {
             }
         }
 
+        // Authoritatively reload records from disk before validating credentials
+        self.records = Self.loadRecords(from: registryURL)
+
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
             throw WalletAuthError.invalidCredentials
@@ -601,7 +608,7 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.authAbortedByLock
         }
 
-        let (valid, timeStep) = Self.verifyTOTP(secret: secret, code: totpCode, time: time)
+        let (valid, timeStep) = Self.verifyTOTP(secret: secret, code: totpCode, time: time, toleranceSteps: 2)
 
         // Audit 037: Re-fetch authoritative record after suspension to prevent actor reentrancy race conditions
         guard var freshRec = self.records[userKey] ?? self.records.values.first(where: { $0.username.lowercased() == userKey }) else {
@@ -614,7 +621,7 @@ public actor WalletAuthCoordinator {
         }
 
         guard valid else {
-            throw registerFailedAttempt(&freshRec)
+            throw registerFailedAttempt(&freshRec, fallbackError: .invalidTOTP)
         }
 
         guard timeStep > freshRec.lastUsedTimeStep else {
@@ -667,6 +674,9 @@ public actor WalletAuthCoordinator {
             }
         }
 
+        // Authoritatively reload records from disk before validating credentials
+        self.records = Self.loadRecords(from: registryURL)
+
         let cleanUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanUser.isEmpty else {
             throw WalletAuthError.invalidCredentials
@@ -718,7 +728,7 @@ public actor WalletAuthCoordinator {
         }
 
         guard let match = matchedIndex else {
-            throw registerFailedAttempt(&rec)
+            throw registerFailedAttempt(&rec, fallbackError: .invalidRecoveryCode)
         }
 
         // MANDATORY P0-2 / Audit 039: Require explicit device-owner presence / Touch ID step-up
@@ -991,7 +1001,10 @@ public actor WalletAuthCoordinator {
 
     // MARK: - Cryptographic Helpers
 
-    private func registerFailedAttempt(_ rec: inout AuthRegistryRecord) -> WalletAuthError {
+    private func registerFailedAttempt(
+        _ rec: inout AuthRegistryRecord,
+        fallbackError: WalletAuthError = .invalidCredentials
+    ) -> WalletAuthError {
         self.recordGeneration += 1
         rec.failedAttempts += 1
         let userKey = rec.username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -1004,7 +1017,7 @@ public actor WalletAuthCoordinator {
         }
         self.records[userKey] = rec
         try? saveRecords()
-        return WalletAuthError.invalidCredentials
+        return fallbackError
     }
 
     public static func randomBytes(count: Int) throws -> Data {
@@ -1192,7 +1205,10 @@ public actor WalletAuthCoordinator {
         time: TimeInterval = Date().timeIntervalSince1970,
         toleranceSteps: Int = 1
     ) -> (valid: Bool, timeStep: Int64) {
-        let cleanCode = code.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanCode = code
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "-", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanCode.count == 6, Int(cleanCode) != nil else {
             return (false, 0)
         }
@@ -1295,7 +1311,7 @@ public actor WalletAuthCoordinator {
         var dataTypeRef: AnyObject?
         var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
 
-        if status == errSecAuthFailed || status == -25293 {
+        if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
             // Supply authentication context with localized reason for items with .userPresence ACL
             let context = LAContext()
             context.localizedReason = "Authenticate to unlock Sentinel Node Wallet 2FA secret"
@@ -1391,7 +1407,7 @@ public actor WalletAuthCoordinator {
         #endif
 
         let account = "operator_login_" + cleanUser
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "app.nodepocket.btcb2.auth",
             kSecAttrAccount as String: account,
@@ -1400,7 +1416,13 @@ public actor WalletAuthCoordinator {
         ]
 
         var dataTypeRef: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        var status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        if status == errSecAuthFailed || status == -25293 || status == errSecInteractionNotAllowed || status == -25308 || status == errSecMissingEntitlement || status == -34018 {
+            let context = LAContext()
+            context.localizedReason = "Authenticate to unlock Sentinel Node Wallet saved password"
+            query[kSecUseAuthenticationContext as String] = context
+            status = SecItemCopyMatching(query as CFDictionary, &dataTypeRef)
+        }
         guard status == errSecSuccess, let data = dataTypeRef as? Data, let str = String(data: data, encoding: .utf8) else {
             throw WalletAuthError.storageError("Failed to load operator password from Keychain: status \(status)")
         }

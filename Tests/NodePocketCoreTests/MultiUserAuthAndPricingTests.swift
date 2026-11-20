@@ -359,4 +359,55 @@ final class MultiUserAuthAndPricingTests: XCTestCase {
         XCTAssertTrue(isAliceOwnerOfRenamed, "Alice must own renamed wallet Alice_ColdStorage")
         XCTAssertFalse(isOldNameStillOwned, "Old wallet name must no longer be owned")
     }
+
+    func testMultiWalletCreationForSingleOperator() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_multi_wallet_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        // 1. Enroll operator Kevin1
+        let (kevinSecret, _, kevinRecoveryCodes) = try await coordinator.generateEnrollmentSecret(username: "Kevin1")
+        let now = Date().timeIntervalSince1970
+        let kevinTotp = WalletAuthCoordinator.generateTOTP(secret: kevinSecret, time: now)
+        let kevinCap = try await coordinator.enroll(
+            username: "Kevin1",
+            password: "KevinStrongPassword123!@#",
+            secretBase32: kevinSecret,
+            totpCode: kevinTotp,
+            recoveryCodes: kevinRecoveryCodes
+        )
+        XCTAssertEqual(kevinCap.username, "Kevin1")
+
+        // 2. Setup Wallet Inventory
+        let rpc = BitcoinRPCClient(user: "testuser", password: "testpassword")
+        let inventory = WalletInventory(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            authCoordinator: coordinator,
+            allowUnauthenticatedForTesting: false
+        )
+
+        // 3. Register first wallet for Kevin1
+        await inventory.setOwner(for: "first_wallet", owner: "Kevin1")
+        let isKevinOwnerOfFirst = await inventory.isWalletOwnedBy(walletName: "first_wallet", username: "Kevin1")
+        XCTAssertTrue(isKevinOwnerOfFirst, "Kevin1 must own first_wallet")
+
+        // 4. Register second wallet for Kevin1 (metadata.walletOwners is no longer empty)
+        await inventory.setOwner(for: "second_wallet", owner: "Kevin1")
+        let isKevinOwnerOfSecond = await inventory.isWalletOwnedBy(walletName: "second_wallet", username: "Kevin1")
+        XCTAssertTrue(isKevinOwnerOfSecond, "Kevin1 must own second_wallet even when other wallets already exist")
+
+        // 5. Register third wallet for Kevin1
+        await inventory.setOwner(for: "third_wallet", owner: "Kevin1")
+        let isKevinOwnerOfThird = await inventory.isWalletOwnedBy(walletName: "third_wallet", username: "Kevin1")
+        XCTAssertTrue(isKevinOwnerOfThird, "Kevin1 must own third_wallet")
+
+        // 6. Verify an unrelated operator cannot access Kevin1's second_wallet
+        let isOtherOwnerOfSecond = await inventory.isWalletOwnedBy(walletName: "second_wallet", username: "OtherOperator")
+        XCTAssertFalse(isOtherOwnerOfSecond, "Other operator must NOT be authorized for Kevin1's second_wallet")
+    }
 }
