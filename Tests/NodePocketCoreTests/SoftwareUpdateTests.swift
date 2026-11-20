@@ -1815,4 +1815,212 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertTrue(remoteShowRes.output.contains("sparkle:version=\"5\""), "Bare remote main branch must contain published Build 5 enclosure")
         XCTAssertTrue(remoteShowRes.output.contains("sparkle:edSignature=\"\(sigB64)\""), "Bare remote main branch must contain genuine cryptographic EdDSA signature")
     }
+
+    // MARK: - WO-122-R1 Protected Feed Cutover & Read-Only Finalizer Verification
+
+    func testProtectedFeedCutoverAndReadOnlyFinalizerWO122R1() throws {
+        let currentFile = URL(fileURLWithPath: #file)
+        let repoRoot = currentFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let scriptPath = repoRoot.appendingPathComponent("scripts/publish_production_appcast.sh").path
+
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            XCTFail("publish_production_appcast.sh not found or not executable at \(scriptPath)")
+            return
+        }
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-protected-feed-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        let bareRemote = tempBase.appendingPathComponent("remote.git")
+        let workingClone = tempBase.appendingPathComponent("clone")
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // 1. Initialize bare remote with initial main branch containing Build 3
+        _ = runCmd("/usr/bin/git", ["init", "--bare", "-b", "main", bareRemote.path])
+        try Data("SENTINEL_TEST_FIXTURE_MARKER".utf8).write(to: bareRemote.appendingPathComponent("SENTINEL_TEST_FIXTURE_MARKER"))
+
+        _ = runCmd("/usr/bin/git", ["clone", bareRemote.path, workingClone.path])
+        _ = runCmd("/usr/bin/git", ["config", "user.name", "Test Operator"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["config", "user.email", "operator@nodepocket.app"], cwd: workingClone)
+
+        let cloneDist = workingClone.appendingPathComponent("dist")
+        try FileManager.default.createDirectory(at: cloneDist, withIntermediateDirectories: true)
+        let initialAppcast = """
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Sentinel Node Wallet Updates</title>
+        <item>
+            <title>Sentinel Node Wallet v1.0.0 (Build 3)</title>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/app.dmg"
+                sparkle:version="3"
+                sparkle:shortVersionString="1.0.0"
+                sparkle:edSignature="fakeSig3"
+                length="12000000"
+                type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
+"""
+        let initialAppcastURL = cloneDist.appendingPathComponent("appcast.xml")
+        try initialAppcast.write(to: initialAppcastURL, atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/git", ["add", "dist/appcast.xml"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["commit", "-m", "chore(feed): initial main feed build 3"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["push", "origin", "main"], cwd: workingClone)
+
+        // 2. Install pre-receive hook in bareRemote simulating GitHub protected main branch policy
+        let hooksDir = bareRemote.appendingPathComponent("hooks")
+        try FileManager.default.createDirectory(at: hooksDir, withIntermediateDirectories: true)
+        let preReceiveHook = hooksDir.appendingPathComponent("pre-receive")
+        let hookScript = """
+#!/bin/bash
+while read oldrev newrev refname; do
+    if [ "$refname" = "refs/heads/main" ]; then
+        echo "remote: error: GH006: Protected branch update failed for refs/heads/main: Direct pushes are forbidden. Pull request review required." >&2
+        exit 1
+    fi
+done
+exit 0
+"""
+        try hookScript.write(to: preReceiveHook, atomically: true, encoding: .utf8)
+        _ = runCmd("/bin/chmod", ["+x", preReceiveHook.path])
+
+        // 3. Generate keypair and signed archive for Build 5
+        let privKey = Curve25519.Signing.PrivateKey()
+        let pubKey = privKey.publicKey
+        let pubKeyB64 = pubKey.rawRepresentation.base64EncodedString()
+
+        let dummyDMG = tempBase.appendingPathComponent("test-release-build5.dmg")
+        let dmgBytes = Data("DISPOSABLE_SYNTHETIC_SIGNED_RELEASE_DMG_CONTENT_BUILD5".utf8)
+        try dmgBytes.write(to: dummyDMG)
+
+        let signature = try privKey.signature(for: dmgBytes)
+        let sigB64 = signature.base64EncodedString()
+
+        let cloneScripts = workingClone.appendingPathComponent("scripts")
+        try FileManager.default.createDirectory(at: cloneScripts, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: scriptPath), to: cloneScripts.appendingPathComponent("publish_production_appcast.sh"))
+
+        let packageResolved = repoRoot.appendingPathComponent("Package.resolved")
+        if FileManager.default.fileExists(atPath: packageResolved.path) {
+            try? FileManager.default.copyItem(at: packageResolved, to: workingClone.appendingPathComponent("Package.resolved"))
+        }
+
+        let cloneScript = cloneScripts.appendingPathComponent("publish_production_appcast.sh").path
+        let signUpdatePath = repoRoot.appendingPathComponent(".build/artifacts/sparkle/Sparkle/bin/sign_update").path
+
+        // 4. Test Feed Staging: Stage candidate feed to branch feed/v1.0.0-build5
+        var stageArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--sandbox-simulation",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES",
+            "--stage-feed-branch",
+            "--prune-unsigned-legacy"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            stageArgs += ["--sign-update", signUpdatePath]
+        }
+
+        let stageRes = runCmd("/bin/bash", stageArgs, cwd: workingClone)
+        XCTAssertEqual(stageRes.status, 0, "Staging feed to branch feed/v1.0.0-build5 must succeed: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("Staged candidate appcast successfully to origin branch 'feed/v1.0.0-build5'"),
+                      "Must log successful staging to feed branch: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("Direct push to origin/main was NOT attempted"),
+                      "Must confirm direct push to main was not attempted: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("STATUS: FEED_BRANCH_STAGED"),
+                      "Must report STATUS: FEED_BRANCH_STAGED: \(stageRes.output)")
+
+        // Verify bare remote received the feed branch while main remains untouched at Build 3
+        let feedBranchShow = runCmd("/usr/bin/git", ["show", "feed/v1.0.0-build5:dist/appcast.xml"], cwd: bareRemote)
+        XCTAssertEqual(feedBranchShow.status, 0, "Bare remote must contain feed/v1.0.0-build5 branch")
+        XCTAssertTrue(feedBranchShow.output.contains("sparkle:version=\"5\""), "feed branch must contain candidate Build 5")
+
+        let mainBranchShow = runCmd("/usr/bin/git", ["show", "main:dist/appcast.xml"], cwd: bareRemote)
+        XCTAssertEqual(mainBranchShow.status, 0, "Bare remote must contain main branch")
+        XCTAssertFalse(mainBranchShow.output.contains("sparkle:version=\"5\""), "Protected main branch must NOT contain Build 5 before PR merge")
+        XCTAssertTrue(mainBranchShow.output.contains("sparkle:version=\"3\""), "Protected main branch must remain at Build 3")
+
+        // 5. Test Read-Only Finalizer BEFORE merge: Unmerged feed returns PUBLIC_RELEASE_AWAITING_FEED_APPROVAL (exit 75)
+        let mockCDNFile = tempBase.appendingPathComponent("mock_cdn_appcast.xml")
+        try initialAppcast.write(to: mockCDNFile, atomically: true, encoding: .utf8)
+
+        var unapprovedFinalizerArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--cdn-url", "file://\(mockCDNFile.path)",
+            "--verify-deployed-feed"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            unapprovedFinalizerArgs += ["--sign-update", signUpdatePath]
+        }
+
+        let unapprovedRes = runCmd("/bin/bash", unapprovedFinalizerArgs, cwd: workingClone)
+        XCTAssertEqual(unapprovedRes.status, 75, "Unapproved feed on CDN must exit with typed code 75: \(unapprovedRes.output)")
+        XCTAssertTrue(unapprovedRes.output.contains("STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"),
+                      "Must report STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL: \(unapprovedRes.output)")
+        XCTAssertFalse(unapprovedRes.output.contains("STATUS: DEPLOYED"),
+                      "Unapproved feed must never report DEPLOYED: \(unapprovedRes.output)")
+
+        // 6. Test Stale CDN response with matching version substring but wrong bytes: exits 75
+        let staleTamperedXML = """
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Sentinel Node Wallet Updates</title>
+        <item>
+            <title>Tampered Item</title>
+            <enclosure url="https://example.com/bad.dmg" sparkle:version="5" sparkle:edSignature="\(sigB64)" length="1000" type="application/octet-stream" />
+        </item>
+        <!-- TAMPERED BYTES -->
+    </channel>
+</rss>
+"""
+        try staleTamperedXML.write(to: mockCDNFile, atomically: true, encoding: .utf8)
+        let staleRes = runCmd("/bin/bash", unapprovedFinalizerArgs, cwd: workingClone)
+        XCTAssertEqual(staleRes.status, 75, "Tampered CDN feed must exit with code 75: \(staleRes.output)")
+        XCTAssertTrue(staleRes.output.contains("PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"),
+                      "Tampered feed must report AWAITING_FEED_APPROVAL: \(staleRes.output)")
+
+        // 7. Test 404 Feed URL: exits 75
+        var notFoundFinalizerArgs = unapprovedFinalizerArgs
+        notFoundFinalizerArgs[notFoundFinalizerArgs.firstIndex(of: "--cdn-url")! + 1] = "file://\(tempBase.path)/nonexistent_404.xml"
+        let notFoundRes = runCmd("/bin/bash", notFoundFinalizerArgs, cwd: workingClone)
+        XCTAssertEqual(notFoundRes.status, 75, "404 CDN feed must exit with code 75: \(notFoundRes.output)")
+        XCTAssertTrue(notFoundRes.output.contains("PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"))
+
+        // 8. Test Approved Human Operator Merge: Deploy candidate feed to CDN and assert DEPLOYED (exit 0)
+        let stagedFeedContent = feedBranchShow.output
+        try stagedFeedContent.write(to: mockCDNFile, atomically: true, encoding: .utf8)
+
+        var approvedFinalizerArgs = unapprovedFinalizerArgs
+        approvedFinalizerArgs += ["--candidate-appcast", mockCDNFile.path]
+        let approvedRes = runCmd("/bin/bash", approvedFinalizerArgs, cwd: workingClone)
+        XCTAssertEqual(approvedRes.status, 0, "Approved merged feed on CDN must exit with code 0: \(approvedRes.output)")
+        XCTAssertTrue(approvedRes.output.contains("STATUS: DEPLOYED"),
+                      "Approved feed must report STATUS: DEPLOYED: \(approvedRes.output)")
+        XCTAssertTrue(approvedRes.output.contains("Live CDN verification successful: Build 5 feed exact-byte match"),
+                      "Approved feed must log exact-byte SHA-256 and XML match: \(approvedRes.output)")
+    }
 }

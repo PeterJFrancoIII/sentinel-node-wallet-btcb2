@@ -128,11 +128,16 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
      - Runs `publish_production_appcast.sh --preflight --prune-unsigned-legacy` against the downloaded archive to verify all live publish prerequisites and binary verifiers pass before making the release public.
    - **Step 3: Immutable Draft Release Promotion:**
      - Executes `gh release edit v1.0.0-build5 --draft=false` to promote the existing draft to public (**NO re-build, NO re-sign, NO asset collision**).
-   - **Step 4: Live Feed Publication & Exact-Byte CDN Readback (WO-118, WO-122):**
-     - Runs `publish_production_appcast.sh --publish-to-main --prune-unsigned-legacy` using the downloaded archive, signature, and public key.
-     - Commits updated `dist/appcast.xml` atomically to `origin/main` via isolated worktree.
-     - Performs bounded CDN readback (up to 10 attempts with retry delay) requiring HTTP 200, exact-byte SHA-256 identity with candidate XML, and ElementTree structural parsing of enclosure version/signature.
-     - If CDN readback fails or times out, exits with typed status `PARTIAL_RELEASE_FEED_NOT_LIVE` (exit code 75) and operator recovery guidance.
+   - **Step 4: Staged Feed Branch Creation for Operator PR Review (WO-118, WO-122, WO-122-R1):**
+     - Because `main` is protected by mandatory pull request review and status checks, direct push to `origin/main` is strictly prohibited in production.
+     - Phase B runs `publish_production_appcast.sh --stage-feed-branch --prune-unsigned-legacy` using the downloaded archive, signature, and public key.
+     - Stages updated candidate `dist/appcast.xml` atomically onto an isolated branch `feed/${TAG}` via isolated git worktree against verified `origin/main` baseline, leaving `origin/main` untouched.
+     - The operator reviews and merges the feed update PR into `main` according to repository branch protection governance.
+   - **Step 5: Read-Only Finalizer & Live Feed Deployment Verification (WO-122-R1):**
+     - Runs `publish_production_appcast.sh --verify-deployed-feed` to probe the public raw CDN feed URL on `origin/main`.
+     - Performs bounded CDN readback requiring HTTP 200, exact-byte SHA-256 identity with candidate XML, and ElementTree structural parsing of enclosure version/signature.
+     - If the feed PR has not yet been merged into `main` by the operator, the finalizer outputs typed status `STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL` and exits with code 75 (captured cleanly in CI via `continue-on-error: true`).
+     - Once the operator approves and merges the feed PR into `main`, running `--verify-deployed-feed` validates exact-byte SHA-256 and ElementTree XML enclosure, outputting `STATUS: DEPLOYED` (exit code 0).
 
 ### Idempotent Feed Retry
 If a network hiccup or CDN delay occurs after the release is public:

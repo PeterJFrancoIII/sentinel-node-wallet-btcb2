@@ -40,6 +40,10 @@ ED_KEY_FILE=""
 PRUNE_UNSIGNED_LEGACY=0
 ENFORCE_SIGNED_FEED=0
 PREFLIGHT=0
+STAGE_FEED_BRANCH=0
+VERIFY_DEPLOYED_FEED=0
+CDN_URL="${SENTINEL_CDN_URL:-https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml}"
+CANDIDATE_APPCAST=""
 
 usage() {
     cat <<EOF
@@ -48,7 +52,7 @@ Usage:
 
 Options:
   --tag <tag>                Required. Pinned release tag (e.g. v1.0.0-build5)
-  --operator-approval <YES>  Required for live publish to main
+  --operator-approval <YES>  Required for live publish / feed staging
   --signature <sig>          EdDSA signature for the archive
   --signature-file <file>    File containing the EdDSA signature
   --public-key <base64>      Ed25519 public key (SUPublicEDKey) for cryptographic verification
@@ -59,7 +63,11 @@ Options:
   --local-archive <dmg-file> Local signed build artifact to cross-check byte-for-byte against downloaded release
   --sandbox-simulation       Run in isolated test sandbox (offline bare git remote simulation)
   --sign-update <path>       Path to Sparkle sign_update binary override
-  --publish-to-main          Commit and push updated appcast.xml directly to origin/main via isolated worktree
+  --stage-feed-branch        Stage candidate appcast to isolated feed branch (feed/<tag>) for reviewed PR merge to main (WO-122-R1)
+  --verify-deployed-feed     Verify candidate appcast is live on origin/main via raw CDN readback (read-only finalizer, WO-122-R1)
+  --cdn-url <url>            Override URL for CDN readback verification (default: raw GitHub main feed)
+  --candidate-appcast <path> Override path to candidate appcast XML file (WO-122-R1)
+  --publish-to-main          Stage candidate feed (in live mode, pushes to feed/<tag> branch to respect protected main policy; direct main push is prohibited in production) (WO-122-R1)
   --prune-unsigned-legacy    Prune historical unauthenticated enclosures lacking sparkle:edSignature (WO-113)
   --preflight                Execute preflight validation of all live publish prerequisites without publishing (WO-120)
   --dry-run                  Simulate validation and print appcast diff (default)
@@ -146,6 +154,28 @@ while [ $# -gt 0 ]; do
             DRY_RUN=1
             PUBLISH_TO_MAIN=0
             shift
+            ;;
+        --stage-feed-branch)
+            STAGE_FEED_BRANCH=1
+            DRY_RUN=0
+            PUBLISH_TO_MAIN=0
+            shift
+            ;;
+        --verify-deployed-feed)
+            VERIFY_DEPLOYED_FEED=1
+            DRY_RUN=1
+            PUBLISH_TO_MAIN=0
+            shift
+            ;;
+        --cdn-url)
+            [ $# -ge 2 ] || fail "Missing value for --cdn-url"
+            CDN_URL="$2"
+            shift 2
+            ;;
+        --candidate-appcast)
+            [ $# -ge 2 ] || fail "Missing value for --candidate-appcast"
+            CANDIDATE_APPCAST="$2"
+            shift 2
             ;;
         --publish-to-main)
             PUBLISH_TO_MAIN=1
@@ -490,17 +520,19 @@ if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
         echo "✓ Verified byte-for-byte identity between local build artifact and public remote GitHub release asset."
     fi
 
-    # WO-101, WO-106: Extract and verify embedded .app from downloaded release DMG
-    if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
-        command -v hdiutil >/dev/null 2>&1 || fail "Integrity violation (WO-106): hdiutil is required in live mode."
+    # WO-101, WO-106, WO-122-R1: Extract and verify embedded .app from downloaded release DMG
+    command -v hdiutil >/dev/null 2>&1 || fail "Integrity violation (WO-106): hdiutil is required in live mode."
         command -v codesign >/dev/null 2>&1 || fail "Integrity violation (WO-106): codesign is required in live mode."
         command -v spctl >/dev/null 2>&1 || fail "Integrity violation (WO-106): spctl is required in live mode."
-    fi
-
-    # WO-106: In live production mode, verification tools are strictly mandatory
-    command -v hdiutil >/dev/null 2>&1 || fail "Integrity violation (WO-106): hdiutil is required in live mode."
-    command -v codesign >/dev/null 2>&1 || fail "Integrity violation (WO-106): codesign is required in live mode."
-    command -v spctl >/dev/null 2>&1 || fail "Integrity violation (WO-106): spctl is required in live mode."
+        STAPLER_BIN=""
+        if command -v xcrun >/dev/null 2>&1 && xcrun --find stapler >/dev/null 2>&1; then
+            STAPLER_BIN="xcrun stapler"
+        elif command -v stapler >/dev/null 2>&1; then
+            STAPLER_BIN="stapler"
+        fi
+        if [ -z "${STAPLER_BIN}" ]; then
+            fail "Integrity violation (WO-122-R1): xcrun stapler is required in live mode to verify notarization ticket before publication."
+        fi
 
     echo "Mounting downloaded release DMG to verify embedded distribution bundle (WO-101, WO-106)..."
     DMG_MOUNT="$(mktemp -d -t sentinel-dmg-mount-XXXXXX)"
@@ -590,14 +622,12 @@ if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
         fail "Gatekeeper assessment failed for embedded app in downloaded DMG (WO-101/WO-106, exit ${SPCTL_STATUS}): ${SPCTL_OUT}"
     fi
 
-    # WO-106: Stapler notarization ticket verification if stapler tool is present
-    if command -v stapler >/dev/null 2>&1; then
-        if ! stapler validate "${TARGET_ARCHIVE}" >/dev/null 2>&1 && ! stapler validate "${DMG_APP}" >/dev/null 2>&1; then
-            unmount_dmg
-            fail "Integrity violation (WO-106): Stapled notarization ticket validation failed on downloaded DMG."
-        fi
-        echo "✓ Verified stapled notarization ticket (WO-106)."
+    # WO-106, WO-122-R1: Stapler notarization ticket verification (strictly mandatory fail-closed in live mode)
+    if ! ${STAPLER_BIN} validate "${TARGET_ARCHIVE}" >/dev/null 2>&1 && ! ${STAPLER_BIN} validate "${DMG_APP}" >/dev/null 2>&1; then
+        unmount_dmg
+        fail "Integrity violation (WO-106, WO-122-R1): Stapled notarization ticket validation failed on downloaded DMG."
     fi
+    echo "✓ Verified stapled notarization ticket via ${STAPLER_BIN} (WO-106, WO-122-R1)."
 
     unmount_dmg
     trap cleanup EXIT
@@ -796,10 +826,21 @@ print(f"✓ Monotonic check passed: candidate build {new_build} > existing build
 PY
 
 # 6. Format and Insert New Item Block into Isolated Candidate XML (WO-89: Zero Source Workspace Mutation, WO-113: Schema Compliant Tree Mutation)
-PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
-RELEASE_NOTES_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/${TAG}"
+if [ -n "${CANDIDATE_APPCAST}" ] && [ -f "${CANDIDATE_APPCAST}" ]; then
+    cp "${CANDIDATE_APPCAST}" "${STAGING_CANDIDATE}"
+    echo "✓ Using specified candidate appcast for verification: ${CANDIDATE_APPCAST}"
+elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ] && [ -f "${ROOT_DIR}/dist/candidate_appcast.xml" ]; then
+    cp "${ROOT_DIR}/dist/candidate_appcast.xml" "${STAGING_CANDIDATE}"
+    echo "✓ Using saved candidate appcast from dist/candidate_appcast.xml"
+elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ] && git show "origin/feed/${TAG}:dist/appcast.xml" > "${STAGING_CANDIDATE}" 2>/dev/null && [ -s "${STAGING_CANDIDATE}" ]; then
+    echo "✓ Using candidate appcast from staged branch origin/feed/${TAG}"
+elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ] && git show "feed/${TAG}:dist/appcast.xml" > "${STAGING_CANDIDATE}" 2>/dev/null && [ -s "${STAGING_CANDIDATE}" ]; then
+    echo "✓ Using candidate appcast from staged branch feed/${TAG}"
+else
+    PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
+    RELEASE_NOTES_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/${TAG}"
 
-python3 - "${STAGING_ORIGINAL}" "${STAGING_CANDIDATE}" "${BUILD_NUM}" "${VERSION}" "${RELEASE_URL}" "${ED_SIGNATURE}" "${ASSET_LENGTH}" "${PUB_DATE}" "${RELEASE_NOTES_URL}" "${DRY_RUN}" "${PRUNE_UNSIGNED_LEGACY}" <<'PY' || fail "Failed to generate valid updated appcast.xml."
+    python3 - "${STAGING_ORIGINAL}" "${STAGING_CANDIDATE}" "${BUILD_NUM}" "${VERSION}" "${RELEASE_URL}" "${ED_SIGNATURE}" "${ASSET_LENGTH}" "${PUB_DATE}" "${RELEASE_NOTES_URL}" "${DRY_RUN}" "${PRUNE_UNSIGNED_LEGACY}" <<'PY' || fail "Failed to generate valid updated appcast.xml."
 import sys
 import xml.etree.ElementTree as ET
 
@@ -877,22 +918,32 @@ if is_dry_run:
 else:
     print(f"✓ Isolated staging appcast generated successfully at {candidate_path}")
 PY
+fi
 
 if [ "${PREFLIGHT}" = "1" ]; then
     echo "✓ Preflight verification passed (WO-120): All live publication prerequisites, binary verifiers, and cryptographic gates satisfied without mutation."
     exit 0
 fi
 
-# 7. Transactional Feed Publish to Main via Isolated Git Worktree (WO-84, WO-89: Zero Source Workspace Mutation, WO-100: Sandbox/Live Separation)
-if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
+# 7. Transactional Feed Publish / Staging via Isolated Git Worktree (WO-84, WO-89, WO-100, WO-122-R1)
+if [ "${PUBLISH_TO_MAIN}" = "1" ] || [ "${STAGE_FEED_BRANCH}" = "1" ]; then
     if [ "${SANDBOX_SIMULATION}" = "1" ]; then
         BARE_REPO_PATH="${REMOTE_ORIGIN_URL#file://}"
         if [ ! -d "${BARE_REPO_PATH}" ] || [ ! -f "${BARE_REPO_PATH}/SENTINEL_TEST_FIXTURE_MARKER" ]; then
             fail "FATAL SECURITY STOP (WO-100): Remote '${REMOTE_ORIGIN_URL}' is not an authorized test fixture with SENTINEL_TEST_FIXTURE_MARKER."
         fi
-        echo "Publishing test appcast to isolated fixture bare remote (${BARE_REPO_PATH}) via git worktree..."
+        if [ "${STAGE_FEED_BRANCH}" = "1" ]; then
+            TARGET_REF="refs/heads/feed/${TAG}"
+            echo "Staging candidate appcast to isolated feed branch (${TARGET_REF}) on bare remote (${BARE_REPO_PATH}) via git worktree..."
+        else
+            TARGET_REF="main"
+            echo "Publishing test appcast to isolated fixture bare remote (${BARE_REPO_PATH}) via git worktree..."
+        fi
     else
-        echo "Publishing candidate appcast to origin/main branch via isolated git worktree..."
+        # WO-122-R1: In live production mode (SANDBOX_SIMULATION=0), direct push to origin/main is STRICTLY FORBIDDEN by repository branch protection policy.
+        # Candidate feed is always staged to isolated branch feed/<tag> for human PR review and merge.
+        TARGET_REF="refs/heads/feed/${TAG}"
+        echo "Staging candidate appcast to isolated feed branch '${TARGET_REF}' via git worktree (WO-122-R1)..."
     fi
     WORKTREE_DIR="$(mktemp -d -t sentinel-worktree-XXXXXX)"
     cleanup_worktree() {
@@ -913,30 +964,50 @@ if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
     fi
 
     git -C "${WORKTREE_DIR}" add dist/appcast.xml
-    git -C "${WORKTREE_DIR}" commit -m "chore(feed): publish Sparkle appcast for ${TAG} (WO-84, WO-89)"
-    git -C "${WORKTREE_DIR}" push origin HEAD:main || fail "Failed to push updated feed to origin/main."
-
-    git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
-    echo "✓ Production appcast published successfully to origin/main via isolated worktree."
+    if [ "${TARGET_REF}" = "main" ]; then
+        git -C "${WORKTREE_DIR}" commit -m "chore(feed): publish Sparkle appcast for ${TAG} (WO-84, WO-89)"
+        git -C "${WORKTREE_DIR}" push origin HEAD:main || fail "Failed to push updated feed to origin/main."
+        git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+        echo "✓ Production appcast published successfully to origin/main via isolated worktree."
+    else
+        git -C "${WORKTREE_DIR}" commit -m "chore(feed): stage Sparkle appcast for ${TAG} (WO-122-R1)"
+        git -C "${WORKTREE_DIR}" push origin "HEAD:${TARGET_REF}" || fail "Failed to push staged feed branch to origin/${TARGET_REF}."
+        git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+        echo "✓ Staged candidate appcast successfully to origin branch 'feed/${TAG}' via isolated worktree."
+        echo "✓ Direct push to origin/main was NOT attempted (respecting protected branch policy)."
+        echo "STATUS: FEED_BRANCH_STAGED"
+    fi
     echo "✓ Active working directory remained 100% untouched and unmutated."
 
-    if [ "${SANDBOX_SIMULATION}" = "0" ]; then
-        echo "Verifying published appcast live via raw GitHub CDN (WO-118, WO-122)..."
-        CDN_URL="https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml"
-        EXPECTED_FEED_SHA="$(shasum -a 256 "${STAGING_CANDIDATE}" | awk '{print $1}')"
-        EXPECTED_FEED_SIZE="$(stat -f%z "${STAGING_CANDIDATE}" 2>/dev/null || stat -c%s "${STAGING_CANDIDATE}")"
-        MAX_RETRIES=10
-        RETRY_DELAY=3
-        CDN_VERIFIED=0
-        ACTUAL_FEED_SHA=""
+elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ]; then
+    # 8. Read-Only Finalizer: Verify Deployed Feed via Raw CDN Readback (WO-118, WO-122, WO-122-R1)
+    echo "Executing read-only finalizer: Verifying deployed feed on main via CDN readback (WO-122-R1)..."
+    EXPECTED_FEED_SHA="$(shasum -a 256 "${STAGING_CANDIDATE}" | awk '{print $1}')"
+    EXPECTED_FEED_SIZE="$(stat -f%z "${STAGING_CANDIDATE}" 2>/dev/null || stat -c%s "${STAGING_CANDIDATE}")"
+    MAX_RETRIES=5
+    RETRY_DELAY=2
+    CDN_VERIFIED=0
+    ACTUAL_FEED_SHA=""
+    CDN_STATUS="000"
 
-        for attempt in $(seq 1 "${MAX_RETRIES}"); do
-            echo "CDN Readback Attempt ${attempt}/${MAX_RETRIES}..."
+    for attempt in $(seq 1 "${MAX_RETRIES}"); do
+        echo "CDN Readback Attempt ${attempt}/${MAX_RETRIES} against ${CDN_URL}..."
+        if [[ "${CDN_URL}" == file://* ]]; then
+            FILE_PATH="${CDN_URL#file://}"
+            if [ -f "${FILE_PATH}" ]; then
+                cp "${FILE_PATH}" "${TEMP_DIR}/cdn_appcast.xml"
+                CDN_STATUS="200"
+            else
+                CDN_STATUS="404"
+            fi
+        else
             CDN_STATUS="$(curl -s -o "${TEMP_DIR}/cdn_appcast.xml" -w "%{http_code}" "${CDN_URL}" || echo "000")"
-            if [ "${CDN_STATUS}" = "200" ] && [ -s "${TEMP_DIR}/cdn_appcast.xml" ]; then
-                ACTUAL_FEED_SHA="$(shasum -a 256 "${TEMP_DIR}/cdn_appcast.xml" | awk '{print $1}')"
-                if [ "${ACTUAL_FEED_SHA}" = "${EXPECTED_FEED_SHA}" ]; then
-                    if python3 - "${TEMP_DIR}/cdn_appcast.xml" "${BUILD_NUM}" "${ED_SIGNATURE}" <<'PY'
+        fi
+
+        if [ "${CDN_STATUS}" = "200" ] && [ -s "${TEMP_DIR}/cdn_appcast.xml" ]; then
+            ACTUAL_FEED_SHA="$(shasum -a 256 "${TEMP_DIR}/cdn_appcast.xml" | awk '{print $1}')"
+            if [ "${ACTUAL_FEED_SHA}" = "${EXPECTED_FEED_SHA}" ]; then
+                if python3 - "${TEMP_DIR}/cdn_appcast.xml" "${BUILD_NUM}" "${ED_SIGNATURE}" <<'PY'
 import sys, xml.etree.ElementTree as ET
 path, b_num, ed_sig = sys.argv[1:4]
 tree = ET.parse(path)
@@ -956,30 +1027,33 @@ for item in channel.findall("item"):
             break
 sys.exit(0 if found else 2)
 PY
-                    then
-                        echo "✓ Live CDN verification successful: Build ${BUILD_NUM} feed exact-byte match (${ACTUAL_FEED_SHA}) verified at ${CDN_URL} (HTTP 200)."
-                        CDN_VERIFIED=1
-                        break
-                    else
-                        echo "Notice: CDN returned matching SHA but candidate item validation failed (attempt ${attempt}/${MAX_RETRIES})."
-                    fi
+                then
+                    echo "✓ Live CDN verification successful: Build ${BUILD_NUM} feed exact-byte match (${ACTUAL_FEED_SHA}) verified at ${CDN_URL} (HTTP 200)."
+                    CDN_VERIFIED=1
+                    break
                 else
-                    echo "Notice: CDN returned HTTP 200, but feed SHA-256 (${ACTUAL_FEED_SHA}) does not match expected candidate SHA-256 (${EXPECTED_FEED_SHA}) (attempt ${attempt}/${MAX_RETRIES})."
+                    echo "Notice: CDN returned matching SHA but candidate item validation failed (attempt ${attempt}/${MAX_RETRIES})."
                 fi
             else
-                echo "Notice: CDN returned HTTP ${CDN_STATUS} (attempt ${attempt}/${MAX_RETRIES})."
+                echo "Notice: CDN returned HTTP 200, but feed SHA-256 (${ACTUAL_FEED_SHA}) does not match expected candidate SHA-256 (${EXPECTED_FEED_SHA}) (attempt ${attempt}/${MAX_RETRIES})."
             fi
-            sleep "${RETRY_DELAY}"
-        done
-
-        if [ "${CDN_VERIFIED}" != "1" ]; then
-            echo "ERROR: PARTIAL_RELEASE_FEED_NOT_LIVE: CDN readback failed after ${MAX_RETRIES} attempts." >&2
-            echo "Expected feed SHA-256: ${EXPECTED_FEED_SHA} (${EXPECTED_FEED_SIZE} bytes)." >&2
-            echo "Last received feed SHA-256: ${ACTUAL_FEED_SHA:-none}." >&2
-            echo "The GitHub release and Git commit were published, but raw CDN has not served the authentic signed feed for Build ${BUILD_NUM}." >&2
-            echo "Operator Repair Guidance: Inspect repository dist/appcast.xml on main and verify edge CDN propagation." >&2
-            exit 75
+        else
+            echo "Notice: CDN returned HTTP ${CDN_STATUS} (attempt ${attempt}/${MAX_RETRIES})."
         fi
+        [ "${attempt}" -lt "${MAX_RETRIES}" ] && sleep "${RETRY_DELAY}"
+    done
+
+    if [ "${CDN_VERIFIED}" = "1" ]; then
+        echo "STATUS: DEPLOYED"
+        echo "=== Appcast Verification Succeeded (DEPLOYED) ==="
+        exit 0
+    else
+        echo "STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"
+        echo "Notice (WO-122-R1): Public release is live, but production feed on main has not yet been cut over." >&2
+        echo "Expected candidate feed SHA-256: ${EXPECTED_FEED_SHA} (${EXPECTED_FEED_SIZE} bytes)." >&2
+        echo "Last received feed SHA-256: ${ACTUAL_FEED_SHA:-none} (HTTP ${CDN_STATUS})." >&2
+        echo "Operator Action Required: Review and merge the staged feed branch 'feed/${TAG}' into 'main' via pull request." >&2
+        exit 75
     fi
 else
     echo "Dry-run validation complete. Active working directory and dist/appcast.xml were NOT mutated on disk."

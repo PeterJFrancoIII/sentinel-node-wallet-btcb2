@@ -562,8 +562,8 @@ jobs:
           gh release edit "${TAG}" --draft=false
           echo "✓ Release ${TAG} promoted to public."
 
-      # Step 4: Publish Sparkle Production Appcast Feed with Bounded CDN Readback (WO-118)
-      - name: Publish Sparkle Production Appcast Feed to Main
+      # Step 4: Stage Sparkle Production Appcast Feed for PR Review (WO-118, WO-122-R1)
+      - name: Stage Candidate Production Appcast Feed to Feed Branch
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
@@ -578,5 +578,22 @@ jobs:
             --signature "${ED_SIG}" \
             --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
             --operator-approval "${OPERATOR_APPROVAL}" \
-            --publish-to-main \
+            --stage-feed-branch \
             --prune-unsigned-legacy
+          echo "✓ Candidate appcast feed staged to feed/${TAG} branch (WO-122-R1). Awaiting operator PR review and merge to main."
+
+      # Step 5: Verify Live Production Feed Deployment Status (WO-122-R1)
+      - name: Verify Live Production Feed Deployment Status
+        continue-on-error: true
+        env:
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --verify-deployed-feed
