@@ -433,10 +433,10 @@ elif [ -n "${PUB_KEY:-}" ]; then
     PUBLIC_KEY="${PUB_KEY}"
 fi
 
-if [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ]; then
-    # Public key is strictly required in live and preflight mode to verify signature authenticity
+if [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ] || [ "${VERIFY_DEPLOYED_FEED}" = "1" ]; then
+    # Public key is strictly required in live, preflight, and verify-deployed modes to verify signature authenticity
     if [ -z "${PUBLIC_KEY}" ]; then
-        fail "Production publish aborted: SUPublicEDKey is strictly required in live mode to verify signature authenticity before publishing feed. Pass --public-key, --app-bundle, or set SPARKLE_PUBLIC_ED_KEY."
+        fail "Production validation aborted: SUPublicEDKey is strictly required to verify signature authenticity. Pass --public-key, --app-bundle, or set SPARKLE_PUBLIC_ED_KEY."
     fi
 fi
 
@@ -1022,14 +1022,31 @@ elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ]; then
         fi
     fi
 
-    # Check origin/main or local main feed if present (fetch latest origin/main first)
-    git fetch origin main:refs/remotes/origin/main >/dev/null 2>&1 || git fetch origin main >/dev/null 2>&1 || true
-    if git rev-parse --verify origin/main:dist/appcast.xml >/dev/null 2>&1; then
-        MAIN_FEED_SHA="$(git show origin/main:dist/appcast.xml 2>/dev/null | shasum -a 256 | awk '{print $1}')"
-        echo "Checked origin/main:dist/appcast.xml SHA-256: ${MAIN_FEED_SHA}"
-    elif git rev-parse --verify main:dist/appcast.xml >/dev/null 2>&1; then
-        MAIN_FEED_SHA="$(git show main:dist/appcast.xml 2>/dev/null | shasum -a 256 | awk '{print $1}')"
-        echo "Checked main:dist/appcast.xml SHA-256: ${MAIN_FEED_SHA}"
+    # Verify fresh remote origin/main feed (WO-122-R4)
+    REMOTE_MAIN_FETCH_SUCCESS=0
+    REMOTE_MAIN_COMMIT=""
+    REMOTE_MAIN_BLOB=""
+    MAIN_FEED_SHA=""
+    MAIN_MERGED=0
+
+    if git remote get-url origin >/dev/null 2>&1; then
+        echo "Fetching fresh remote main ref from origin..."
+        if git fetch origin main:refs/remotes/origin/main >/dev/null 2>&1 || git fetch origin main >/dev/null 2>&1; then
+            REMOTE_MAIN_FETCH_SUCCESS=1
+            if git rev-parse --verify origin/main:dist/appcast.xml >/dev/null 2>&1; then
+                REMOTE_MAIN_COMMIT="$(git rev-parse origin/main 2>/dev/null || echo "")"
+                REMOTE_MAIN_BLOB="$(git rev-parse origin/main:dist/appcast.xml 2>/dev/null || echo "")"
+                MAIN_FEED_SHA="$(git show origin/main:dist/appcast.xml 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+                echo "Fresh remote origin/main commit: ${REMOTE_MAIN_COMMIT}"
+                echo "Fresh remote origin/main:dist/appcast.xml blob: ${REMOTE_MAIN_BLOB} (SHA-256: ${MAIN_FEED_SHA})"
+            else
+                echo "Notice (WO-122-R4): dist/appcast.xml does not exist on freshly fetched origin/main." >&2
+            fi
+        else
+            echo "WARNING (WO-122-R4): Network fetch of 'main' from remote 'origin' failed. Stale cached or local refs will NOT be trusted." >&2
+        fi
+    else
+        echo "Notice (WO-122-R4): No remote 'origin' configured in workspace." >&2
     fi
 
     EXPECTED_FEED_SHA="$(shasum -a 256 "${STAGING_CANDIDATE}" | awk '{print $1}')"
@@ -1097,14 +1114,14 @@ PY
         [ "${attempt}" -lt "${MAX_RETRIES}" ] && sleep "${RETRY_DELAY}"
     done
 
-    MAIN_MERGED=1
-    if [ -n "${MAIN_FEED_SHA}" ]; then
-        if [ "${MAIN_FEED_SHA}" != "${EXPECTED_FEED_SHA}" ]; then
-            echo "Notice (WO-122-R2): main branch dist/appcast.xml SHA-256 (${MAIN_FEED_SHA}) does not match approved candidate SHA-256 (${EXPECTED_FEED_SHA}). Feed PR 'feed/${TAG}' is not merged into main." >&2
-            MAIN_MERGED=0
-        else
-            echo "✓ Verified main branch dist/appcast.xml matches approved candidate feed SHA-256 (${MAIN_FEED_SHA}) (WO-122-R2)."
+    MAIN_MERGED=0
+    if [ "${REMOTE_MAIN_FETCH_SUCCESS}" = "1" ] && [ -n "${MAIN_FEED_SHA}" ]; then
+        if [ "${MAIN_FEED_SHA}" = "${EXPECTED_FEED_SHA}" ]; then
+            echo "✓ Verified fresh remote origin/main dist/appcast.xml matches approved candidate feed SHA-256 (${MAIN_FEED_SHA}) (commit: ${REMOTE_MAIN_COMMIT}, blob: ${REMOTE_MAIN_BLOB}) (WO-122-R4)."
             MAIN_MERGED=1
+        else
+            echo "Notice (WO-122-R4): Remote origin/main dist/appcast.xml SHA-256 (${MAIN_FEED_SHA}) does not match approved candidate SHA-256 (${EXPECTED_FEED_SHA}). Feed PR 'feed/${TAG}' is not merged into main." >&2
+            MAIN_MERGED=0
         fi
     fi
 
@@ -1113,11 +1130,18 @@ PY
         echo "=== Appcast Verification Succeeded (DEPLOYED) ==="
         exit 0
     else
-        echo "STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"
-        echo "Notice (WO-122-R2): Public release is live, but production feed on main and/or CDN has not yet been cut over." >&2
+        if [ "${REMOTE_MAIN_FETCH_SUCCESS}" = "0" ]; then
+            echo "STATUS: REMOTE_MAIN_UNVERIFIED"
+            echo "Notice (WO-122-R4): Fresh remote main ref could not be fetched or verified from remote origin." >&2
+        else
+            echo "STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"
+            echo "Notice (WO-122-R2): Public release is live, but production feed on main and/or CDN has not yet been cut over." >&2
+        fi
         echo "Expected candidate feed SHA-256: ${EXPECTED_FEED_SHA} (${EXPECTED_FEED_SIZE} bytes)." >&2
         echo "Last received CDN feed SHA-256: ${ACTUAL_FEED_SHA:-none} (HTTP ${CDN_STATUS})." >&2
-        echo "Operator Action Required: Review and merge the staged feed branch 'feed/${TAG}' into 'main' via pull request." >&2
+        if [ "${MAIN_MERGED}" = "0" ]; then
+            echo "Operator Action Required: Review and merge the staged feed branch 'feed/${TAG}' into 'main' via pull request." >&2
+        fi
         exit 75
     fi
 else

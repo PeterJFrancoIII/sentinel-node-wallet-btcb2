@@ -43,12 +43,19 @@ Configure these secrets exclusively within **Settings -> Environments -> product
 
 ---
 
-### C. Public Verification Key (`SPARKLE_PUBLIC_ED_KEY`)
-`SPARKLE_PUBLIC_ED_KEY` is the public 32-byte Ed25519 verification key (matching `SUPublicEDKey` in the app's `Info.plist`). Because it is non-confidential public configuration, it may be set in **GitHub Repository Settings -> Secrets and variables -> Actions -> Variables** (or as a Repository secret):
+### C. Public Verification Key (`SPARKLE_PUBLIC_ED_KEY`) (WO-122-R4)
+`SPARKLE_PUBLIC_ED_KEY` is the non-secret public 32-byte Ed25519 verification key matching `SUPublicEDKey` in the app's `Info.plist`.
+To avoid secret-scoping friction while maintaining least-privilege, configure it as a **GitHub Actions Repository Variable**:
+Navigate to **GitHub Repository Settings -> Secrets and variables -> Actions -> Variables -> New repository variable**:
+- Name: `SPARKLE_PUBLIC_ED_KEY`
+- Value: `<Base64-encoded 32-byte Ed25519 public key>`
 
 | Config Name | Purpose & Format | Target Stage | Access Level |
 | :--- | :--- | :--- | :--- |
-| `SPARKLE_PUBLIC_ED_KEY` | Base64-encoded 32-byte Ed25519 public key matching `SUPublicEDKey` in the app bundle `Info.plist`. | Phase A & Phase B Verification | Public Configuration / Repository Variable |
+| `SPARKLE_PUBLIC_ED_KEY` | Base64-encoded 32-byte Ed25519 public key matching `SUPublicEDKey` in the app bundle `Info.plist`. | Phase A, B, & C Verification | Public Configuration / Repository Variable (`vars.SPARKLE_PUBLIC_ED_KEY`) |
+
+> [!NOTE]
+> The release workflow (`.github/workflows/release-macos.yml`) evaluates `${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}` across all phases (Phase A, Phase B, Phase C) and fails closed if the key is missing, not valid Base64, or does not decode to exactly 32 bytes matching `SUPublicEDKey`. If an operator configures it as a Repository Secret instead, the pipeline supports both seamlessly without failure.
 
 ---
 

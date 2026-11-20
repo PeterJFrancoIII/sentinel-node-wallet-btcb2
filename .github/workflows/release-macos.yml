@@ -173,7 +173,7 @@ jobs:
           NOTARY_KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
           NOTARY_ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
           SPARKLE_PRIV_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
-          SPARKLE_PUB_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUB_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           MISSING=""
           if [ -z "${APPLE_CERT_B64}" ] || [ -z "${APPLE_CERT_PASS}" ]; then
@@ -182,8 +182,11 @@ jobs:
           if [ -z "${NOTARY_KEY_B64}" ] || [ -z "${NOTARY_KEY_ID}" ] || [ -z "${NOTARY_ISSUER_ID}" ]; then
             MISSING="${MISSING} NOTARY_CREDENTIALS"
           fi
-          if [ -z "${SPARKLE_PRIV_KEY}" ] || [ -z "${SPARKLE_PUB_KEY}" ]; then
-            MISSING="${MISSING} SPARKLE_KEYS"
+          if [ -z "${SPARKLE_PRIV_KEY}" ]; then
+            MISSING="${MISSING} SPARKLE_PRIVATE_KEY"
+          fi
+          if [ -z "${SPARKLE_PUB_KEY}" ]; then
+            MISSING="${MISSING} SPARKLE_PUBLIC_KEY"
           fi
 
           if [ -n "${MISSING}" ]; then
@@ -191,6 +194,21 @@ jobs:
             echo "Official production distribution requires an Apple Developer ID Application certificate, Apple Notary credentials, and Sparkle Ed25519 keypair." >&2
             exit 1
           fi
+
+          # Strict validation of SPARKLE_PUB_KEY format (valid Base64 decoding to 32 bytes, WO-122-R4)
+          python3 - "${SPARKLE_PUB_KEY}" <<'PY' || exit 1
+          import base64, sys
+          k = sys.argv[1].strip()
+          try:
+              raw = base64.b64decode(k, validate=True)
+              if len(raw) != 32:
+                  print(f"ERROR: SPARKLE_PUBLIC_ED_KEY decoded length is {len(raw)} bytes (expected 32 bytes).", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: SPARKLE_PUBLIC_ED_KEY is not valid Base64: {e}", file=sys.stderr)
+              sys.exit(1)
+          print("✓ Verified SPARKLE_PUBLIC_ED_KEY format: valid 32-byte Ed25519 public key.")
+          PY
 
       # Configure Ephemeral Keychain for Developer ID Application
       - name: Configure ephemeral keychain and Developer ID identity
@@ -235,7 +253,7 @@ jobs:
           SENTINEL_APPLE_TEAM_ID: "${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}"
           SENTINEL_WEBCREDENTIALS_DOMAIN: pool.sentineldefensetechnologies.co.za
           SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
           SENTINEL_REQUIRE_SPARKLE_KEY: "1"
           SENTINEL_SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
           SENTINEL_BUILD_NUMBER: "${{ needs.unprivileged-qualification.outputs.build_number }}"
@@ -258,7 +276,7 @@ jobs:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
           BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           HEAD_COMMIT="$(git rev-parse HEAD)"
           TAG_COMMIT="$(git rev-list -n 1 "${TAG}" 2>/dev/null || echo "")"
@@ -390,7 +408,7 @@ jobs:
       - name: Validate Sparkle Feed in Dry-Run Mode
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           bash scripts/publish_production_appcast.sh \
@@ -449,7 +467,7 @@ jobs:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
           BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           echo "Verifying draft release exists for ${TAG}..."
           RELEASE_INFO="$(gh release view "${TAG}" --json isDraft,tagName 2>/dev/null || echo "")"
@@ -604,7 +622,7 @@ jobs:
       - name: Validate Candidate Appcast Feed (Pre-Promotion Preflight Gating)
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
@@ -633,7 +651,7 @@ jobs:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
@@ -680,7 +698,7 @@ jobs:
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           echo "Downloading public release assets for ${TAG}..."
           mkdir -p dist/staged-assets

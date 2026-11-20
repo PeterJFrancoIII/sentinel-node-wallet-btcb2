@@ -2288,4 +2288,248 @@ exit 0
         XCTAssertFalse(pubKey.isValidSignature(emptySigData, for: archiveBytes),
                        "Empty signature must fail validation")
     }
+
+    // MARK: - WO-122-R4 Remote Main Proof & Stale Cache Rejection Gating
+
+    func testRemoteMainProofAndStaleCacheRejectionWO122R4() throws {
+        let currentFile = URL(fileURLWithPath: #file)
+        let repoRoot = currentFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let scriptPath = repoRoot.appendingPathComponent("scripts/publish_production_appcast.sh").path
+        let signerScript = repoRoot.appendingPathComponent("scripts/sign_appcast_enclosure.sh").path
+
+        guard FileManager.default.isExecutableFile(atPath: scriptPath) else {
+            XCTFail("publish_production_appcast.sh not found or not executable at \(scriptPath)")
+            return
+        }
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-wo122-r4-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        let bareRemote = tempBase.appendingPathComponent("remote.git")
+        let workingClone = tempBase.appendingPathComponent("clone")
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil, env: [String: String]? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            if let env = env {
+                var procEnv = ProcessInfo.processInfo.environment
+                for (k, v) in env { procEnv[k] = v }
+                proc.environment = procEnv
+            }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // 1. Generate disposable Ed25519 keypair
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let publicKey = privateKey.publicKey
+        let pubKeyData = publicKey.rawRepresentation
+        let pubKeyB64 = pubKeyData.base64EncodedString()
+        let privKeyB64 = privateKey.rawRepresentation.base64EncodedString()
+        let keyFile = tempBase.appendingPathComponent("disposable_sparkle.key")
+        try privKeyB64.write(to: keyFile, atomically: true, encoding: .utf8)
+
+        // 2. Setup bare remote with initial main branch containing Build 3
+        _ = runCmd("/usr/bin/git", ["init", "--bare", "-b", "main", bareRemote.path])
+        try Data("SENTINEL_TEST_FIXTURE_MARKER".utf8).write(to: bareRemote.appendingPathComponent("SENTINEL_TEST_FIXTURE_MARKER"))
+        _ = runCmd("/usr/bin/git", ["clone", bareRemote.path, workingClone.path])
+        _ = runCmd("/usr/bin/git", ["config", "user.name", "Test Operator"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["config", "user.email", "operator@nodepocket.app"], cwd: workingClone)
+
+        let cloneDist = workingClone.appendingPathComponent("dist")
+        try FileManager.default.createDirectory(at: cloneDist, withIntermediateDirectories: true)
+        let initialAppcast = """
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Sentinel Node Wallet Changelog</title>
+        <item>
+            <title>Version 1.0.0 (Build 3)</title>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>1.0.0</sparkle:shortVersionString>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-1.0.0-build3-macOS-arm64-notarized.dmg"
+                sparkle:version="3"
+                sparkle:shortVersionString="1.0.0"
+                sparkle:os="macos"
+                sparkle:cpu="arm64"
+                length="1000"
+                type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
+"""
+        let initialAppcastFile = cloneDist.appendingPathComponent("appcast.xml")
+        try initialAppcast.write(to: initialAppcastFile, atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/git", ["add", "dist/appcast.xml"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["commit", "-m", "Initial main appcast with Build 3"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["push", "origin", "main"], cwd: workingClone)
+
+        // 3. Create candidate archive (Build 5) and sign it to produce sidecar
+        let dummyDMG = cloneDist.appendingPathComponent("Sentinel-Node-Wallet-1.0.0-build5-macOS-arm64-notarized.dmg")
+        let dummyBytes = "SENTINEL_WO122_R4_CANDIDATE_DMG_\(UUID().uuidString)".data(using: .utf8)!
+        try dummyBytes.write(to: dummyDMG)
+        let sidecarFile = cloneDist.appendingPathComponent("SPARKLE_SIGNATURE.base64")
+
+        let signRes = runCmd("/bin/bash", [
+            signerScript,
+            "sign",
+            dummyDMG.path,
+            "--key-file", keyFile.path,
+            "--signature-file-output", sidecarFile.path
+        ], cwd: workingClone)
+        XCTAssertEqual(signRes.status, 0, "Signer script must succeed: \(signRes.output)")
+        let sigB64 = try String(contentsOf: sidecarFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // 4. Copy scripts and Package.resolved into workingClone
+        let cloneScriptsDir = workingClone.appendingPathComponent("scripts")
+        try FileManager.default.createDirectory(at: cloneScriptsDir, withIntermediateDirectories: true)
+        let cloneScript = cloneScriptsDir.appendingPathComponent("publish_production_appcast.sh").path
+        try FileManager.default.copyItem(atPath: scriptPath, toPath: cloneScript)
+
+        let packageResolved = repoRoot.appendingPathComponent("Package.resolved")
+        if FileManager.default.fileExists(atPath: packageResolved.path) {
+            try? FileManager.default.copyItem(at: packageResolved, to: workingClone.appendingPathComponent("Package.resolved"))
+        }
+
+        let signUpdatePath = repoRoot.appendingPathComponent(".build/artifacts/sparkle/Sparkle/bin/sign_update").path
+
+        // 5. Stage candidate feed to feed branch (WO-122-R1)
+        var stageArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--sandbox-simulation",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES",
+            "--stage-feed-branch",
+            "--prune-unsigned-legacy"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            stageArgs += ["--sign-update", signUpdatePath]
+        }
+        let stageRes = runCmd("/bin/bash", stageArgs, cwd: workingClone)
+        XCTAssertEqual(stageRes.status, 0, "Staging to feed branch must exit with 0: \(stageRes.output)")
+
+        // Extract staged candidate appcast
+        let stagedShowRes = runCmd("/usr/bin/git", ["show", "origin/feed/v1.0.0-build5:dist/appcast.xml"], cwd: workingClone)
+        XCTAssertEqual(stagedShowRes.status, 0, "Must be able to read staged candidate feed from origin")
+        let candidateFeedContent = stagedShowRes.output
+        let candidateFile = tempBase.appendingPathComponent("candidate_appcast.xml")
+        try candidateFeedContent.write(to: candidateFile, atomically: true, encoding: .utf8)
+
+        // Create mock CDN file matching candidate feed
+        let matchingCDNFile = tempBase.appendingPathComponent("cdn_matching_appcast.xml")
+        try candidateFeedContent.write(to: matchingCDNFile, atomically: true, encoding: .utf8)
+
+        // 6. Negative Test A: Candidate feed NOT merged into remote main
+        // Remote main still contains Build 3. Even though CDN matches candidate, remote main does not match.
+        var unmergedArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--candidate-appcast", candidateFile.path,
+            "--cdn-url", "file://\(matchingCDNFile.path)",
+            "--verify-deployed-feed"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            unmergedArgs += ["--sign-update", signUpdatePath]
+        }
+        let unmergedRes = runCmd("/bin/bash", unmergedArgs, cwd: workingClone)
+        XCTAssertEqual(unmergedRes.status, 75, "Unmerged feed must exit with code 75: \(unmergedRes.output)")
+        XCTAssertTrue(unmergedRes.output.contains("STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"),
+                      "Unmerged feed must report STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL: \(unmergedRes.output)")
+        XCTAssertFalse(unmergedRes.output.contains("STATUS: DEPLOYED"),
+                       "Unmerged feed must never report STATUS: DEPLOYED: \(unmergedRes.output)")
+
+        // 7. Negative Test B: Remote main advanced to different content
+        // Simulate an external commit on bareRemote main with different feed content
+        let differentFeedContent = candidateFeedContent.replacingOccurrences(of: "Build 5", with: "Build 5 Tampered")
+        let diffCommitClone = tempBase.appendingPathComponent("diff_clone")
+        _ = runCmd("/usr/bin/git", ["clone", bareRemote.path, diffCommitClone.path])
+        _ = runCmd("/usr/bin/git", ["config", "user.name", "External Dev"], cwd: diffCommitClone)
+        _ = runCmd("/usr/bin/git", ["config", "user.email", "dev@nodepocket.app"], cwd: diffCommitClone)
+        try differentFeedContent.write(to: diffCommitClone.appendingPathComponent("dist/appcast.xml"), atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/git", ["commit", "-am", "External change on main"], cwd: diffCommitClone)
+        _ = runCmd("/usr/bin/git", ["push", "origin", "main"], cwd: diffCommitClone)
+
+        let diffRemoteRes = runCmd("/bin/bash", unmergedArgs, cwd: workingClone)
+        XCTAssertEqual(diffRemoteRes.status, 75, "Advanced/different remote main must exit with code 75: \(diffRemoteRes.output)")
+        XCTAssertTrue(diffRemoteRes.output.contains("STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"),
+                      "Must report awaiting approval when remote main differs: \(diffRemoteRes.output)")
+        XCTAssertFalse(diffRemoteRes.output.contains("STATUS: DEPLOYED"))
+
+        // 8. Negative Test C: Stale Cache Rejection when Remote Fetch Fails
+        // Update bareRemote main to exact candidate commit, and fetch once into workingClone so cache matches
+        let feedBranchRef = runCmd("/usr/bin/git", ["rev-parse", "feed/v1.0.0-build5"], cwd: bareRemote)
+        let feedCommitSHA = feedBranchRef.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = runCmd("/usr/bin/git", ["update-ref", "refs/heads/main", feedCommitSHA], cwd: bareRemote)
+        _ = runCmd("/usr/bin/git", ["fetch", "origin", "main"], cwd: workingClone)
+        // Now workingClone's cached origin/main matches candidate.
+        // Break the remote URL to simulate network failure or unreachable remote:
+        _ = runCmd("/usr/bin/git", ["remote", "set-url", "origin", tempBase.appendingPathComponent("nonexistent_remote.git").path], cwd: workingClone)
+
+        let staleFetchRes = runCmd("/bin/bash", unmergedArgs, cwd: workingClone)
+        XCTAssertEqual(staleFetchRes.status, 75, "Failed remote fetch must exit with code 75: \(staleFetchRes.output)")
+        XCTAssertTrue(staleFetchRes.output.contains("STATUS: REMOTE_MAIN_UNVERIFIED"),
+                      "Failed remote fetch must report STATUS: REMOTE_MAIN_UNVERIFIED: \(staleFetchRes.output)")
+        XCTAssertTrue(staleFetchRes.output.contains("Network fetch of 'main' from remote 'origin' failed"),
+                      "Must log network fetch failure warning: \(staleFetchRes.output)")
+        XCTAssertFalse(staleFetchRes.output.contains("STATUS: DEPLOYED"),
+                       "Stale cached origin/main must NEVER be trusted to report STATUS: DEPLOYED: \(staleFetchRes.output)")
+
+        // Restore valid remote URL
+        _ = runCmd("/usr/bin/git", ["remote", "set-url", "origin", bareRemote.path], cwd: workingClone)
+
+        // 9. Negative Test D: Mismatched CDN Feed
+        let mismatchCDNFile = tempBase.appendingPathComponent("cdn_mismatch.xml")
+        try initialAppcast.write(to: mismatchCDNFile, atomically: true, encoding: .utf8)
+        var mismatchCDNArgs = unmergedArgs
+        mismatchCDNArgs[12] = "file://\(mismatchCDNFile.path)"
+        let mismatchCDNRes = runCmd("/bin/bash", mismatchCDNArgs, cwd: workingClone)
+        XCTAssertEqual(mismatchCDNRes.status, 75, "Mismatched CDN feed must exit with code 75: \(mismatchCDNRes.output)")
+        XCTAssertFalse(mismatchCDNRes.output.contains("STATUS: DEPLOYED"))
+
+        // 10. Negative Test E: Missing and Malformed Public Key Config
+        var emptyKeyArgs = unmergedArgs
+        emptyKeyArgs[8] = ""
+        let emptyKeyRes = runCmd("/bin/bash", emptyKeyArgs, cwd: workingClone)
+        XCTAssertNotEqual(emptyKeyRes.status, 0, "Empty public key must fail closed")
+        XCTAssertTrue(emptyKeyRes.output.contains("SUPublicEDKey is strictly required"),
+                      "Must log missing public key error: \(emptyKeyRes.output)")
+
+        var malformedKeyArgs = unmergedArgs
+        malformedKeyArgs[8] = "NOT_BASE_64!!!"
+        let malformedKeyRes = runCmd("/bin/bash", malformedKeyArgs, cwd: workingClone)
+        XCTAssertNotEqual(malformedKeyRes.status, 0, "Malformed public key must fail closed")
+
+        var wrongLenKeyArgs = unmergedArgs
+        wrongLenKeyArgs[8] = Data(repeating: 0x41, count: 31).base64EncodedString()
+        let wrongLenKeyRes = runCmd("/bin/bash", wrongLenKeyArgs, cwd: workingClone)
+        XCTAssertNotEqual(wrongLenKeyRes.status, 0, "31-byte public key must fail closed")
+
+        // 11. Positive Test: Complete Verified Cutover Proof
+        // Fresh remote origin/main matches candidate, CDN matches candidate, valid public key
+        let positiveRes = runCmd("/bin/bash", unmergedArgs, cwd: workingClone)
+        XCTAssertEqual(positiveRes.status, 0, "Verified cutover must exit with code 0: \(positiveRes.output)")
+        XCTAssertTrue(positiveRes.output.contains("STATUS: DEPLOYED"),
+                      "Positive run must report STATUS: DEPLOYED: \(positiveRes.output)")
+        XCTAssertTrue(positiveRes.output.contains("Fresh remote origin/main commit:"),
+                      "Positive run must log fresh remote commit SHA: \(positiveRes.output)")
+        XCTAssertTrue(positiveRes.output.contains("Fresh remote origin/main:dist/appcast.xml blob:"),
+                      "Positive run must log fresh remote blob SHA: \(positiveRes.output)")
+        XCTAssertTrue(positiveRes.output.contains("Live CDN verification successful: Build 5 feed exact-byte match"),
+                      "Positive run must log CDN match: \(positiveRes.output)")
+    }
 }
