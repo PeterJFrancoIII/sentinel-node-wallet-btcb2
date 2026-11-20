@@ -148,7 +148,7 @@ jobs:
   # Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
   # =========================================================================
   stage-candidate-draft:
-    name: Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
+    name: "Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)"
     needs: unprivileged-qualification
     if: needs.unprivileged-qualification.outputs.effective_phase == 'stage-draft'
     runs-on: macos-latest
@@ -304,7 +304,7 @@ jobs:
   # Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)
   # =========================================================================
   promote-public-feed:
-    name: Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)
+    name: "Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)"
     needs: unprivileged-qualification
     if: needs.unprivileged-qualification.outputs.effective_phase == 'promote-feed'
     runs-on: macos-latest
