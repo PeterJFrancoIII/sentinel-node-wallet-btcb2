@@ -1946,8 +1946,14 @@ exit 0
                       "Must log successful staging to feed branch: \(stageRes.output)")
         XCTAssertTrue(stageRes.output.contains("Direct push to origin/main was NOT attempted"),
                       "Must confirm direct push to main was not attempted: \(stageRes.output)")
-        XCTAssertTrue(stageRes.output.contains("STATUS: FEED_BRANCH_STAGED"),
-                      "Must report STATUS: FEED_BRANCH_STAGED: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("STATUS: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING"),
+                      "Must report STATUS: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("Staged Branch: feed/v1.0.0-build5"),
+                      "Must log staged branch: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("Staged Commit:"),
+                      "Must log staged commit: \(stageRes.output)")
+        XCTAssertTrue(stageRes.output.contains("Staged Blob SHA:"),
+                      "Must log staged blob SHA: \(stageRes.output)")
 
         // Verify bare remote received the feed branch while main remains untouched at Build 3
         let feedBranchShow = runCmd("/usr/bin/git", ["show", "feed/v1.0.0-build5:dist/appcast.xml"], cwd: bareRemote)
@@ -1983,7 +1989,33 @@ exit 0
         XCTAssertFalse(unapprovedRes.output.contains("STATUS: DEPLOYED"),
                       "Unapproved feed must never report DEPLOYED: \(unapprovedRes.output)")
 
-        // 6. Test Stale CDN response with matching version substring but wrong bytes: exits 75
+        // 6. Negative Test: Anti-trivial self-comparison check fails closed (WO-122-R2)
+        var selfCompArgs = unapprovedFinalizerArgs
+        selfCompArgs += ["--candidate-appcast", mockCDNFile.path]
+        let selfCompRes = runCmd("/bin/bash", selfCompArgs, cwd: workingClone)
+        XCTAssertNotEqual(selfCompRes.status, 0, "Self-comparison between --candidate-appcast and --cdn-url must fail")
+        XCTAssertTrue(selfCompRes.output.contains("SELF_COMPARISON_DETECTED"),
+                      "Self-comparison must output SELF_COMPARISON_DETECTED: \(selfCompRes.output)")
+
+        // 7. Negative Test: Missing candidate feed without dynamic fallback fails closed (WO-122-R2)
+        var missingCandidateArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build999",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--cdn-url", "file://\(mockCDNFile.path)",
+            "--verify-deployed-feed"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            missingCandidateArgs += ["--sign-update", signUpdatePath]
+        }
+        let missingCandidateRes = runCmd("/bin/bash", missingCandidateArgs, cwd: workingClone)
+        XCTAssertNotEqual(missingCandidateRes.status, 0, "Missing candidate feed must fail closed")
+        XCTAssertTrue(missingCandidateRes.output.contains("CANDIDATE_FEED_NOT_AVAILABLE"),
+                      "Missing candidate feed must output CANDIDATE_FEED_NOT_AVAILABLE: \(missingCandidateRes.output)")
+
+        // 8. Test Stale CDN response with matching version substring but wrong bytes: exits 75
         let staleTamperedXML = """
 <?xml version="1.0" encoding="utf-8"?>
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
@@ -2003,24 +2035,72 @@ exit 0
         XCTAssertTrue(staleRes.output.contains("PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"),
                       "Tampered feed must report AWAITING_FEED_APPROVAL: \(staleRes.output)")
 
-        // 7. Test 404 Feed URL: exits 75
+        // 9. Test 404 Feed URL: exits 75
         var notFoundFinalizerArgs = unapprovedFinalizerArgs
         notFoundFinalizerArgs[notFoundFinalizerArgs.firstIndex(of: "--cdn-url")! + 1] = "file://\(tempBase.path)/nonexistent_404.xml"
         let notFoundRes = runCmd("/bin/bash", notFoundFinalizerArgs, cwd: workingClone)
         XCTAssertEqual(notFoundRes.status, 75, "404 CDN feed must exit with code 75: \(notFoundRes.output)")
         XCTAssertTrue(notFoundRes.output.contains("PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"))
 
-        // 8. Test Approved Human Operator Merge: Deploy candidate feed to CDN and assert DEPLOYED (exit 0)
+        // 10. Test Approved Human Operator Merge: Independent candidate and CDN verification (WO-122-R2)
+        let independentCandidateFile = tempBase.appendingPathComponent("independent_candidate_appcast.xml")
         let stagedFeedContent = feedBranchShow.output
-        try stagedFeedContent.write(to: mockCDNFile, atomically: true, encoding: .utf8)
+        try stagedFeedContent.write(to: independentCandidateFile, atomically: true, encoding: .utf8)
 
-        var approvedFinalizerArgs = unapprovedFinalizerArgs
-        approvedFinalizerArgs += ["--candidate-appcast", mockCDNFile.path]
+        // Simulate operator PR merge on bareRemote: update refs/heads/main to feed commit
+        let feedBranchRef = runCmd("/usr/bin/git", ["rev-parse", "feed/v1.0.0-build5"], cwd: bareRemote)
+        let feedCommitSHA = feedBranchRef.output.trimmingCharacters(in: .whitespacesAndNewlines)
+        _ = runCmd("/usr/bin/git", ["update-ref", "refs/heads/main", feedCommitSHA], cwd: bareRemote)
+
+        // Fetch merged main into workingClone so origin/main reflects the merge
+        _ = runCmd("/usr/bin/git", ["fetch", "origin", "main"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["checkout", "main"], cwd: workingClone)
+        _ = runCmd("/usr/bin/git", ["reset", "--hard", "origin/main"], cwd: workingClone)
+
+        let postMergeMainShow = runCmd("/usr/bin/git", ["show", "main:dist/appcast.xml"], cwd: bareRemote)
+        XCTAssertTrue(postMergeMainShow.output.contains("sparkle:version=\"5\""), "Merged main on bareRemote must contain Build 5")
+
+        let postMergeCDNFile = tempBase.appendingPathComponent("deployed_cdn_appcast.xml")
+        try postMergeMainShow.output.write(to: postMergeCDNFile, atomically: true, encoding: .utf8)
+
+        // Verify with explicit independent --candidate-appcast
+        var approvedFinalizerArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--candidate-appcast", independentCandidateFile.path,
+            "--cdn-url", "file://\(postMergeCDNFile.path)",
+            "--verify-deployed-feed"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            approvedFinalizerArgs += ["--sign-update", signUpdatePath]
+        }
         let approvedRes = runCmd("/bin/bash", approvedFinalizerArgs, cwd: workingClone)
         XCTAssertEqual(approvedRes.status, 0, "Approved merged feed on CDN must exit with code 0: \(approvedRes.output)")
         XCTAssertTrue(approvedRes.output.contains("STATUS: DEPLOYED"),
                       "Approved feed must report STATUS: DEPLOYED: \(approvedRes.output)")
         XCTAssertTrue(approvedRes.output.contains("Live CDN verification successful: Build 5 feed exact-byte match"),
                       "Approved feed must log exact-byte SHA-256 and XML match: \(approvedRes.output)")
+
+        // Also verify branch-resolved candidate (WITHOUT --candidate-appcast) resolves from origin/feed/v1.0.0-build5
+        _ = runCmd("/usr/bin/git", ["fetch", "origin"], cwd: workingClone)
+        var autoResolvedArgs = [
+            cloneScript,
+            "--tag", "v1.0.0-build5",
+            "--archive", dummyDMG.path,
+            "--signature", sigB64,
+            "--public-key", pubKeyB64,
+            "--cdn-url", "file://\(postMergeCDNFile.path)",
+            "--verify-deployed-feed"
+        ]
+        if FileManager.default.isExecutableFile(atPath: signUpdatePath) {
+            autoResolvedArgs += ["--sign-update", signUpdatePath]
+        }
+        let autoResolvedRes = runCmd("/bin/bash", autoResolvedArgs, cwd: workingClone)
+        XCTAssertEqual(autoResolvedRes.status, 0, "Auto-resolved candidate from staged branch must exit with code 0: \(autoResolvedRes.output)")
+        XCTAssertTrue(autoResolvedRes.output.contains("STATUS: DEPLOYED"),
+                      "Auto-resolved feed must report STATUS: DEPLOYED: \(autoResolvedRes.output)")
     }
 }

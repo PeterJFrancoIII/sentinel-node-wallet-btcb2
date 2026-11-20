@@ -774,7 +774,7 @@ else
 EOF
 fi
 
-python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" "${PRUNE_UNSIGNED_LEGACY}" "${DRY_RUN}" "${ENFORCE_SIGNED_FEED}" <<'PY' || fail "Appcast integrity check failed."
+python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" "${PRUNE_UNSIGNED_LEGACY}" "${DRY_RUN}" "${ENFORCE_SIGNED_FEED}" "${VERIFY_DEPLOYED_FEED}" <<'PY' || fail "Appcast integrity check failed."
 import sys
 import xml.etree.ElementTree as ET
 
@@ -784,6 +784,7 @@ new_version = sys.argv[3]
 prune_legacy = sys.argv[4] == "1"
 is_dry_run = sys.argv[5] == "1"
 enforce_signed = sys.argv[6] == "1"
+is_verify_deployed = sys.argv[7] == "1"
 
 tree = ET.parse(appcast_path)
 root = tree.getroot()
@@ -819,23 +820,38 @@ if unsigned_builds:
 
 if existing_builds:
     max_existing = max(existing_builds)
-    if new_build <= max_existing:
-        print(f"ERROR: Candidate build {new_build} must be strictly greater than max existing build {max_existing}.", file=sys.stderr)
-        sys.exit(1)
-print(f"✓ Monotonic check passed: candidate build {new_build} > existing builds {existing_builds}")
+    if is_verify_deployed:
+        if new_build < max_existing:
+            print(f"ERROR: Candidate build {new_build} must be greater than or equal to max existing build {max_existing}.", file=sys.stderr)
+            sys.exit(1)
+    else:
+        if new_build <= max_existing:
+            print(f"ERROR: Candidate build {new_build} must be strictly greater than max existing build {max_existing}.", file=sys.stderr)
+            sys.exit(1)
+print(f"✓ Monotonic check passed: candidate build {new_build} >= existing builds {existing_builds}" if is_verify_deployed else f"✓ Monotonic check passed: candidate build {new_build} > existing builds {existing_builds}")
 PY
 
-# 6. Format and Insert New Item Block into Isolated Candidate XML (WO-89: Zero Source Workspace Mutation, WO-113: Schema Compliant Tree Mutation)
-if [ -n "${CANDIDATE_APPCAST}" ] && [ -f "${CANDIDATE_APPCAST}" ]; then
+# 6. Format and Insert New Item Block into Isolated Candidate XML (WO-89: Zero Source Workspace Mutation, WO-113: Schema Compliant Tree Mutation, WO-122-R2: Pinned Candidate Enforced)
+if [ "${VERIFY_DEPLOYED_FEED}" = "1" ]; then
+    if [ -n "${CANDIDATE_APPCAST}" ] && [ -f "${CANDIDATE_APPCAST}" ]; then
+        cp "${CANDIDATE_APPCAST}" "${STAGING_CANDIDATE}"
+        echo "✓ Using specified candidate appcast for verification: ${CANDIDATE_APPCAST}"
+    elif [ -f "${ROOT_DIR}/dist/candidate_appcast.xml" ]; then
+        cp "${ROOT_DIR}/dist/candidate_appcast.xml" "${STAGING_CANDIDATE}"
+        echo "✓ Using saved candidate appcast from dist/candidate_appcast.xml"
+    else
+        git fetch origin "refs/heads/feed/${TAG}:refs/remotes/origin/feed/${TAG}" >/dev/null 2>&1 || true
+        if git rev-parse --verify "origin/feed/${TAG}" >/dev/null 2>&1 && git show "origin/feed/${TAG}:dist/appcast.xml" > "${STAGING_CANDIDATE}" 2>/dev/null && [ -s "${STAGING_CANDIDATE}" ]; then
+            echo "✓ Using candidate appcast from staged branch origin/feed/${TAG}"
+        elif git rev-parse --verify "feed/${TAG}" >/dev/null 2>&1 && git show "feed/${TAG}:dist/appcast.xml" > "${STAGING_CANDIDATE}" 2>/dev/null && [ -s "${STAGING_CANDIDATE}" ]; then
+            echo "✓ Using candidate appcast from staged branch feed/${TAG}"
+        else
+            fail "FATAL ERROR (CANDIDATE_FEED_NOT_AVAILABLE): Approved candidate appcast feed was not found on branch feed/${TAG} or specified via --candidate-appcast. Read-only finalizer cannot regenerate dynamic time-based XML (WO-122-R2)."
+        fi
+    fi
+elif [ -n "${CANDIDATE_APPCAST}" ] && [ -f "${CANDIDATE_APPCAST}" ]; then
     cp "${CANDIDATE_APPCAST}" "${STAGING_CANDIDATE}"
-    echo "✓ Using specified candidate appcast for verification: ${CANDIDATE_APPCAST}"
-elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ] && [ -f "${ROOT_DIR}/dist/candidate_appcast.xml" ]; then
-    cp "${ROOT_DIR}/dist/candidate_appcast.xml" "${STAGING_CANDIDATE}"
-    echo "✓ Using saved candidate appcast from dist/candidate_appcast.xml"
-elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ] && git show "origin/feed/${TAG}:dist/appcast.xml" > "${STAGING_CANDIDATE}" 2>/dev/null && [ -s "${STAGING_CANDIDATE}" ]; then
-    echo "✓ Using candidate appcast from staged branch origin/feed/${TAG}"
-elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ] && git show "feed/${TAG}:dist/appcast.xml" > "${STAGING_CANDIDATE}" 2>/dev/null && [ -s "${STAGING_CANDIDATE}" ]; then
-    echo "✓ Using candidate appcast from staged branch feed/${TAG}"
+    echo "✓ Using specified candidate appcast: ${CANDIDATE_APPCAST}"
 else
     PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
     RELEASE_NOTES_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/${TAG}"
@@ -971,21 +987,59 @@ if [ "${PUBLISH_TO_MAIN}" = "1" ] || [ "${STAGE_FEED_BRANCH}" = "1" ]; then
         echo "✓ Production appcast published successfully to origin/main via isolated worktree."
     else
         git -C "${WORKTREE_DIR}" commit -m "chore(feed): stage Sparkle appcast for ${TAG} (WO-122-R1)"
+        STAGED_COMMIT="$(git -C "${WORKTREE_DIR}" rev-parse HEAD)"
+        STAGED_BLOB="$(git -C "${WORKTREE_DIR}" rev-parse HEAD:dist/appcast.xml)"
         git -C "${WORKTREE_DIR}" push origin "HEAD:${TARGET_REF}" || fail "Failed to push staged feed branch to origin/${TARGET_REF}."
         git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
         echo "✓ Staged candidate appcast successfully to origin branch 'feed/${TAG}' via isolated worktree."
         echo "✓ Direct push to origin/main was NOT attempted (respecting protected branch policy)."
+        echo "STATUS: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING"
         echo "STATUS: FEED_BRANCH_STAGED"
+        echo "Staged Branch: feed/${TAG}"
+        echo "Staged Commit: ${STAGED_COMMIT}"
+        echo "Staged Blob SHA: ${STAGED_BLOB}"
     fi
     echo "✓ Active working directory remained 100% untouched and unmutated."
 
 elif [ "${VERIFY_DEPLOYED_FEED}" = "1" ]; then
-    # 8. Read-Only Finalizer: Verify Deployed Feed via Raw CDN Readback (WO-118, WO-122, WO-122-R1)
-    echo "Executing read-only finalizer: Verifying deployed feed on main via CDN readback (WO-122-R1)..."
+    # 8. Read-Only Finalizer: Verify Deployed Feed via Raw CDN Readback (WO-118, WO-122, WO-122-R1, WO-122-R2)
+    echo "Executing read-only finalizer: Verifying deployed feed on main via CDN readback (WO-122-R2)..."
+
+    # Anti-Trivial Self-Comparison Guard (WO-122-R2)
+    if [[ "${CDN_URL}" == file://* ]]; then
+        CDN_FILE_PATH="${CDN_URL#file://}"
+        if [ -n "${CANDIDATE_APPCAST}" ] && [ -f "${CANDIDATE_APPCAST}" ]; then
+            IS_SAME="$(python3 -c "import os, sys; print('1' if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else '0')" "${CDN_FILE_PATH}" "${CANDIDATE_APPCAST}")"
+            if [ "${IS_SAME}" = "1" ]; then
+                fail "FATAL ERROR (SELF_COMPARISON_DETECTED): --cdn-url (${CDN_URL}) points to the exact same physical file as --candidate-appcast (${CANDIDATE_APPCAST}). Read-only finalizer requires independent verification artifacts (WO-122-R2)."
+            fi
+        fi
+        if [ -f "${ROOT_DIR}/dist/candidate_appcast.xml" ]; then
+            IS_SAME_SAVED="$(python3 -c "import os, sys; print('1' if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else '0')" "${CDN_FILE_PATH}" "${ROOT_DIR}/dist/candidate_appcast.xml")"
+            if [ "${IS_SAME_SAVED}" = "1" ]; then
+                fail "FATAL ERROR (SELF_COMPARISON_DETECTED): --cdn-url (${CDN_URL}) points to the exact same physical file as dist/candidate_appcast.xml. Read-only finalizer requires independent verification artifacts (WO-122-R2)."
+            fi
+        fi
+    fi
+
+    # Check origin/main or local main feed if present (fetch latest origin/main first)
+    git fetch origin main:refs/remotes/origin/main >/dev/null 2>&1 || git fetch origin main >/dev/null 2>&1 || true
+    if git rev-parse --verify origin/main:dist/appcast.xml >/dev/null 2>&1; then
+        MAIN_FEED_SHA="$(git show origin/main:dist/appcast.xml 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+        echo "Checked origin/main:dist/appcast.xml SHA-256: ${MAIN_FEED_SHA}"
+    elif git rev-parse --verify main:dist/appcast.xml >/dev/null 2>&1; then
+        MAIN_FEED_SHA="$(git show main:dist/appcast.xml 2>/dev/null | shasum -a 256 | awk '{print $1}')"
+        echo "Checked main:dist/appcast.xml SHA-256: ${MAIN_FEED_SHA}"
+    fi
+
     EXPECTED_FEED_SHA="$(shasum -a 256 "${STAGING_CANDIDATE}" | awk '{print $1}')"
     EXPECTED_FEED_SIZE="$(stat -f%z "${STAGING_CANDIDATE}" 2>/dev/null || stat -c%s "${STAGING_CANDIDATE}")"
-    MAX_RETRIES=5
-    RETRY_DELAY=2
+    MAX_RETRIES="${SENTINEL_MAX_RETRIES:-5}"
+    RETRY_DELAY="${SENTINEL_RETRY_DELAY:-2}"
+    if [[ "${CDN_URL}" == file://* ]]; then
+        MAX_RETRIES="${SENTINEL_MAX_RETRIES:-1}"
+        RETRY_DELAY="${SENTINEL_RETRY_DELAY:-0}"
+    fi
     CDN_VERIFIED=0
     ACTUAL_FEED_SHA=""
     CDN_STATUS="000"
@@ -1043,15 +1097,26 @@ PY
         [ "${attempt}" -lt "${MAX_RETRIES}" ] && sleep "${RETRY_DELAY}"
     done
 
-    if [ "${CDN_VERIFIED}" = "1" ]; then
+    MAIN_MERGED=1
+    if [ -n "${MAIN_FEED_SHA}" ]; then
+        if [ "${MAIN_FEED_SHA}" != "${EXPECTED_FEED_SHA}" ]; then
+            echo "Notice (WO-122-R2): main branch dist/appcast.xml SHA-256 (${MAIN_FEED_SHA}) does not match approved candidate SHA-256 (${EXPECTED_FEED_SHA}). Feed PR 'feed/${TAG}' is not merged into main." >&2
+            MAIN_MERGED=0
+        else
+            echo "✓ Verified main branch dist/appcast.xml matches approved candidate feed SHA-256 (${MAIN_FEED_SHA}) (WO-122-R2)."
+            MAIN_MERGED=1
+        fi
+    fi
+
+    if [ "${CDN_VERIFIED}" = "1" ] && [ "${MAIN_MERGED}" = "1" ]; then
         echo "STATUS: DEPLOYED"
         echo "=== Appcast Verification Succeeded (DEPLOYED) ==="
         exit 0
     else
         echo "STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL"
-        echo "Notice (WO-122-R1): Public release is live, but production feed on main has not yet been cut over." >&2
+        echo "Notice (WO-122-R2): Public release is live, but production feed on main and/or CDN has not yet been cut over." >&2
         echo "Expected candidate feed SHA-256: ${EXPECTED_FEED_SHA} (${EXPECTED_FEED_SIZE} bytes)." >&2
-        echo "Last received feed SHA-256: ${ACTUAL_FEED_SHA:-none} (HTTP ${CDN_STATUS})." >&2
+        echo "Last received CDN feed SHA-256: ${ACTUAL_FEED_SHA:-none} (HTTP ${CDN_STATUS})." >&2
         echo "Operator Action Required: Review and merge the staged feed branch 'feed/${TAG}' into 'main' via pull request." >&2
         exit 75
     fi

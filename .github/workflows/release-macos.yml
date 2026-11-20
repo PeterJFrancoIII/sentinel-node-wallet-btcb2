@@ -13,13 +13,14 @@ on:
         type: string
         default: 'NO'
       release_phase:
-        description: 'Release Phase: "stage-draft" (Phase A: Build, sign, notarize, stage draft release) or "promote-feed" (Phase B: Promote draft to public, publish feed)'
+        description: 'Release Phase: "stage-draft" (Phase A: Build, sign, notarize, stage draft release), "promote-feed" (Phase B: Promote draft to public, stage feed branch), or "verify-deployed" (Phase C: Verify deployed feed on main post-merge)'
         required: true
         type: choice
         default: 'stage-draft'
         options:
           - 'stage-draft'
           - 'promote-feed'
+          - 'verify-deployed'
       is_draft:
         description: 'Legacy parameter: set true for stage-draft, false for promote-feed'
         required: false
@@ -582,15 +583,49 @@ jobs:
             --prune-unsigned-legacy
           echo "✓ Candidate appcast feed staged to feed/${TAG} branch (WO-122-R1). Awaiting operator PR review and merge to main."
 
-      # Step 5: Verify Live Production Feed Deployment Status (WO-122-R1)
-      - name: Verify Live Production Feed Deployment Status
-        continue-on-error: true
+      # Step 5: Output Release Status Summary (WO-122-R2)
+      - name: Output Release Status Summary
+        run: |
+          echo "### Release Status: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING" >> $GITHUB_STEP_SUMMARY
+          echo "The GitHub Release **${{ needs.unprivileged-qualification.outputs.verified_tag }}** is now PUBLIC." >> $GITHUB_STEP_SUMMARY
+          echo "Candidate Sparkle appcast has been staged to branch **feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}**." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Operator Actions Required to Complete Live Deployment:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review and merge Pull Request from \`feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}\` into \`main\`." >> $GITHUB_STEP_SUMMARY
+          echo "2. Re-dispatch this workflow with \`release_phase: verify-deployed\` to verify live CDN readback fail-closed." >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # Phase C: Post-Merge Live Deployed Feed Verification (WO-122-R2)
+  # =========================================================================
+  verify-deployed-feed:
+    name: "Phase C: Post-Merge Live Deployed Feed Verification (WO-122-R2)"
+    needs: unprivileged-qualification
+    if: needs.unprivileged-qualification.outputs.effective_phase == 'verify-deployed'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository at candidate release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_tag }}
+          fetch-depth: 0
+
+      - name: Download Staged Release Assets and Verify Deployed Feed
         env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
+          echo "Downloading public release assets for ${TAG}..."
+          mkdir -p dist/staged-assets
+          gh release download "${TAG}" --dir dist/staged-assets
+
           DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+
+          echo "Verifying deployed feed on main via CDN readback (fail-closed, WO-122-R2)..."
           bash scripts/publish_production_appcast.sh \
             --tag "${TAG}" \
             --archive "${DMG_PATH}" \

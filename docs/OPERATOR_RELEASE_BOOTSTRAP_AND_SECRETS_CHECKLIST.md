@@ -81,8 +81,8 @@ Until `.github/workflows/release-macos.yml` exists on `origin/main`, GitHub Acti
 
 ---
 
-## 4. Two-Phase Immutable Release Promotion & Feed Activation (WO-108, WO-115)
-To eliminate collision errors, avoid re-signing verified binaries, and ensure immutable asset provenance, production releases follow a strict **Two-Phase Promotion** process with separated runner privileges:
+## 4. Three-Phase Immutable Release Promotion & Feed Activation (WO-108, WO-115, WO-122-R1, WO-122-R2)
+To eliminate collision errors, avoid re-signing verified binaries, and ensure immutable asset provenance, production releases follow a strict **Three-Phase Promotion** process with separated runner privileges:
 
 ### Phase A: Candidate Draft Staging (`release_phase: stage-draft`)
 *Runs under `privileged-release` with `environment: production-release`.*
@@ -97,7 +97,7 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
    - Operator approval confirmed: `YES`
    - Release Phase: `stage-draft` (Phase A default).
 3. **Automated Verification & Privileged Build:**
-   - Unprivileged qualification executes `swift test` (288 tests).
+   - Unprivileged qualification executes `swift test` (289 tests).
    - Bitcoin Knots binary provenance is verified against embedded SHA-256 digests.
    - Privileged job imports Developer ID (`S8QMQZA656`), builds DMG, submits to Apple Notary API, and staples ticket.
    - DMG is signed with Sparkle private EdDSA key.
@@ -106,7 +106,7 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
    - Ephemeral keychain and Notary credentials are deleted.
    - **Result:** Immutable draft release staged; public feed on `main` remains untouched.
 
-### Phase B: Owner Promotion & Live Feed Cutover (`release_phase: promote-feed`, WO-117, WO-118, WO-120, WO-121, WO-122)
+### Phase B: Owner Promotion & Candidate Feed Branch Staging (`release_phase: promote-feed`, WO-117, WO-118, WO-120, WO-121, WO-122-R1, WO-122-R2)
 *Runs under unprivileged runner in GitHub environment `production-promotion` (with required operator reviewers) without code-signing certificates, Notary keys, or Sparkle private keys.*
 1. **Operator Verification of Draft:**
    - Download draft DMG from GitHub Releases.
@@ -128,16 +128,24 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
      - Runs `publish_production_appcast.sh --preflight --prune-unsigned-legacy` against the downloaded archive to verify all live publish prerequisites and binary verifiers pass before making the release public.
    - **Step 3: Immutable Draft Release Promotion:**
      - Executes `gh release edit v1.0.0-build5 --draft=false` to promote the existing draft to public (**NO re-build, NO re-sign, NO asset collision**).
-   - **Step 4: Staged Feed Branch Creation for Operator PR Review (WO-118, WO-122, WO-122-R1):**
+   - **Step 4: Staged Feed Branch Creation for Operator PR Review (WO-118, WO-122-R1, WO-122-R2):**
      - Because `main` is protected by mandatory pull request review and status checks, direct push to `origin/main` is strictly prohibited in production.
      - Phase B runs `publish_production_appcast.sh --stage-feed-branch --prune-unsigned-legacy` using the downloaded archive, signature, and public key.
      - Stages updated candidate `dist/appcast.xml` atomically onto an isolated branch `feed/${TAG}` via isolated git worktree against verified `origin/main` baseline, leaving `origin/main` untouched.
-     - The operator reviews and merges the feed update PR into `main` according to repository branch protection governance.
-   - **Step 5: Read-Only Finalizer & Live Feed Deployment Verification (WO-122-R1):**
-     - Runs `publish_production_appcast.sh --verify-deployed-feed` to probe the public raw CDN feed URL on `origin/main`.
-     - Performs bounded CDN readback requiring HTTP 200, exact-byte SHA-256 identity with candidate XML, and ElementTree structural parsing of enclosure version/signature.
-     - If the feed PR has not yet been merged into `main` by the operator, the finalizer outputs typed status `STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL` and exits with code 75 (captured cleanly in CI via `continue-on-error: true`).
-     - Once the operator approves and merges the feed PR into `main`, running `--verify-deployed-feed` validates exact-byte SHA-256 and ElementTree XML enclosure, outputting `STATUS: DEPLOYED` (exit code 0).
+     - Outputs `STATUS: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING` with branch name, commit SHA, and blob SHA.
+   - **Step 5: Output Release Status Summary (WO-122-R2):**
+     - Generates GitHub Step Summary indicating the release is public and instructing the operator to review and merge the pull request for `feed/${TAG}` into `main`.
+
+### Phase C: Post-Merge Live Deployed Feed Verification (`release_phase: verify-deployed`, WO-122-R2)
+*Runs on an unprivileged runner post-merge to verify live CDN deployment fail-closed without modifying any assets.*
+1. **Trigger Workflow Dispatch (Phase C):**
+   - After merging the Pull Request from `feed/${TAG}` into `main`, dispatch workflow with `tag_name: v1.0.0-build5`, `operator_approval_confirmed: YES`, and `release_phase: verify-deployed`.
+2. **Read-Only Finalizer Verification:**
+   - Runs `publish_production_appcast.sh --verify-deployed-feed` (fail-closed, no `continue-on-error`).
+   - Probes the public raw CDN feed URL on `origin/main`.
+   - Performs bounded CDN readback requiring HTTP 200, exact-byte SHA-256 identity with candidate XML, ElementTree structural parsing of enclosure version/signature, and anti-trivial self-comparison guards.
+   - If `main` has not yet been merged or CDN is stale, the finalizer outputs `STATUS: PUBLIC_RELEASE_AWAITING_FEED_APPROVAL` and fails closed (exit code 75).
+   - Once the feed matches exact-byte identity on the CDN, the finalizer outputs `STATUS: DEPLOYED` and exits with code 0.
 
 ### Idempotent Feed Retry
 If a network hiccup or CDN delay occurs after the release is public:
