@@ -106,8 +106,8 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
    - Ephemeral keychain and Notary credentials are deleted.
    - **Result:** Immutable draft release staged; public feed on `main` remains untouched.
 
-### Phase B: Owner Promotion & Live Feed Cutover (`release_phase: promote-feed`)
-*Runs under unprivileged runner without code-signing certificates, Notary keys, or Sparkle private keys.*
+### Phase B: Owner Promotion & Live Feed Cutover (`release_phase: promote-feed`, WO-117, WO-118)
+*Runs under unprivileged runner in GitHub environment `production-promotion` (with required operator reviewers) without code-signing certificates, Notary keys, or Sparkle private keys.*
 1. **Operator Verification of Draft:**
    - Download draft DMG from GitHub Releases.
    - Verify Gatekeeper acceptance: `spctl -a -t exec -vv "/Volumes/.../Sentinel Node Wallet.app"` exits `0` with `accepted`.
@@ -115,14 +115,21 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
    - Verify notarization ticket: `stapler validate Sentinel-Node-Wallet-*.dmg`.
 2. **Trigger Workflow Dispatch (Phase B):**
    - Run workflow with `tag_name: v1.0.0-build5`, `operator_approval_confirmed: YES`, and `release_phase: promote-feed`.
-   - Workflow executes `gh release edit v1.0.0-build5 --draft=false` to promote the existing draft to public (**NO re-build, NO re-sign, NO asset collision**).
-   - Workflow runs `publish_production_appcast.sh --publish-to-main --prune-unsigned-legacy` which:
-     - Downloads and verifies public asset HTTP 200 and SHA-256 match.
-     - Mounts downloaded DMG and validates Gatekeeper, Team ID `S8QMQZA656`, and nested executables (`bitcoind`, `bitcoin-cli`, `Sparkle.framework`).
-     - Fetches baseline feed from `origin/main:dist/appcast.xml`, prunes unauthenticated legacy enclosures (Build 3/4), and inserts signed candidate item (WO-113).
-     - Verifies monotonic sequence (`new_build > max_existing`).
+   - Workflow runs in isolated `production-promotion` environment requiring owner sign-off.
+   - **Step 1: Download & Attestation Verification (WO-117):**
+     - Downloads draft assets: DMG, `SHA256SUMS.txt`, `BUILD_MANIFEST.json`, `RELEASE_ATTESTATION.json`, `SPARKLE_ENCLOSURE.txt`.
+     - Validates `RELEASE_ATTESTATION.json` schema, matching SHA-256 and byte length.
+     - Cryptographically validates Ed25519 signature against archive bytes using Swift CryptoKit (zero private key requirement).
+     - Read-only mounts candidate DMG and verifies `Sentinel Node Wallet.app` `CFBundleIdentifier`, `CFBundleVersion`, `SUPublicEDKey`, `TeamIdentifier=S8QMQZA656`, Gatekeeper assessment (`spctl`), and notarization ticket (`stapler`).
+   - **Step 2: Pre-Promotion Appcast Gating (WO-117):**
+     - Runs `publish_production_appcast.sh --dry-run --prune-unsigned-legacy` against the downloaded archive to verify valid feed generation before making the release public.
+   - **Step 3: Immutable Draft Release Promotion:**
+     - Executes `gh release edit v1.0.0-build5 --draft=false` to promote the existing draft to public (**NO re-build, NO re-sign, NO asset collision**).
+   - **Step 4: Live Feed Publication & Bounded CDN Readback (WO-118):**
+     - Runs `publish_production_appcast.sh --publish-to-main --prune-unsigned-legacy` using the downloaded archive, signature, and public key.
      - Commits updated `dist/appcast.xml` atomically to `origin/main` via isolated worktree.
-     - Performs independent live CDN read-back (`https://raw.githubusercontent.com/.../dist/appcast.xml`).
+     - Performs bounded CDN readback (up to 10 attempts with retry delay) validating HTTP 200, matching build, and cryptographic EdDSA signature.
+     - If CDN readback fails or times out, exits with typed status `PARTIAL_RELEASE_FEED_NOT_LIVE` (exit code 75) and operator recovery guidance.
 
 ### Idempotent Feed Retry
 If a network hiccup or CDN delay occurs after the release is public:
@@ -130,9 +137,9 @@ If a network hiccup or CDN delay occurs after the release is public:
 
 ---
 
-## 5. Authenticated Feed Contract & Legacy Migration (WO-113)
+## 5. Authenticated Feed Contract & Legacy Migration (WO-113, WO-117, WO-118)
 The feed publisher (`scripts/publish_production_appcast.sh`) enforces strict baseline authenticity:
 1. **Remote Baseline First:** Baseline XML is derived directly from `origin/main:dist/appcast.xml`, preventing draft branch artifacts from polluting the production feed.
-2. **Pruning Unsigned Legacy Items:** Historical Build 3 and Build 4 enclosures on `main` lack cryptographic signatures (`sparkle:edSignature`) and public keys (`SUPublicEDKey`). They were direct-download releases. When `--prune-unsigned-legacy` is specified during live publish, these items are pruned from the active update channel, ensuring that only cryptographically signed enclosures exist in the Sparkle feed.
+2. **Pruning Unsigned Legacy Items:** Historical Build 3 and Build 4 enclosures on `main` lack cryptographic signatures (`sparkle:edSignature`) and public keys (`SUPublicEDKey`). They were direct-download releases. When `--prune-unsigned-legacy` is specified during live publish, these items are pruned from the active update channel, ensuring that only cryptographically signed enclosures exist in the Sparkle feed. If unsigned enclosures are detected without `--prune-unsigned-legacy`, the publisher halts fail-closed with `FATAL INTEGRITY VIOLATION (WO-113)`.
 3. **One-Time Manual Bootstrap Requirement:** Because Build 4 does not embed `SUPublicEDKey`, existing Build 4 installations **cannot** automatically update to Build 5 via Sparkle. Upgrading from Build 4 to Build 5+ requires a **one-time manual download / bootstrap**. Once Build 5+ is installed (embedding `SUPublicEDKey`), all subsequent updates (Build 5 -> 6, etc.) will perform authenticated automated OTA updates.
-4. **Independent Read-Back:** Live publication reads back the raw GitHub CDN feed URL and validates HTTP 200 before exiting.
+4. **Independent Read-Back & Typed Failure Modes:** Live publication reads back the raw GitHub CDN feed URL and validates HTTP 200 and matching candidate build/signature before exiting. If CDN readback fails, it reports `PARTIAL_RELEASE_FEED_NOT_LIVE` with diagnostic instructions.

@@ -250,7 +250,48 @@ jobs:
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
 
-      # Release Asset Upload (Draft Staging Only, WO-108, WO-115)
+      # Generate Authenticated Release Attestation (WO-117)
+      - name: Generate Authenticated Release Attestation
+        env:
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
+          BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
+          HEAD_COMMIT: "${{ github.sha }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          DMG_NAME="$(basename "${DMG_FILE}")"
+          DMG_SHA="$(shasum -a 256 "${DMG_FILE}" | awk '{print $1}')"
+          DMG_LEN="$(stat -f%z "${DMG_FILE}" 2>/dev/null || stat -c%s "${DMG_FILE}")"
+          ED_SIG="$(grep "sparkle:edSignature" dist/SPARKLE_ENCLOSURE.txt | head -n 1 | sed -E 's/.*sparkle:edSignature="([^"]+)".*/\1/' || echo "")"
+
+          python3 - "${TAG}" "${HEAD_COMMIT}" "${SHORT_VERSION}" "${BUILD_NUM}" "${DMG_NAME}" "${DMG_SHA}" "${DMG_LEN}" "${ED_SIG}" "${SPARKLE_PUBLIC_ED_KEY}" <<'PY'
+          import json, sys
+          tag, commit, ver, build, dmg_name, sha, length, sig, pub = sys.argv[1:10]
+          attestation = {
+              'schema_version': '1.0',
+              'tag': tag,
+              'commit_sha': commit,
+              'short_version': ver,
+              'build_number': build,
+              'bundle_id': 'pool.sentineldefensetechnologies.co.za',
+              'team_id': 'S8QMQZA656',
+              'dmg_filename': dmg_name,
+              'dmg_sha256': sha,
+              'dmg_length': int(length),
+              'sparkle_ed_signature': sig,
+              'sparkle_public_ed_key': pub,
+              'notary_status': 'Accepted',
+              'stapled': True,
+              'minimum_system_version': '13.0'
+          }
+          with open('dist/RELEASE_ATTESTATION.json', 'w') as f:
+              json.dump(attestation, f, indent=2)
+          print('✓ Generated immutable release attestation manifest at dist/RELEASE_ATTESTATION.json')
+          PY
+          cat dist/RELEASE_ATTESTATION.json
+
+      # Release Asset Upload (Draft Staging Only, WO-108, WO-115, WO-117)
       - name: Create Immutable Draft GitHub Release
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
@@ -270,6 +311,8 @@ jobs:
               dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg \
               dist/SHA256SUMS.txt \
               dist/BUILD_MANIFEST.json \
+              dist/RELEASE_ATTESTATION.json \
+              dist/SPARKLE_ENCLOSURE.txt \
               --title "Sentinel Node Wallet (${TAG})" \
               --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
               --draft ${PRERELEASE_FLAG}
@@ -301,7 +344,7 @@ jobs:
           fi
 
   # =========================================================================
-  # Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)
+  # Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115, WO-117, WO-118)
   # =========================================================================
   promote-public-feed:
     name: "Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)"
@@ -309,6 +352,7 @@ jobs:
     if: needs.unprivileged-qualification.outputs.effective_phase == 'promote-feed'
     runs-on: macos-latest
     timeout-minutes: 20
+    environment: production-promotion
     permissions:
       contents: write
     steps:
@@ -318,11 +362,12 @@ jobs:
           ref: ${{ needs.unprivileged-qualification.outputs.verified_tag }}
           fetch-depth: 0
 
-      # Step 1: Promote Draft Release to Public (Immutable Asset Promotion)
-      - name: Promote Draft Release to Public
+      # Step 1: Download & Verify Immutable Draft Release Assets (WO-117)
+      - name: Download & Verify Immutable Draft Release Assets
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           echo "Verifying draft release exists for ${TAG}..."
           RELEASE_INFO="$(gh release view "${TAG}" --json isDraft,tagName 2>/dev/null || echo "")"
@@ -331,16 +376,116 @@ jobs:
             exit 1
           fi
 
-          IS_DRAFT="$(echo "${RELEASE_INFO}" | python3 -c "import sys, json; print(json.load(sys.stdin).get('isDraft', False))")"
-          if [ "${IS_DRAFT}" = "True" ]; then
-            echo "Promoting verified immutable draft release ${TAG} to public..."
-            gh release edit "${TAG}" --draft=false
-            echo "✓ Release ${TAG} promoted to public."
-          else
-            echo "Release ${TAG} is already public. Proceeding to feed publication (idempotent retry)."
+          mkdir -p dist/staged-assets
+          echo "Downloading staged draft release assets..."
+          gh release download "${TAG}" --dir dist/staged-assets
+
+          ATTESTATION_FILE="dist/staged-assets/RELEASE_ATTESTATION.json"
+          if [ ! -f "${ATTESTATION_FILE}" ]; then
+            echo "ERROR: Mandatory RELEASE_ATTESTATION.json missing from draft release ${TAG}." >&2
+            exit 1
           fi
 
-      # Step 2: Publish Sparkle Production Appcast Feed with Mandatory Remote Verification & Legacy Pruning
+          python3 - "${ATTESTATION_FILE}" "${SPARKLE_PUBLIC_ED_KEY}" <<'PY' || exit 1
+          import json, sys, os, hashlib, subprocess
+
+          with open(sys.argv[1]) as f:
+              att = json.load(f)
+          expected_pub = sys.argv[2]
+
+          dmg_name = att.get("dmg_filename")
+          dmg_path = os.path.join("dist/staged-assets", dmg_name)
+          if not os.path.isfile(dmg_path):
+              print(f"ERROR: DMG asset '{dmg_name}' missing from downloaded draft assets.", file=sys.stderr)
+              sys.exit(1)
+
+          with open(dmg_path, "rb") as f:
+              actual_sha = hashlib.sha256(f.read()).hexdigest()
+          if actual_sha != att.get("dmg_sha256"):
+              print(f"ERROR: DMG SHA256 mismatch: expected {att.get('dmg_sha256')}, got {actual_sha}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("sparkle_public_ed_key") != expected_pub:
+              print(f"ERROR: Attestation public key mismatch: expected {expected_pub}, got {att.get('sparkle_public_ed_key')}", file=sys.stderr)
+              sys.exit(1)
+
+          # Verify Ed25519 signature of DMG bytes against public key using Swift CryptoKit
+          swift_verify = f"""
+          import Foundation
+          import CryptoKit
+
+          guard let pubData = Data(base64Encoded: "{expected_pub}"),
+                let sigData = Data(base64Encoded: "{att.get('sparkle_ed_signature')}"),
+                let fileData = try? Data(contentsOf: URL(fileURLWithPath: "{dmg_path}")) else {{
+              exit(1)
+          }}
+          guard let pubKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubData),
+                pubKey.isValidSignature(sigData, for: fileData) else {{
+              exit(2)
+          }}
+          """
+          res = subprocess.run(["swift", "-e", swift_verify], capture_output=True)
+          if res.returncode != 0:
+              print(f"ERROR: Ed25519 cryptographic signature verification failed for {dmg_name}", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"✓ Verified immutable draft attestation, SHA256 ({actual_sha}), and EdDSA signature for {dmg_name}.")
+          PY
+
+          # Mount DMG read-only to verify app bundle, code signature, TeamID, Gatekeeper, Stapler
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          MOUNT_PT="/Volumes/SentinelNodeWalletStaging"
+          mkdir -p "${MOUNT_PT}"
+          hdiutil attach -readonly -nobrowse -mountpoint "${MOUNT_PT}" "${DMG_PATH}"
+          APP_PATH="${MOUNT_PT}/Sentinel Node Wallet.app"
+
+          if [ ! -d "${APP_PATH}" ]; then
+            echo "ERROR: Sentinel Node Wallet.app not found inside mounted candidate DMG." >&2
+            hdiutil detach "${MOUNT_PT}" -force 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Verifying code signature and TeamID..."
+          codesign --verify --deep --strict "${APP_PATH}"
+          codesign -dvvv "${APP_PATH}" 2>&1 | grep "TeamIdentifier=S8QMQZA656"
+
+          echo "Verifying Gatekeeper assessment..."
+          spctl -a -t exec -vv "${APP_PATH}"
+
+          echo "Verifying notarization ticket..."
+          xcrun stapler validate "${DMG_PATH}"
+
+          hdiutil detach "${MOUNT_PT}" -force 2>/dev/null || true
+          echo "✓ Read-only DMG inspection and Gatekeeper/Notary verification complete."
+
+      # Step 2: Validate Sparkle Feed in Dry-Run Mode Prior to Promotion (WO-117)
+      - name: Validate Candidate Appcast Feed (Pre-Promotion Gating)
+        env:
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --prune-unsigned-legacy \
+            --dry-run
+          echo "✓ Pre-promotion feed validation succeeded."
+
+      # Step 3: Promote Verified Draft Release to Public (WO-115, WO-117)
+      - name: Promote Draft Release to Public
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+        run: |
+          echo "Promoting verified draft release ${TAG} to public..."
+          gh release edit "${TAG}" --draft=false
+          echo "✓ Release ${TAG} promoted to public."
+
+      # Step 4: Publish Sparkle Production Appcast Feed with Bounded CDN Readback (WO-118)
       - name: Publish Sparkle Production Appcast Feed to Main
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
@@ -348,10 +493,12 @@ jobs:
           OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
-          echo "Publishing live production Sparkle appcast to main with mandatory remote asset verification..."
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
           bash scripts/publish_production_appcast.sh \
             --tag "${TAG}" \
-            --app-bundle "dist/Sentinel Node Wallet.app" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
             --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
             --operator-approval "${OPERATOR_APPROVAL}" \
             --publish-to-main \

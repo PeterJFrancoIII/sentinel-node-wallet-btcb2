@@ -13,7 +13,12 @@ APPCAST_FILE="${DIST_DIR}/appcast.xml"
 # WO-89 P0: Stage exclusively in unique disposable temp outside operator repository.
 # Never touch, overwrite, or create backup files in the active source tree.
 TEMP_DIR="$(mktemp -d -t sentinel-appcast-XXXXXX)"
-cleanup() { rm -rf "${TEMP_DIR}" 2>/dev/null || true; }
+cleanup() {
+    if [ -d "${TEMP_DIR}/dmg_mount" ]; then
+        hdiutil detach "${TEMP_DIR}/dmg_mount" -force 2>/dev/null || true
+    fi
+    rm -rf "${TEMP_DIR}" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 fail() { printf "APPCAST PUBLISHER BLOCKED: %s\n" "$*" >&2; exit 1; }
@@ -33,6 +38,7 @@ APP_BUNDLE_PATH=""
 SIGN_UPDATE_OVERRIDE=""
 ED_KEY_FILE=""
 PRUNE_UNSIGNED_LEGACY=0
+ENFORCE_SIGNED_FEED=0
 
 usage() {
     cat <<EOF
@@ -129,6 +135,10 @@ while [ $# -gt 0 ]; do
             PRUNE_UNSIGNED_LEGACY=1
             shift
             ;;
+        --enforce-signed-feed)
+            ENFORCE_SIGNED_FEED=1
+            shift
+            ;;
         --publish-to-main)
             PUBLISH_TO_MAIN=1
             DRY_RUN=0
@@ -221,6 +231,15 @@ else
     if [ ! -x "${SIGN_UPDATE}" ]; then
         SIGN_UPDATE="$(find "${ROOT_DIR}/.build" -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
     fi
+    # WO-88, WO-117: If sign_update binary is absent in live mode, populate pinned artifacts via swift package resolve
+    if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ] && [ ! -x "${SIGN_UPDATE}" ]; then
+        echo "Sparkle sign_update binary not found. Populating SPM artifacts via 'swift package resolve'..."
+        (cd "${ROOT_DIR}" && swift package resolve >/dev/null 2>&1 || true)
+        SIGN_UPDATE="${ROOT_DIR}/.build/artifacts/sparkle/Sparkle/bin/sign_update"
+        if [ ! -x "${SIGN_UPDATE}" ]; then
+            SIGN_UPDATE="$(find "${ROOT_DIR}/.build" -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
+        fi
+    fi
 fi
 
 if [ "${DRY_RUN}" = "0" ]; then
@@ -298,9 +317,32 @@ else
     fi
 fi
 
-# 3. Resolve and Validate Public Key (SUPublicEDKey) and App Bundle Identity (WO-95, WO-101)
+# 3. Resolve and Validate Public Key (SUPublicEDKey) and App Bundle Identity (WO-95, WO-101, WO-117)
 PUBLIC_KEY=""
 BUNDLE_SUPUBLIC_KEY=""
+
+# If app bundle was not explicitly specified, auto-mount DMG if an archive is available (WO-117)
+if [ -z "${APP_BUNDLE_PATH}" ]; then
+    DMG_TO_MOUNT=""
+    if [ -n "${ARCHIVE_OVERRIDE}" ] && [ -f "${ARCHIVE_OVERRIDE}" ] && [[ "${ARCHIVE_OVERRIDE}" == *.dmg ]]; then
+        DMG_TO_MOUNT="${ARCHIVE_OVERRIDE}"
+    elif [ -n "${LOCAL_ARCHIVE}" ] && [ -f "${LOCAL_ARCHIVE}" ] && [[ "${LOCAL_ARCHIVE}" == *.dmg ]]; then
+        DMG_TO_MOUNT="${LOCAL_ARCHIVE}"
+    elif [ -n "${TARGET_ARCHIVE:-}" ] && [ -f "${TARGET_ARCHIVE:-}" ] && [[ "${TARGET_ARCHIVE:-}" == *.dmg ]]; then
+        DMG_TO_MOUNT="${TARGET_ARCHIVE}"
+    fi
+
+    if [ -n "${DMG_TO_MOUNT}" ]; then
+        MOUNT_PT="${TEMP_DIR}/dmg_mount"
+        mkdir -p "${MOUNT_PT}"
+        if hdiutil attach -readonly -nobrowse -mountpoint "${MOUNT_PT}" "${DMG_TO_MOUNT}" >/dev/null 2>&1; then
+            if [ -d "${MOUNT_PT}/Sentinel Node Wallet.app" ]; then
+                APP_BUNDLE_PATH="${MOUNT_PT}/Sentinel Node Wallet.app"
+                echo "✓ Auto-mounted candidate DMG to extract and inspect app bundle: ${APP_BUNDLE_PATH}"
+            fi
+        fi
+    fi
+fi
 
 BUNDLE_CANDIDATE="${APP_BUNDLE_PATH}"
 
@@ -694,7 +736,7 @@ else
 EOF
 fi
 
-python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" "${PRUNE_UNSIGNED_LEGACY}" "${DRY_RUN}" <<'PY' || fail "Appcast integrity check failed."
+python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" "${PRUNE_UNSIGNED_LEGACY}" "${DRY_RUN}" "${ENFORCE_SIGNED_FEED}" <<'PY' || fail "Appcast integrity check failed."
 import sys
 import xml.etree.ElementTree as ET
 
@@ -703,6 +745,7 @@ new_build = int(sys.argv[2])
 new_version = sys.argv[3]
 prune_legacy = sys.argv[4] == "1"
 is_dry_run = sys.argv[5] == "1"
+enforce_signed = sys.argv[6] == "1"
 
 tree = ET.parse(appcast_path)
 root = tree.getroot()
@@ -728,7 +771,7 @@ for item in channel.findall("item"):
 if unsigned_builds:
     if prune_legacy:
         print(f"✓ Pruned {len(unsigned_builds)} unauthenticated legacy unsigned enclosure(s) (Builds: {unsigned_builds}) (WO-113).")
-    elif not is_dry_run:
+    elif (not is_dry_run) or enforce_signed:
         print(f"FATAL INTEGRITY VIOLATION (WO-113): Baseline appcast contains unauthenticated enclosure(s) lacking sparkle:edSignature (Builds: {unsigned_builds}).", file=sys.stderr)
         print("Historical unsigned releases cannot be published in an authenticated Sparkle update feed without explicit migration.", file=sys.stderr)
         print("Pass --prune-unsigned-legacy to prune unauthenticated historical entries, or initialize a pristine authenticated feed.", file=sys.stderr)
@@ -865,18 +908,35 @@ if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
     echo "✓ Active working directory remained 100% untouched and unmutated."
 
     if [ "${SANDBOX_SIMULATION}" = "0" ]; then
-        echo "Verifying published appcast live via raw GitHub CDN..."
+        echo "Verifying published appcast live via raw GitHub CDN (WO-118)..."
         CDN_URL="https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml"
-        sleep 2
-        CDN_STATUS="$(curl -s -o "${TEMP_DIR}/cdn_appcast.xml" -w "%{http_code}" "${CDN_URL}" || echo "000")"
-        if [ "${CDN_STATUS}" = "200" ]; then
-            if grep -q "sparkle:version=\"${BUILD_NUM}\"" "${TEMP_DIR}/cdn_appcast.xml"; then
-                echo "✓ Live CDN verification successful: Build ${BUILD_NUM} visible at ${CDN_URL} (HTTP 200)."
+        MAX_RETRIES=10
+        RETRY_DELAY=3
+        CDN_VERIFIED=0
+
+        for attempt in $(seq 1 "${MAX_RETRIES}"); do
+            echo "CDN Readback Attempt ${attempt}/${MAX_RETRIES}..."
+            CDN_STATUS="$(curl -s -o "${TEMP_DIR}/cdn_appcast.xml" -w "%{http_code}" "${CDN_URL}" || echo "000")"
+            if [ "${CDN_STATUS}" = "200" ] && [ -s "${TEMP_DIR}/cdn_appcast.xml" ]; then
+                if grep -q "sparkle:version=\"${BUILD_NUM}\"" "${TEMP_DIR}/cdn_appcast.xml" && \
+                   grep -q "${ED_SIGNATURE}" "${TEMP_DIR}/cdn_appcast.xml"; then
+                    echo "✓ Live CDN verification successful: Build ${BUILD_NUM} visible and cryptographically verified at ${CDN_URL} (HTTP 200)."
+                    CDN_VERIFIED=1
+                    break
+                else
+                    echo "Notice: CDN returned HTTP 200, but candidate Build ${BUILD_NUM} / signature not yet visible in edge cache (attempt ${attempt}/${MAX_RETRIES})."
+                fi
             else
-                echo "⚠ Live CDN returned HTTP 200, but Build ${BUILD_NUM} not yet propagated in edge cache."
+                echo "Notice: CDN returned HTTP ${CDN_STATUS} (attempt ${attempt}/${MAX_RETRIES})."
             fi
-        else
-            echo "⚠ Live CDN returned HTTP ${CDN_STATUS} during immediate post-publish read-back."
+            sleep "${RETRY_DELAY}"
+        done
+
+        if [ "${CDN_VERIFIED}" != "1" ]; then
+            echo "ERROR: PARTIAL_RELEASE_FEED_NOT_LIVE: CDN readback failed after ${MAX_RETRIES} attempts." >&2
+            echo "The GitHub release and Git commit were published, but raw CDN has not served the authentic signed feed for Build ${BUILD_NUM}." >&2
+            echo "Operator Repair Guidance: Inspect repository dist/appcast.xml on main and purge/invalidate edge cache if necessary." >&2
+            exit 75
         fi
     fi
 else

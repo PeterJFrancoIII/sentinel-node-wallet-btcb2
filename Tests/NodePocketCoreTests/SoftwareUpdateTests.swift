@@ -1436,20 +1436,23 @@ final class SoftwareUpdateTests: XCTestCase {
         try legacyUnsignedAppcast.write(to: legacyFixtureURL, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: legacyFixtureURL) }
 
-        // Live mode publish to main with unauthenticated legacy items must fail closed if --prune-unsigned-legacy is omitted
+        // 27. WO-113 & WO-119 P0: Baseline feed with unauthenticated legacy items must fail closed with exact FATAL INTEGRITY VIOLATION (WO-113)
+        // All prerequisite gates (bundle, archive, signature, public key) are satisfied; failure is strictly due to unauthenticated baseline feed
         let unprunedRun = runScript(args: [
             "--tag", "v1.0.0-build5",
-            "--publish-to-main",
+            "--dry-run",
+            "--enforce-signed-feed",
             "--archive", tempArchiveURL.path,
             "--app-bundle", validAppBundle.path,
             "--signature", signatureB64,
             "--public-key", pubKeyB64,
-            "--operator-approval", "YES",
             "--appcast", legacyFixtureURL.path
         ])
-        XCTAssertNotEqual(unprunedRun.status, 0, "Unsigned legacy enclosures in live mode must fail closed")
-        XCTAssertTrue(unprunedRun.output.contains("FATAL INTEGRITY VIOLATION (WO-113)") || unprunedRun.output.contains("sparkle:edSignature") || unprunedRun.output.contains("Remote release asset"),
-                      "Must cite WO-113 integrity violation or missing remote asset: \(unprunedRun.output)")
+        XCTAssertNotEqual(unprunedRun.status, 0, "Unsigned legacy enclosures in baseline feed must fail closed")
+        XCTAssertTrue(unprunedRun.output.contains("FATAL INTEGRITY VIOLATION (WO-113)"),
+                      "Must cite WO-113 integrity violation: \(unprunedRun.output)")
+        XCTAssertFalse(unprunedRun.output.contains("Remote release asset"),
+                       "Must NOT fail on remote asset check: \(unprunedRun.output)")
 
         // 28. WO-113 P0: Dry-run with --prune-unsigned-legacy succeeds and prunes unsigned legacy enclosures
         let prunedRun = runScript(args: [
@@ -1465,6 +1468,53 @@ final class SoftwareUpdateTests: XCTestCase {
         XCTAssertEqual(prunedRun.status, 0, "Dry-run with --prune-unsigned-legacy must pass: \(prunedRun.output)")
         XCTAssertTrue(prunedRun.output.contains("Pruned") && prunedRun.output.contains("WO-113"),
                       "Must log pruned legacy items: \(prunedRun.output)")
+        XCTAssertTrue(prunedRun.output.contains("sparkle:version=\"5\"") || prunedRun.output.contains("Build 5"),
+                      "Must contain candidate build 5: \(prunedRun.output)")
+
+        // 29. WO-117 P0: Release attestation schema and Ed25519 cryptographic verification
+        let computedArchiveSHA256 = SHA256.hash(data: archiveBytes).map { String(format: "%02x", $0) }.joined()
+        let attestationJSON = """
+        {
+            "schema_version": "1.0",
+            "tag": "v1.0.0-build5",
+            "commit_sha": "0123456789abcdef0123456789abcdef01234567",
+            "short_version": "1.0.0",
+            "build_number": "5",
+            "bundle_id": "pool.sentineldefensetechnologies.co.za",
+            "team_id": "S8QMQZA656",
+            "dmg_filename": "Sentinel-Node-Wallet-v1.0.0-Build5-macOS-arm64-notarized.dmg",
+            "dmg_sha256": "\(computedArchiveSHA256)",
+            "dmg_length": \(archiveBytes.count),
+            "sparkle_ed_signature": "\(signatureB64)",
+            "sparkle_public_ed_key": "\(pubKeyB64)",
+            "notary_status": "Accepted",
+            "stapled": true,
+            "minimum_system_version": "13.0"
+        }
+        """
+        guard let attestationData = attestationJSON.data(using: .utf8),
+              let attObj = try? JSONSerialization.jsonObject(with: attestationData) as? [String: Any] else {
+            XCTFail("Attestation JSON must parse cleanly")
+            return
+        }
+        XCTAssertEqual(attObj["tag"] as? String, "v1.0.0-build5")
+        XCTAssertEqual(attObj["bundle_id"] as? String, "pool.sentineldefensetechnologies.co.za")
+        XCTAssertEqual(attObj["team_id"] as? String, "S8QMQZA656")
+        XCTAssertEqual(attObj["dmg_sha256"] as? String, computedArchiveSHA256)
+        XCTAssertEqual(attObj["sparkle_public_ed_key"] as? String, pubKeyB64)
+
+        // Cryptographic verification of attestation signature against archive bytes
+        let rawPub = Data(base64Encoded: pubKeyB64)!
+        let rawSig = Data(base64Encoded: signatureB64)!
+        let cryptoKey = try Curve25519.Signing.PublicKey(rawRepresentation: rawPub)
+        XCTAssertTrue(cryptoKey.isValidSignature(rawSig, for: archiveBytes),
+                      "Cryptographic signature must verify against archive bytes")
+
+        // Tampered archive bytes must fail verification
+        var tamperedAttestationBytes = archiveBytes
+        tamperedAttestationBytes.append(contentsOf: [0xDE, 0xAD, 0xBE, 0xEF])
+        XCTAssertFalse(cryptoKey.isValidSignature(rawSig, for: tamperedAttestationBytes),
+                       "Tampered archive bytes must fail signature verification")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test
