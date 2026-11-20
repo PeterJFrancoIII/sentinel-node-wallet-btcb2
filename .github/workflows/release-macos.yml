@@ -250,24 +250,38 @@ jobs:
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
 
-      # Generate Authenticated Release Attestation (WO-117)
+      # Generate Authenticated Release Attestation (WO-117, WO-121)
       - name: Generate Authenticated Release Attestation
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
           BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
-          HEAD_COMMIT: "${{ github.sha }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          TAG_COMMIT="$(git rev-list -n 1 "${TAG}" 2>/dev/null || echo "")"
+          if [ -n "${TAG_COMMIT}" ] && [ "${HEAD_COMMIT}" != "${TAG_COMMIT}" ]; then
+            echo "ERROR: Checked-out HEAD (${HEAD_COMMIT}) does not match candidate release tag commit (${TAG_COMMIT})." >&2
+            exit 1
+          fi
+
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           DMG_NAME="$(basename "${DMG_FILE}")"
           DMG_SHA="$(shasum -a 256 "${DMG_FILE}" | awk '{print $1}')"
           DMG_LEN="$(stat -f%z "${DMG_FILE}" 2>/dev/null || stat -c%s "${DMG_FILE}")"
           ED_SIG="$(grep "sparkle:edSignature" dist/SPARKLE_ENCLOSURE.txt | head -n 1 | sed -E 's/.*sparkle:edSignature="([^"]+)".*/\1/' || echo "")"
 
-          python3 - "${TAG}" "${HEAD_COMMIT}" "${SHORT_VERSION}" "${BUILD_NUM}" "${DMG_NAME}" "${DMG_SHA}" "${DMG_LEN}" "${ED_SIG}" "${SPARKLE_PUBLIC_ED_KEY}" <<'PY'
+          # Verify notarization ticket is actually stapled before recording in attestation (WO-121)
+          if xcrun stapler validate "${DMG_FILE}" >/dev/null 2>&1; then
+            STAPLED_VAL="True"
+          else
+            echo "ERROR: Stapler validation failed on notarized DMG." >&2
+            exit 1
+          fi
+
+          python3 - "${TAG}" "${HEAD_COMMIT}" "${SHORT_VERSION}" "${BUILD_NUM}" "${DMG_NAME}" "${DMG_SHA}" "${DMG_LEN}" "${ED_SIG}" "${SPARKLE_PUBLIC_ED_KEY}" "${STAPLED_VAL}" <<'PY'
           import json, sys
-          tag, commit, ver, build, dmg_name, sha, length, sig, pub = sys.argv[1:10]
+          tag, commit, ver, build, dmg_name, sha, length, sig, pub, stapled = sys.argv[1:11]
           attestation = {
               'schema_version': '1.0',
               'tag': tag,
@@ -282,7 +296,7 @@ jobs:
               'sparkle_ed_signature': sig,
               'sparkle_public_ed_key': pub,
               'notary_status': 'Accepted',
-              'stapled': True,
+              'stapled': stapled == "True",
               'minimum_system_version': '13.0'
           }
           with open('dist/RELEASE_ATTESTATION.json', 'w') as f:
@@ -362,11 +376,25 @@ jobs:
           ref: ${{ needs.unprivileged-qualification.outputs.verified_tag }}
           fetch-depth: 0
 
-      # Step 1: Download & Verify Immutable Draft Release Assets (WO-117)
+      # Step 0: Ensure Pinned Sparkle Artifacts Available in Fresh Runner (WO-120)
+      - name: Ensure Pinned Sparkle Artifacts Available
+        run: |
+          echo "Populating pinned Sparkle artifacts via swift package resolve..."
+          swift package resolve
+          SIGN_UPDATE="$(find .build -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
+          if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
+            echo "ERROR: Failed to resolve pinned Sparkle sign_update binary from SPM artifacts." >&2
+            exit 1
+          fi
+          echo "✓ Pinned Sparkle sign_update available at: ${SIGN_UPDATE}"
+
+      # Step 1: Download & Verify Immutable Draft Release Assets (WO-117, WO-120, WO-121)
       - name: Download & Verify Immutable Draft Release Assets
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
+          BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
           echo "Verifying draft release exists for ${TAG}..."
@@ -386,17 +414,56 @@ jobs:
             exit 1
           fi
 
-          python3 - "${ATTESTATION_FILE}" "${SPARKLE_PUBLIC_ED_KEY}" <<'PY' || exit 1
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+
+          python3 - "${ATTESTATION_FILE}" "${SPARKLE_PUBLIC_ED_KEY}" "${TAG}" "${HEAD_COMMIT}" "${SHORT_VERSION}" "${BUILD_NUM}" <<'PY' || exit 1
           import json, sys, os, hashlib, subprocess
 
-          with open(sys.argv[1]) as f:
+          att_file, expected_pub, expected_tag, head_commit, expected_ver, expected_build = sys.argv[1:7]
+          with open(att_file) as f:
               att = json.load(f)
-          expected_pub = sys.argv[2]
+
+          if att.get("tag") != expected_tag:
+              print(f"ERROR: Attestation tag mismatch: expected {expected_tag}, got {att.get('tag')}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("commit_sha") != head_commit:
+              print(f"ERROR: Attestation commit_sha mismatch: expected {head_commit}, got {att.get('commit_sha')}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("short_version") != expected_ver:
+              print(f"ERROR: Attestation short_version mismatch: expected {expected_ver}, got {att.get('short_version')}", file=sys.stderr)
+              sys.exit(1)
+
+          if str(att.get("build_number")) != str(expected_build):
+              print(f"ERROR: Attestation build_number mismatch: expected {expected_build}, got {att.get('build_number')}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("bundle_id") != "pool.sentineldefensetechnologies.co.za":
+              print(f"ERROR: Attestation bundle_id mismatch: got {att.get('bundle_id')}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("team_id") != "S8QMQZA656":
+              print(f"ERROR: Attestation team_id mismatch: got {att.get('team_id')}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("notary_status") != "Accepted":
+              print(f"ERROR: Attestation notary_status is not Accepted: got {att.get('notary_status')}", file=sys.stderr)
+              sys.exit(1)
+
+          if att.get("stapled") is not True:
+              print(f"ERROR: Attestation stapled is not True", file=sys.stderr)
+              sys.exit(1)
 
           dmg_name = att.get("dmg_filename")
           dmg_path = os.path.join("dist/staged-assets", dmg_name)
           if not os.path.isfile(dmg_path):
               print(f"ERROR: DMG asset '{dmg_name}' missing from downloaded draft assets.", file=sys.stderr)
+              sys.exit(1)
+
+          actual_len = os.path.getsize(dmg_path)
+          if actual_len != att.get("dmg_length"):
+              print(f"ERROR: DMG byte length mismatch: expected {att.get('dmg_length')}, got {actual_len}", file=sys.stderr)
               sys.exit(1)
 
           with open(dmg_path, "rb") as f:
@@ -429,7 +496,7 @@ jobs:
               print(f"ERROR: Ed25519 cryptographic signature verification failed for {dmg_name}", file=sys.stderr)
               sys.exit(1)
 
-          print(f"✓ Verified immutable draft attestation, SHA256 ({actual_sha}), and EdDSA signature for {dmg_name}.")
+          print(f"✓ Verified immutable draft attestation: tag {expected_tag}, commit {head_commit}, SHA256 ({actual_sha}), and EdDSA signature for {dmg_name}.")
           PY
 
           # Mount DMG read-only to verify app bundle, code signature, TeamID, Gatekeeper, Stapler
@@ -455,11 +522,21 @@ jobs:
           echo "Verifying notarization ticket..."
           xcrun stapler validate "${DMG_PATH}"
 
-          hdiutil detach "${MOUNT_PT}" -force 2>/dev/null || true
-          echo "✓ Read-only DMG inspection and Gatekeeper/Notary verification complete."
+          echo "Verifying embedded SUPublicEDKey in Info.plist..."
+          INFO_PLIST="${APP_PATH}/Contents/Info.plist"
+          EMBEDDED_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${INFO_PLIST}" 2>/dev/null || echo "")"
+          if [ "${EMBEDDED_KEY}" != "${SPARKLE_PUBLIC_ED_KEY}" ]; then
+            echo "ERROR: Embedded SUPublicEDKey ('${EMBEDDED_KEY}') does not match expected public key ('${SPARKLE_PUBLIC_ED_KEY}')." >&2
+            hdiutil detach "${MOUNT_PT}" -force 2>/dev/null || true
+            exit 1
+          fi
+          echo "✓ Verified embedded SUPublicEDKey matches expected public key."
 
-      # Step 2: Validate Sparkle Feed in Dry-Run Mode Prior to Promotion (WO-117)
-      - name: Validate Candidate Appcast Feed (Pre-Promotion Gating)
+          hdiutil detach "${MOUNT_PT}" -force 2>/dev/null || true
+          echo "✓ Read-only DMG inspection, Gatekeeper, Notary, and SUPublicEDKey verification complete."
+
+      # Step 2: Validate Sparkle Feed in Preflight Mode Prior to Promotion (WO-117, WO-120)
+      - name: Validate Candidate Appcast Feed (Pre-Promotion Preflight Gating)
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
@@ -472,8 +549,8 @@ jobs:
             --signature "${ED_SIG}" \
             --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
             --prune-unsigned-legacy \
-            --dry-run
-          echo "✓ Pre-promotion feed validation succeeded."
+            --preflight
+          echo "✓ Pre-promotion preflight validation succeeded (WO-120): Live feed publish prerequisites and binary verifiers satisfied before public promotion."
 
       # Step 3: Promote Verified Draft Release to Public (WO-115, WO-117)
       - name: Promote Draft Release to Public

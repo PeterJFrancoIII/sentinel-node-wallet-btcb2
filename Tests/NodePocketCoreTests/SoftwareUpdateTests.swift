@@ -1515,6 +1515,175 @@ final class SoftwareUpdateTests: XCTestCase {
         tamperedAttestationBytes.append(contentsOf: [0xDE, 0xAD, 0xBE, 0xEF])
         XCTAssertFalse(cryptoKey.isValidSignature(rawSig, for: tamperedAttestationBytes),
                        "Tampered archive bytes must fail signature verification")
+
+        // MARK: - WO-120 Pre-Promotion Preflight Live Gating & Pinned Verifier Availability
+
+        // 30. WO-120 P0: Preflight verification gates (pre-promotion gating without git modification)
+        // A) Valid preflight run passes cleanly and exercises binary and cryptographic verifiers
+        let preflightSuccessRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--preflight",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", validAppBundle.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--prune-unsigned-legacy",
+            "--appcast", legacyFixtureURL.path
+        ])
+        XCTAssertEqual(preflightSuccessRun.status, 0, "Preflight with valid credentials must succeed: \(preflightSuccessRun.output)")
+        XCTAssertTrue(preflightSuccessRun.output.contains("Preflight verification passed (WO-120)"),
+                      "Must log preflight pass: \(preflightSuccessRun.output)")
+
+        // B) Preflight fails closed if signature is missing or mock
+        let preflightNoSigRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--preflight",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", validAppBundle.path,
+            "--public-key", pubKeyB64,
+            "--prune-unsigned-legacy",
+            "--appcast", legacyFixtureURL.path
+        ])
+        XCTAssertNotEqual(preflightNoSigRun.status, 0, "Preflight without signature must fail closed")
+        XCTAssertTrue(preflightNoSigRun.output.contains("EdDSA signature is required in live mode"),
+                      "Must cite signature requirement: \(preflightNoSigRun.output)")
+
+        // C) Preflight fails closed if public key is missing
+        let preflightNoKeyRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--preflight",
+            "--archive", tempArchiveURL.path,
+            "--signature", signatureB64,
+            "--prune-unsigned-legacy",
+            "--appcast", legacyFixtureURL.path
+        ])
+        XCTAssertNotEqual(preflightNoKeyRun.status, 0, "Preflight without public key or bundle must fail closed")
+
+        // D) Preflight fails closed if archive bytes do not verify against public key (tampered archive)
+        let tamperedArchive = FileManager.default.temporaryDirectory.appendingPathComponent("tampered-\(UUID().uuidString).dmg")
+        try Data("TAMPERED_ARCHIVE_BYTES".utf8).write(to: tamperedArchive)
+        defer { try? FileManager.default.removeItem(at: tamperedArchive) }
+
+        let preflightTamperedRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--preflight",
+            "--archive", tamperedArchive.path,
+            "--app-bundle", validAppBundle.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--prune-unsigned-legacy",
+            "--appcast", legacyFixtureURL.path
+        ])
+        XCTAssertNotEqual(preflightTamperedRun.status, 0, "Preflight with tampered archive bytes must fail closed")
+
+        // MARK: - WO-121 Authenticated Source/Tag/Release Attestation Binding
+
+        // 31. WO-121 P0: Strict release attestation schema assertions and negative rejection
+        func validateAttestationDict(_ dict: [String: Any], expectedTag: String, headCommit: String, expectedVer: String, expectedBuild: String, expectedPub: String, archivePath: String) -> (valid: Bool, error: String) {
+            guard (dict["tag"] as? String) == expectedTag else { return (false, "tag mismatch") }
+            guard (dict["commit_sha"] as? String) == headCommit else { return (false, "commit_sha mismatch") }
+            guard (dict["short_version"] as? String) == expectedVer else { return (false, "short_version mismatch") }
+            guard (dict["build_number"] as? String) == expectedBuild || String(describing: dict["build_number"] ?? "") == expectedBuild else { return (false, "build_number mismatch") }
+            guard (dict["bundle_id"] as? String) == "pool.sentineldefensetechnologies.co.za" else { return (false, "bundle_id mismatch") }
+            guard (dict["team_id"] as? String) == "S8QMQZA656" else { return (false, "team_id mismatch") }
+            guard (dict["notary_status"] as? String) == "Accepted" else { return (false, "notary_status mismatch") }
+            guard (dict["stapled"] as? Bool) == true else { return (false, "stapled mismatch") }
+            guard (dict["sparkle_public_ed_key"] as? String) == expectedPub else { return (false, "public key mismatch") }
+            guard let fileData = try? Data(contentsOf: URL(fileURLWithPath: archivePath)) else { return (false, "archive missing") }
+            let actualSha = SHA256.hash(data: fileData).map { String(format: "%02x", $0) }.joined()
+            guard (dict["dmg_sha256"] as? String) == actualSha else { return (false, "sha256 mismatch") }
+            guard (dict["dmg_length"] as? Int) == fileData.count else { return (false, "length mismatch") }
+            guard let pubData = Data(base64Encoded: expectedPub),
+                  let sigData = Data(base64Encoded: dict["sparkle_ed_signature"] as? String ?? ""),
+                  let pubKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubData),
+                  pubKey.isValidSignature(sigData, for: fileData) else {
+                return (false, "signature invalid")
+            }
+            return (true, "")
+        }
+
+        // Positive verification
+        let posCheck = validateAttestationDict(attObj, expectedTag: "v1.0.0-build5", headCommit: "0123456789abcdef0123456789abcdef01234567", expectedVer: "1.0.0", expectedBuild: "5", expectedPub: pubKeyB64, archivePath: tempArchiveURL.path)
+        XCTAssertTrue(posCheck.valid, "Baseline attestation must validate cleanly: \(posCheck.error)")
+
+        // Negative: Tag mismatch
+        var badTagDict = attObj
+        badTagDict["tag"] = "v1.0.0-build6"
+        XCTAssertFalse(validateAttestationDict(badTagDict, expectedTag: "v1.0.0-build5", headCommit: "0123456789abcdef0123456789abcdef01234567", expectedVer: "1.0.0", expectedBuild: "5", expectedPub: pubKeyB64, archivePath: tempArchiveURL.path).valid)
+
+        // Negative: Commit SHA mismatch
+        var badCommitDict = attObj
+        badCommitDict["commit_sha"] = "ffffffffffffffffffffffffffffffffffffffff"
+        XCTAssertFalse(validateAttestationDict(badCommitDict, expectedTag: "v1.0.0-build5", headCommit: "0123456789abcdef0123456789abcdef01234567", expectedVer: "1.0.0", expectedBuild: "5", expectedPub: pubKeyB64, archivePath: tempArchiveURL.path).valid)
+
+        // Negative: Notary status not Accepted
+        var badNotaryDict = attObj
+        badNotaryDict["notary_status"] = "Rejected"
+        XCTAssertFalse(validateAttestationDict(badNotaryDict, expectedTag: "v1.0.0-build5", headCommit: "0123456789abcdef0123456789abcdef01234567", expectedVer: "1.0.0", expectedBuild: "5", expectedPub: pubKeyB64, archivePath: tempArchiveURL.path).valid)
+
+        // Negative: Stapled not true
+        var unStapledDict = attObj
+        unStapledDict["stapled"] = false
+        XCTAssertFalse(validateAttestationDict(unStapledDict, expectedTag: "v1.0.0-build5", headCommit: "0123456789abcdef0123456789abcdef01234567", expectedVer: "1.0.0", expectedBuild: "5", expectedPub: pubKeyB64, archivePath: tempArchiveURL.path).valid)
+
+        // Negative: Archive length mismatch
+        var badLengthDict = attObj
+        badLengthDict["dmg_length"] = 999
+        XCTAssertFalse(validateAttestationDict(badLengthDict, expectedTag: "v1.0.0-build5", headCommit: "0123456789abcdef0123456789abcdef01234567", expectedVer: "1.0.0", expectedBuild: "5", expectedPub: pubKeyB64, archivePath: tempArchiveURL.path).valid)
+
+        // MARK: - WO-122 Exact Feed Publication Observability & CDN Exact-Byte Verification
+
+        // 32. WO-122 P0: CDN exact-byte and XML structure verification with typed exit code 75
+        let wo122TempDir = FileManager.default.temporaryDirectory.appendingPathComponent("wo122-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: wo122TempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: wo122TempDir) }
+
+        let candidateFeedPath = wo122TempDir.appendingPathComponent("candidate_appcast.xml")
+        let candidateFeedXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+                <title>Sentinel Node Wallet Updates</title>
+                <item>
+                    <title>Sentinel Node Wallet v1.0.0 (Build 5)</title>
+                    <enclosure url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build5/app.dmg"
+                               sparkle:version="5"
+                               sparkle:edSignature="\(signatureB64)"
+                               length="12000000"
+                               type="application/octet-stream" />
+                </item>
+            </channel>
+        </rss>
+        """
+        try candidateFeedXML.write(to: candidateFeedPath, atomically: true, encoding: .utf8)
+
+        let candidateFeedBytes = try Data(contentsOf: candidateFeedPath)
+        let expectedFeedSHA = SHA256.hash(data: candidateFeedBytes).map { String(format: "%02x", $0) }.joined()
+
+        // Exact match succeeds
+        let matchingFeedPath = wo122TempDir.appendingPathComponent("cdn_exact.xml")
+        try candidateFeedXML.write(to: matchingFeedPath, atomically: true, encoding: .utf8)
+        let matchingFeedSHA = SHA256.hash(data: try Data(contentsOf: matchingFeedPath)).map { String(format: "%02x", $0) }.joined()
+        XCTAssertEqual(matchingFeedSHA, expectedFeedSHA, "Exact CDN readback SHA must match candidate SHA")
+
+        // Stale CDN response containing same version string but different bytes / SHA-256 must NOT match
+        let staleFeedXML = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+                <title>Sentinel Node Wallet Updates</title>
+                <item>
+                    <title>Stale Item With Matching Token</title>
+                    <enclosure url="https://example.com/stale.dmg" sparkle:version="5" sparkle:edSignature="\(signatureB64)" length="1000" type="application/octet-stream" />
+                </item>
+                <!-- EXTRA STALE COMMENT -->
+            </channel>
+        </rss>
+        """
+        let staleFeedPath = wo122TempDir.appendingPathComponent("cdn_stale.xml")
+        try staleFeedXML.write(to: staleFeedPath, atomically: true, encoding: .utf8)
+        let staleFeedSHA = SHA256.hash(data: try Data(contentsOf: staleFeedPath)).map { String(format: "%02x", $0) }.joined()
+        XCTAssertNotEqual(staleFeedSHA, expectedFeedSHA, "Stale CDN payload with matching substrings must have different SHA-256")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test

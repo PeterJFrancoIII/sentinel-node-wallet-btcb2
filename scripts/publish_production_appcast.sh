@@ -39,6 +39,7 @@ SIGN_UPDATE_OVERRIDE=""
 ED_KEY_FILE=""
 PRUNE_UNSIGNED_LEGACY=0
 ENFORCE_SIGNED_FEED=0
+PREFLIGHT=0
 
 usage() {
     cat <<EOF
@@ -60,6 +61,7 @@ Options:
   --sign-update <path>       Path to Sparkle sign_update binary override
   --publish-to-main          Commit and push updated appcast.xml directly to origin/main via isolated worktree
   --prune-unsigned-legacy    Prune historical unauthenticated enclosures lacking sparkle:edSignature (WO-113)
+  --preflight                Execute preflight validation of all live publish prerequisites without publishing (WO-120)
   --dry-run                  Simulate validation and print appcast diff (default)
   --allow-mock-for-dry-run   Explicitly permits synthetic signature in dry-run mode only (STRICTLY FORBIDDEN IN LIVE MODE)
   -h, --help                 Show this help message
@@ -137,6 +139,12 @@ while [ $# -gt 0 ]; do
             ;;
         --enforce-signed-feed)
             ENFORCE_SIGNED_FEED=1
+            shift
+            ;;
+        --preflight)
+            PREFLIGHT=1
+            DRY_RUN=1
+            PUBLISH_TO_MAIN=0
             shift
             ;;
         --publish-to-main)
@@ -231,8 +239,8 @@ else
     if [ ! -x "${SIGN_UPDATE}" ]; then
         SIGN_UPDATE="$(find "${ROOT_DIR}/.build" -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
     fi
-    # WO-88, WO-117: If sign_update binary is absent in live mode, populate pinned artifacts via swift package resolve
-    if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ] && [ ! -x "${SIGN_UPDATE}" ]; then
+    # WO-88, WO-117, WO-120: If sign_update binary is absent in live mode or preflight, populate pinned artifacts via swift package resolve
+    if { [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ]; } && [ "${SANDBOX_SIMULATION}" = "0" ] && [ ! -x "${SIGN_UPDATE}" ]; then
         echo "Sparkle sign_update binary not found. Populating SPM artifacts via 'swift package resolve'..."
         (cd "${ROOT_DIR}" && swift package resolve >/dev/null 2>&1 || true)
         SIGN_UPDATE="${ROOT_DIR}/.build/artifacts/sparkle/Sparkle/bin/sign_update"
@@ -242,10 +250,10 @@ else
     fi
 fi
 
-if [ "${DRY_RUN}" = "0" ]; then
-    # WO-88 P0: Make sign_update absence an explicit STOP before ANY file writes or remote calls in live mode
+if [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ]; then
+    # WO-88 P0, WO-120: Make sign_update absence an explicit STOP before ANY file writes or remote calls in live mode and preflight
     if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
-        fail "Production publish aborted: Sparkle sign_update binary is required in live mode but was not found or is not executable at '${SIGN_UPDATE}'. Run 'swift build' or install Sparkle 2.10.1."
+        fail "Production publish aborted: Sparkle sign_update binary is required in live mode and preflight but was not found or is not executable at '${SIGN_UPDATE}'. Run 'swift build' or install Sparkle 2.10.1."
     fi
 
     # Enforce verified pinned 2.10.1 binary version in Package.resolved
@@ -282,13 +290,13 @@ elif [ -f "${ROOT_DIR}/dist/SPARKLE_ENCLOSURE.txt" ]; then
     fi
 fi
 
-if [ "${DRY_RUN}" = "0" ]; then
-    # Operator approval check first in live mode
-    if [ "${OPERATOR_APPROVAL}" != "YES" ]; then
+if [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ]; then
+    # Operator approval check only in live publish mode
+    if [ "${DRY_RUN}" = "0" ] && [ "${OPERATOR_APPROVAL}" != "YES" ]; then
         fail "Live publication requires explicit --operator-approval YES."
     fi
 
-    # LIVE MODE: Mock signatures strictly prohibited fail-closed
+    # LIVE & PREFLIGHT MODE: Mock signatures strictly prohibited fail-closed
     if [ -z "${ED_SIGNATURE}" ]; then
         fail "Production publish aborted: EdDSA signature is required in live mode. Provide via --signature, --signature-file, or dist/SPARKLE_ENCLOSURE.txt."
     fi
@@ -377,8 +385,8 @@ if [ -n "${APP_BUNDLE_PATH}" ]; then
     fi
 
     echo "✓ Verified bundle identity and metadata: ${BUNDLE_ID} v${BUNDLE_SHORT_VER} (Build ${BUNDLE_BUILD})"
-elif [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
-    # In live production mode, app bundle candidate is strictly required (WO-101)
+elif { [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ]; } && [ "${SANDBOX_SIMULATION}" = "0" ]; then
+    # In live production and preflight mode, app bundle candidate is strictly required (WO-101)
     fail "Production publish aborted (WO-101): App bundle is mandatory in live mode (--app-bundle <path>)."
 fi
 
@@ -395,8 +403,8 @@ elif [ -n "${PUB_KEY:-}" ]; then
     PUBLIC_KEY="${PUB_KEY}"
 fi
 
-if [ "${DRY_RUN}" = "0" ]; then
-    # Public key is strictly required in live mode to verify signature authenticity
+if [ "${DRY_RUN}" = "0" ] || [ "${PREFLIGHT}" = "1" ]; then
+    # Public key is strictly required in live and preflight mode to verify signature authenticity
     if [ -z "${PUBLIC_KEY}" ]; then
         fail "Production publish aborted: SUPublicEDKey is strictly required in live mode to verify signature authenticity before publishing feed. Pass --public-key, --app-bundle, or set SPARKLE_PUBLIC_ED_KEY."
     fi
@@ -870,6 +878,11 @@ else:
     print(f"✓ Isolated staging appcast generated successfully at {candidate_path}")
 PY
 
+if [ "${PREFLIGHT}" = "1" ]; then
+    echo "✓ Preflight verification passed (WO-120): All live publication prerequisites, binary verifiers, and cryptographic gates satisfied without mutation."
+    exit 0
+fi
+
 # 7. Transactional Feed Publish to Main via Isolated Git Worktree (WO-84, WO-89: Zero Source Workspace Mutation, WO-100: Sandbox/Live Separation)
 if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
     if [ "${SANDBOX_SIMULATION}" = "1" ]; then
@@ -908,23 +921,50 @@ if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
     echo "✓ Active working directory remained 100% untouched and unmutated."
 
     if [ "${SANDBOX_SIMULATION}" = "0" ]; then
-        echo "Verifying published appcast live via raw GitHub CDN (WO-118)..."
+        echo "Verifying published appcast live via raw GitHub CDN (WO-118, WO-122)..."
         CDN_URL="https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml"
+        EXPECTED_FEED_SHA="$(shasum -a 256 "${STAGING_CANDIDATE}" | awk '{print $1}')"
+        EXPECTED_FEED_SIZE="$(stat -f%z "${STAGING_CANDIDATE}" 2>/dev/null || stat -c%s "${STAGING_CANDIDATE}")"
         MAX_RETRIES=10
         RETRY_DELAY=3
         CDN_VERIFIED=0
+        ACTUAL_FEED_SHA=""
 
         for attempt in $(seq 1 "${MAX_RETRIES}"); do
             echo "CDN Readback Attempt ${attempt}/${MAX_RETRIES}..."
             CDN_STATUS="$(curl -s -o "${TEMP_DIR}/cdn_appcast.xml" -w "%{http_code}" "${CDN_URL}" || echo "000")"
             if [ "${CDN_STATUS}" = "200" ] && [ -s "${TEMP_DIR}/cdn_appcast.xml" ]; then
-                if grep -q "sparkle:version=\"${BUILD_NUM}\"" "${TEMP_DIR}/cdn_appcast.xml" && \
-                   grep -q "${ED_SIGNATURE}" "${TEMP_DIR}/cdn_appcast.xml"; then
-                    echo "✓ Live CDN verification successful: Build ${BUILD_NUM} visible and cryptographically verified at ${CDN_URL} (HTTP 200)."
-                    CDN_VERIFIED=1
-                    break
+                ACTUAL_FEED_SHA="$(shasum -a 256 "${TEMP_DIR}/cdn_appcast.xml" | awk '{print $1}')"
+                if [ "${ACTUAL_FEED_SHA}" = "${EXPECTED_FEED_SHA}" ]; then
+                    if python3 - "${TEMP_DIR}/cdn_appcast.xml" "${BUILD_NUM}" "${ED_SIGNATURE}" <<'PY'
+import sys, xml.etree.ElementTree as ET
+path, b_num, ed_sig = sys.argv[1:4]
+tree = ET.parse(path)
+root = tree.getroot()
+channel = root.find("channel")
+if channel is None:
+    sys.exit(1)
+SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+found = False
+for item in channel.findall("item"):
+    enc = item.find("enclosure")
+    if enc is not None:
+        v = enc.get(f"{{{SPARKLE_NS}}}version")
+        sig = enc.get(f"{{{SPARKLE_NS}}}edSignature")
+        if v == b_num and sig == ed_sig:
+            found = True
+            break
+sys.exit(0 if found else 2)
+PY
+                    then
+                        echo "✓ Live CDN verification successful: Build ${BUILD_NUM} feed exact-byte match (${ACTUAL_FEED_SHA}) verified at ${CDN_URL} (HTTP 200)."
+                        CDN_VERIFIED=1
+                        break
+                    else
+                        echo "Notice: CDN returned matching SHA but candidate item validation failed (attempt ${attempt}/${MAX_RETRIES})."
+                    fi
                 else
-                    echo "Notice: CDN returned HTTP 200, but candidate Build ${BUILD_NUM} / signature not yet visible in edge cache (attempt ${attempt}/${MAX_RETRIES})."
+                    echo "Notice: CDN returned HTTP 200, but feed SHA-256 (${ACTUAL_FEED_SHA}) does not match expected candidate SHA-256 (${EXPECTED_FEED_SHA}) (attempt ${attempt}/${MAX_RETRIES})."
                 fi
             else
                 echo "Notice: CDN returned HTTP ${CDN_STATUS} (attempt ${attempt}/${MAX_RETRIES})."
@@ -934,8 +974,10 @@ if [ "${PUBLISH_TO_MAIN}" = "1" ]; then
 
         if [ "${CDN_VERIFIED}" != "1" ]; then
             echo "ERROR: PARTIAL_RELEASE_FEED_NOT_LIVE: CDN readback failed after ${MAX_RETRIES} attempts." >&2
+            echo "Expected feed SHA-256: ${EXPECTED_FEED_SHA} (${EXPECTED_FEED_SIZE} bytes)." >&2
+            echo "Last received feed SHA-256: ${ACTUAL_FEED_SHA:-none}." >&2
             echo "The GitHub release and Git commit were published, but raw CDN has not served the authentic signed feed for Build ${BUILD_NUM}." >&2
-            echo "Operator Repair Guidance: Inspect repository dist/appcast.xml on main and purge/invalidate edge cache if necessary." >&2
+            echo "Operator Repair Guidance: Inspect repository dist/appcast.xml on main and verify edge CDN propagation." >&2
             exit 75
         fi
     fi

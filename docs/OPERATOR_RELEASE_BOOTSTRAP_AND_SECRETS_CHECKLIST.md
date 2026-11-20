@@ -1,6 +1,6 @@
 # Operator Release Bootstrap & Secrets Provisioning Checklist
 **Document Reference:** `docs/OPERATOR_RELEASE_BOOTSTRAP_AND_SECRETS_CHECKLIST.md`  
-**Governing Directives:** WO-102, WO-105, WO-107, WO-108, WO-109, WO-113, WO-114, WO-115 (`MSG:chatgpt-sentinel-postwo111-public-build4-release-integrity-orders-20261119-gpt6-226`)  
+**Governing Directives:** WO-102, WO-105, WO-107, WO-108, WO-109, WO-113, WO-114, WO-115, WO-117, WO-118, WO-119, WO-120, WO-121, WO-122 (`MSG:chatgpt-sentinel-postwo119-final-prepromotion-source-review-workorders-20261119-gpt6-230`)  
 **Status:** **DISPATCH UNAVAILABLE / PRODUCTION RELEASE NO-GO** (Pending Human Operator Provisioning)
 
 ---
@@ -106,7 +106,7 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
    - Ephemeral keychain and Notary credentials are deleted.
    - **Result:** Immutable draft release staged; public feed on `main` remains untouched.
 
-### Phase B: Owner Promotion & Live Feed Cutover (`release_phase: promote-feed`, WO-117, WO-118)
+### Phase B: Owner Promotion & Live Feed Cutover (`release_phase: promote-feed`, WO-117, WO-118, WO-120, WO-121, WO-122)
 *Runs under unprivileged runner in GitHub environment `production-promotion` (with required operator reviewers) without code-signing certificates, Notary keys, or Sparkle private keys.*
 1. **Operator Verification of Draft:**
    - Download draft DMG from GitHub Releases.
@@ -116,19 +116,22 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
 2. **Trigger Workflow Dispatch (Phase B):**
    - Run workflow with `tag_name: v1.0.0-build5`, `operator_approval_confirmed: YES`, and `release_phase: promote-feed`.
    - Workflow runs in isolated `production-promotion` environment requiring owner sign-off.
-   - **Step 1: Download & Attestation Verification (WO-117):**
+   - **Step 0: Ensure Pinned Sparkle Artifacts Available (WO-120):**
+     - Executes `swift package resolve` to populate pinned Sparkle 2.10.1 `sign_update` binary in `.build/artifacts/...` on disposable runners before any promotion logic runs.
+   - **Step 1: Download & Attestation Verification (WO-117, WO-121):**
      - Downloads draft assets: DMG, `SHA256SUMS.txt`, `BUILD_MANIFEST.json`, `RELEASE_ATTESTATION.json`, `SPARKLE_ENCLOSURE.txt`.
+     - Cross-checks `RELEASE_ATTESTATION.json` `commit_sha` against checked-out tag commit (`git rev-parse HEAD`), rejecting `github.sha` dispatch inconsistencies.
      - Validates `RELEASE_ATTESTATION.json` schema, matching SHA-256 and byte length.
      - Cryptographically validates Ed25519 signature against archive bytes using Swift CryptoKit (zero private key requirement).
      - Read-only mounts candidate DMG and verifies `Sentinel Node Wallet.app` `CFBundleIdentifier`, `CFBundleVersion`, `SUPublicEDKey`, `TeamIdentifier=S8QMQZA656`, Gatekeeper assessment (`spctl`), and notarization ticket (`stapler`).
-   - **Step 2: Pre-Promotion Appcast Gating (WO-117):**
-     - Runs `publish_production_appcast.sh --dry-run --prune-unsigned-legacy` against the downloaded archive to verify valid feed generation before making the release public.
+   - **Step 2: Pre-Promotion Appcast Preflight Gating (WO-117, WO-120):**
+     - Runs `publish_production_appcast.sh --preflight --prune-unsigned-legacy` against the downloaded archive to verify all live publish prerequisites and binary verifiers pass before making the release public.
    - **Step 3: Immutable Draft Release Promotion:**
      - Executes `gh release edit v1.0.0-build5 --draft=false` to promote the existing draft to public (**NO re-build, NO re-sign, NO asset collision**).
-   - **Step 4: Live Feed Publication & Bounded CDN Readback (WO-118):**
+   - **Step 4: Live Feed Publication & Exact-Byte CDN Readback (WO-118, WO-122):**
      - Runs `publish_production_appcast.sh --publish-to-main --prune-unsigned-legacy` using the downloaded archive, signature, and public key.
      - Commits updated `dist/appcast.xml` atomically to `origin/main` via isolated worktree.
-     - Performs bounded CDN readback (up to 10 attempts with retry delay) validating HTTP 200, matching build, and cryptographic EdDSA signature.
+     - Performs bounded CDN readback (up to 10 attempts with retry delay) requiring HTTP 200, exact-byte SHA-256 identity with candidate XML, and ElementTree structural parsing of enclosure version/signature.
      - If CDN readback fails or times out, exits with typed status `PARTIAL_RELEASE_FEED_NOT_LIVE` (exit code 75) and operator recovery guidance.
 
 ### Idempotent Feed Retry
