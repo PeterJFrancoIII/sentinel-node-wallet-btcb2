@@ -12,14 +12,22 @@ on:
         required: true
         type: string
         default: 'NO'
-      is_draft:
-        description: 'Publish release as a Draft (recommended for verification)'
+      release_phase:
+        description: 'Release Phase: "stage-draft" (Phase A: Build, sign, notarize, stage draft release) or "promote-feed" (Phase B: Promote draft to public, publish feed)'
         required: true
+        type: choice
+        default: 'stage-draft'
+        options:
+          - 'stage-draft'
+          - 'promote-feed'
+      is_draft:
+        description: 'Legacy parameter: set true for stage-draft, false for promote-feed'
+        required: false
         type: boolean
         default: true
       is_prerelease:
         description: 'Publish release as a Pre-release (Beta channel)'
-        required: true
+        required: false
         type: boolean
         default: false
 
@@ -41,6 +49,7 @@ jobs:
       verified_tag: ${{ steps.validate_tag.outputs.verified_tag }}
       short_version: ${{ steps.validate_tag.outputs.short_version }}
       build_number: ${{ steps.validate_tag.outputs.build_number }}
+      effective_phase: ${{ steps.validate_tag.outputs.effective_phase }}
     steps:
       - name: Checkout repository at candidate release tag
         uses: actions/checkout@v4
@@ -57,6 +66,8 @@ jobs:
         env:
           INPUT_TAG: "${{ github.event.inputs.tag_name }}"
           OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
+          INPUT_PHASE: "${{ github.event.inputs.release_phase }}"
+          IS_DRAFT_INPUT: "${{ github.event.inputs.is_draft }}"
         run: |
           if [ "${OPERATOR_APPROVAL}" != "YES" ]; then
             echo "ERROR: Operator release authorization missing or invalid. Received '${OPERATOR_APPROVAL}', expected 'YES'." >&2
@@ -95,10 +106,20 @@ jobs:
             exit 1
           fi
 
+          EFFECTIVE_PHASE="${INPUT_PHASE}"
+          if [ -z "${EFFECTIVE_PHASE}" ]; then
+            if [ "${IS_DRAFT_INPUT}" = "false" ]; then
+              EFFECTIVE_PHASE="promote-feed"
+            else
+              EFFECTIVE_PHASE="stage-draft"
+            fi
+          fi
+
           echo "verified_tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           echo "short_version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "build_number=${BUILD_NUM}" >> "$GITHUB_OUTPUT"
-          echo "Operator release approval and tag validation passed: ${INPUT_TAG} (v${VERSION} build ${BUILD_NUM}) -> ${HEAD_COMMIT}"
+          echo "effective_phase=${EFFECTIVE_PHASE}" >> "$GITHUB_OUTPUT"
+          echo "Operator release approval and tag validation passed: ${INPUT_TAG} (v${VERSION} build ${BUILD_NUM}) [Phase: ${EFFECTIVE_PHASE}] -> ${HEAD_COMMIT}"
 
       # Gating Stage 2: Full Automated Test Suite
       - name: Run native unit tests
@@ -123,9 +144,13 @@ jobs:
       - name: Cache & verify official Bitcoin Knots binaries
         run: bash scripts/fetch-verify-knots.sh
 
-  privileged-release:
-    name: Privileged Signing, Notarization & Publication (WO-90, WO-96)
+  # =========================================================================
+  # Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
+  # =========================================================================
+  stage-candidate-draft:
+    name: Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
     needs: unprivileged-qualification
+    if: needs.unprivileged-qualification.outputs.effective_phase == 'stage-draft'
     runs-on: macos-latest
     timeout-minutes: 45
     environment: production-release
@@ -135,7 +160,7 @@ jobs:
       - name: Checkout repository at candidate release tag
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag_name }}
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_tag }}
           fetch-depth: 0
 
       # Gating Stage 6: Environment & Secrets Verification (Fail-Closed)
@@ -225,76 +250,45 @@ jobs:
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
 
-      # Release Asset Upload (Two-Phase Promotion, WO-108)
-      - name: Publish or Promote GitHub Release
+      # Release Asset Upload (Draft Staging Only, WO-108, WO-115)
+      - name: Create Immutable Draft GitHub Release
         env:
           GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          IS_DRAFT: "${{ github.event.inputs.is_draft }}"
           IS_PRERELEASE: "${{ github.event.inputs.is_prerelease }}"
         run: |
-          EXISTING_RELEASE="$(gh release view "${TAG}" --json isDraft,tagName 2>/dev/null || echo "")"
-          if [ -n "${EXISTING_RELEASE}" ]; then
-            IS_DRAFT_STATUS="$(echo "${EXISTING_RELEASE}" | python3 -c "import sys, json; print(json.load(sys.stdin).get('isDraft', False))")"
-            if [ "${IS_DRAFT_STATUS}" = "True" ]; then
-              if [ "${IS_DRAFT}" = "false" ]; then
-                echo "Promoting existing verified draft release ${TAG} to public (Phase B, WO-108)..."
-                gh release edit "${TAG}" --draft=false
-              else
-                echo "Draft release ${TAG} already exists. Retaining staged draft assets."
-              fi
-            else
-              echo "Release ${TAG} is already published as public. Preserving immutable release assets."
-            fi
-          else
-            echo "Creating new release ${TAG} (draft=${IS_DRAFT})..."
-            DRAFT_FLAG=""
-            if [ "${IS_DRAFT}" = "true" ]; then
-              DRAFT_FLAG="--draft"
-            fi
-            PRERELEASE_FLAG=""
-            if [ "${IS_PRERELEASE}" = "true" ]; then
-              PRERELEASE_FLAG="--prerelease"
-            fi
+          PRERELEASE_FLAG=""
+          if [ "${IS_PRERELEASE}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
 
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists on GitHub. Skipping re-creation to maintain immutable asset provenance."
+          else
+            echo "Creating new draft release for ${TAG}..."
             gh release create "${TAG}" \
               dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg \
               dist/SHA256SUMS.txt \
               dist/BUILD_MANIFEST.json \
               --title "Sentinel Node Wallet (${TAG})" \
               --notes-file docs/RELEASE_NOTES_CANDIDATE.md \
-              ${DRAFT_FLAG} ${PRERELEASE_FLAG}
+              --draft ${PRERELEASE_FLAG}
           fi
 
-      # Gating Stage 7: Sparkle Production Appcast Publication (WO-77, WO-84, WO-85, WO-89, WO-94, WO-95)
-      - name: Publish or Validate Sparkle Production Appcast Feed
+      # Dry-Run Appcast Validation
+      - name: Validate Sparkle Feed in Dry-Run Mode
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
-          IS_DRAFT: "${{ github.event.inputs.is_draft }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
-          SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
         run: |
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
-          if [ "${IS_DRAFT}" = "true" ]; then
-            echo "Release created as draft. Executing feed validation in dry-run mode against signed archive..."
-            bash scripts/publish_production_appcast.sh \
-              --tag "${TAG}" \
-              --archive "${DMG_FILE}" \
-              --app-bundle "dist/Sentinel Node Wallet.app" \
-              --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
-              --dry-run
-            echo "Draft release staged. Feed will update upon operator promotion to public release."
-          else
-            echo "Publishing live production Sparkle appcast to main with mandatory remote asset verification..."
-            bash scripts/publish_production_appcast.sh \
-              --tag "${TAG}" \
-              --local-archive "${DMG_FILE}" \
-              --app-bundle "dist/Sentinel Node Wallet.app" \
-              --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
-              --operator-approval "${OPERATOR_APPROVAL}" \
-              --publish-to-main
-          fi
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_FILE}" \
+            --app-bundle "dist/Sentinel Node Wallet.app" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --dry-run
+          echo "✓ Draft release staged. Public feed remains untouched until Phase B promotion."
 
       # Cleanup Credentials
       - name: Clean up ephemeral credentials
@@ -305,3 +299,60 @@ jobs:
           if [ -f "${KEYCHAIN_PATH}" ]; then
             security delete-keychain "${KEYCHAIN_PATH}" 2>/dev/null || true
           fi
+
+  # =========================================================================
+  # Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)
+  # =========================================================================
+  promote-public-feed:
+    name: Phase B: Owner-Approved Public Release Promotion & Feed Cutover (WO-115)
+    needs: unprivileged-qualification
+    if: needs.unprivileged-qualification.outputs.effective_phase == 'promote-feed'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository at candidate release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_tag }}
+          fetch-depth: 0
+
+      # Step 1: Promote Draft Release to Public (Immutable Asset Promotion)
+      - name: Promote Draft Release to Public
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+        run: |
+          echo "Verifying draft release exists for ${TAG}..."
+          RELEASE_INFO="$(gh release view "${TAG}" --json isDraft,tagName 2>/dev/null || echo "")"
+          if [ -z "${RELEASE_INFO}" ]; then
+            echo "ERROR: Release '${TAG}' does not exist on GitHub. Phase A (stage-draft) must be executed before Phase B." >&2
+            exit 1
+          fi
+
+          IS_DRAFT="$(echo "${RELEASE_INFO}" | python3 -c "import sys, json; print(json.load(sys.stdin).get('isDraft', False))")"
+          if [ "${IS_DRAFT}" = "True" ]; then
+            echo "Promoting verified immutable draft release ${TAG} to public..."
+            gh release edit "${TAG}" --draft=false
+            echo "✓ Release ${TAG} promoted to public."
+          else
+            echo "Release ${TAG} is already public. Proceeding to feed publication (idempotent retry)."
+          fi
+
+      # Step 2: Publish Sparkle Production Appcast Feed with Mandatory Remote Verification & Legacy Pruning
+      - name: Publish Sparkle Production Appcast Feed to Main
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          echo "Publishing live production Sparkle appcast to main with mandatory remote asset verification..."
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --app-bundle "dist/Sentinel Node Wallet.app" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --operator-approval "${OPERATOR_APPROVAL}" \
+            --publish-to-main \
+            --prune-unsigned-legacy

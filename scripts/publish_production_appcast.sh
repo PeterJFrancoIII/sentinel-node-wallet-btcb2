@@ -32,6 +32,7 @@ PUBLIC_KEY_OVERRIDE=""
 APP_BUNDLE_PATH=""
 SIGN_UPDATE_OVERRIDE=""
 ED_KEY_FILE=""
+PRUNE_UNSIGNED_LEGACY=0
 
 usage() {
     cat <<EOF
@@ -46,11 +47,13 @@ Options:
   --public-key <base64>      Ed25519 public key (SUPublicEDKey) for cryptographic verification
   --ed-key-file <file>       Private key file for Sparkle sign_update tool verification (secret-in-argv --private-key is prohibited)
   --app-bundle <path>        Path to .app bundle to extract & verify SUPublicEDKey and bundle identity
+  --appcast <path>           Path to appcast.xml file override
   --archive <dmg-file>       Archive file (simulation/dry-run) or local artifact to cross-check (live)
   --local-archive <dmg-file> Local signed build artifact to cross-check byte-for-byte against downloaded release
   --sandbox-simulation       Run in isolated test sandbox (offline bare git remote simulation)
   --sign-update <path>       Path to Sparkle sign_update binary override
   --publish-to-main          Commit and push updated appcast.xml directly to origin/main via isolated worktree
+  --prune-unsigned-legacy    Prune historical unauthenticated enclosures lacking sparkle:edSignature (WO-113)
   --dry-run                  Simulate validation and print appcast diff (default)
   --allow-mock-for-dry-run   Explicitly permits synthetic signature in dry-run mode only (STRICTLY FORBIDDEN IN LIVE MODE)
   -h, --help                 Show this help message
@@ -108,6 +111,11 @@ while [ $# -gt 0 ]; do
             ARCHIVE_OVERRIDE="$2"
             shift 2
             ;;
+        --appcast)
+            [ $# -ge 2 ] || fail "Missing value for --appcast"
+            APPCAST_OVERRIDE="$2"
+            shift 2
+            ;;
         --local-archive)
             [ $# -ge 2 ] || fail "Missing value for --local-archive"
             LOCAL_ARCHIVE="$2"
@@ -115,6 +123,10 @@ while [ $# -gt 0 ]; do
             ;;
         --sandbox-simulation)
             SANDBOX_SIMULATION=1
+            shift
+            ;;
+        --prune-unsigned-legacy)
+            PRUNE_UNSIGNED_LEGACY=1
             shift
             ;;
         --publish-to-main)
@@ -637,16 +649,16 @@ PY
     fi
 fi
 
-# 5. Monotonic Version Verification vs Existing Appcast Items (WO-89: Staged in Isolated Temp, WO-109: Authenticated Baseline)
+# 5. Monotonic Version Verification vs Existing Appcast Items (WO-89: Staged in Isolated Temp, WO-109: Authenticated Baseline, WO-113: Signed-Only Enforcement)
 STAGING_ORIGINAL="${TEMP_DIR}/appcast_original.xml"
 STAGING_CANDIDATE="${TEMP_DIR}/appcast_candidate.xml"
 
 # In live mode, derive baseline feed directly from origin/main to prevent importing unauthenticated draft branch items (WO-109)
 if [ "${DRY_RUN}" = "0" ] && [ "${SANDBOX_SIMULATION}" = "0" ]; then
-    if git show origin/main:dist/appcast.xml > "${STAGING_ORIGINAL}" 2>/dev/null && [ -s "${STAGING_ORIGINAL}" ]; then
-        echo "✓ Fetched verified baseline appcast from origin/main:dist/appcast.xml"
-    elif [ -n "${APPCAST_OVERRIDE:-}" ] && [ -f "${APPCAST_OVERRIDE:-}" ]; then
+    if [ -n "${APPCAST_OVERRIDE:-}" ] && [ -f "${APPCAST_OVERRIDE:-}" ]; then
         cp "${APPCAST_OVERRIDE}" "${STAGING_ORIGINAL}"
+    elif git show origin/main:dist/appcast.xml > "${STAGING_ORIGINAL}" 2>/dev/null && [ -s "${STAGING_ORIGINAL}" ]; then
+        echo "✓ Fetched verified baseline appcast from origin/main:dist/appcast.xml"
     elif [ -f "${APPCAST_FILE}" ]; then
         echo "Baseline appcast not on origin/main; using local template at ${APPCAST_FILE}..."
         cp "${APPCAST_FILE}" "${STAGING_ORIGINAL}"
@@ -682,13 +694,15 @@ else
 EOF
 fi
 
-python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" <<'PY' || fail "Appcast monotonic version check failed."
+python3 - "${STAGING_ORIGINAL}" "${BUILD_NUM}" "${VERSION}" "${PRUNE_UNSIGNED_LEGACY}" "${DRY_RUN}" <<'PY' || fail "Appcast integrity check failed."
 import sys
 import xml.etree.ElementTree as ET
 
 appcast_path = sys.argv[1]
 new_build = int(sys.argv[2])
 new_version = sys.argv[3]
+prune_legacy = sys.argv[4] == "1"
+is_dry_run = sys.argv[5] == "1"
 
 tree = ET.parse(appcast_path)
 root = tree.getroot()
@@ -699,12 +713,28 @@ if channel is None:
 
 SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 existing_builds = []
+unsigned_builds = []
+
 for item in channel.findall("item"):
     enc = item.find("enclosure")
     if enc is not None:
         v = enc.get(f"{{{SPARKLE_NS}}}version")
+        sig = enc.get(f"{{{SPARKLE_NS}}}edSignature")
         if v and v.isdigit():
             existing_builds.append(int(v))
+        if not sig or sig.strip() == "":
+            unsigned_builds.append(v or "unknown")
+
+if unsigned_builds:
+    if prune_legacy:
+        print(f"✓ Pruned {len(unsigned_builds)} unauthenticated legacy unsigned enclosure(s) (Builds: {unsigned_builds}) (WO-113).")
+    elif not is_dry_run:
+        print(f"FATAL INTEGRITY VIOLATION (WO-113): Baseline appcast contains unauthenticated enclosure(s) lacking sparkle:edSignature (Builds: {unsigned_builds}).", file=sys.stderr)
+        print("Historical unsigned releases cannot be published in an authenticated Sparkle update feed without explicit migration.", file=sys.stderr)
+        print("Pass --prune-unsigned-legacy to prune unauthenticated historical entries, or initialize a pristine authenticated feed.", file=sys.stderr)
+        sys.exit(1)
+    else:
+        print(f"[DRY RUN NOTICE] Baseline feed contains {len(unsigned_builds)} unauthenticated enclosure(s) lacking sparkle:edSignature (Builds: {unsigned_builds}) (WO-113).")
 
 if existing_builds:
     max_existing = max(existing_builds)
@@ -714,11 +744,11 @@ if existing_builds:
 print(f"✓ Monotonic check passed: candidate build {new_build} > existing builds {existing_builds}")
 PY
 
-# 6. Format and Insert New Item Block into Isolated Candidate XML (WO-89: Zero Source Workspace Mutation)
+# 6. Format and Insert New Item Block into Isolated Candidate XML (WO-89: Zero Source Workspace Mutation, WO-113: Schema Compliant Tree Mutation)
 PUB_DATE="$(date -u "+%a, %d %b %Y %H:%M:%S +0000")"
 RELEASE_NOTES_URL="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/${TAG}"
 
-python3 - "${STAGING_ORIGINAL}" "${STAGING_CANDIDATE}" "${BUILD_NUM}" "${VERSION}" "${RELEASE_URL}" "${ED_SIGNATURE}" "${ASSET_LENGTH}" "${PUB_DATE}" "${RELEASE_NOTES_URL}" "${DRY_RUN}" <<'PY' || fail "Failed to generate valid updated appcast.xml."
+python3 - "${STAGING_ORIGINAL}" "${STAGING_CANDIDATE}" "${BUILD_NUM}" "${VERSION}" "${RELEASE_URL}" "${ED_SIGNATURE}" "${ASSET_LENGTH}" "${PUB_DATE}" "${RELEASE_NOTES_URL}" "${DRY_RUN}" "${PRUNE_UNSIGNED_LEGACY}" <<'PY' || fail "Failed to generate valid updated appcast.xml."
 import sys
 import xml.etree.ElementTree as ET
 
@@ -732,31 +762,52 @@ length = sys.argv[7]
 pub_date = sys.argv[8]
 notes_url = sys.argv[9]
 is_dry_run = sys.argv[10] == "1"
+prune_legacy = sys.argv[11] == "1"
 
-with open(original_path, "r", encoding="utf-8") as f:
-    original_xml = f.read()
+SPARKLE_NS = "http://www.andymatuschak.org/xml-namespaces/sparkle"
+ET.register_namespace("sparkle", SPARKLE_NS)
+ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
 
-new_item = f"""        <item>
-            <title>Sentinel Node Wallet v{version} (Build {build_num})</title>
-            <pubDate>{pub_date}</pubDate>
-            <sparkle:releaseNotesLink>{notes_url}</sparkle:releaseNotesLink>
-            <description>Sentinel Node Wallet v{version} (Build {build_num}): Notarized production release for Apple Silicon (arm64). Pinned Bitcoin Knots consensus validator.</description>
-            <enclosure
-                url="{asset_url}"
-                sparkle:version="{build_num}"
-                sparkle:shortVersionString="{version}"
-                sparkle:os="macos"
-                sparkle:cpu="arm64"
-                sparkle:edSignature="{ed_sig}"
-                length="{length}"
-                type="application/octet-stream" />
-            <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
-        </item>"""
+tree = ET.parse(original_path)
+root = tree.getroot()
+channel = root.find("channel")
+if channel is None:
+    print("ERROR: <channel> element not found in appcast.xml", file=sys.stderr)
+    sys.exit(1)
 
-if "<language>en</language>" in original_xml:
-    updated_xml = original_xml.replace("<language>en</language>", f"<language>en</language>\n{new_item}")
+if prune_legacy:
+    for item in list(channel.findall("item")):
+        enc = item.find("enclosure")
+        if enc is not None and (not enc.get(f"{{{SPARKLE_NS}}}edSignature")):
+            channel.remove(item)
+
+new_item_xml = f"""<item xmlns:sparkle="{SPARKLE_NS}">
+    <title>Sentinel Node Wallet v{version} (Build {build_num})</title>
+    <pubDate>{pub_date}</pubDate>
+    <sparkle:releaseNotesLink>{notes_url}</sparkle:releaseNotesLink>
+    <description>Sentinel Node Wallet v{version} (Build {build_num}): Notarized production release for Apple Silicon (arm64). Pinned Bitcoin Knots consensus validator.</description>
+    <enclosure
+        url="{asset_url}"
+        sparkle:version="{build_num}"
+        sparkle:shortVersionString="{version}"
+        sparkle:os="macos"
+        sparkle:cpu="arm64"
+        sparkle:edSignature="{ed_sig}"
+        length="{length}"
+        type="application/octet-stream" />
+    <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
+</item>"""
+new_item_elem = ET.fromstring(new_item_xml)
+
+items = channel.findall("item")
+if items:
+    first_idx = list(channel).index(items[0])
+    channel.insert(first_idx, new_item_elem)
 else:
-    updated_xml = original_xml.replace("<channel>", f"<channel>\n{new_item}")
+    channel.append(new_item_elem)
+
+ET.indent(root, space="    ")
+updated_xml = ET.tostring(root, encoding="utf-8", xml_declaration=True).decode("utf-8")
 
 # Validate updated XML structure
 try:
@@ -765,13 +816,12 @@ except ET.ParseError as e:
     print(f"ERROR: Generated appcast XML failed parsing: {e}", file=sys.stderr)
     sys.exit(1)
 
-# Write updated XML to isolated staging file (never active source tree)
 with open(candidate_path, "w", encoding="utf-8") as f:
     f.write(updated_xml)
 
 if is_dry_run:
     print("=== [DRY RUN] Generated Item Block ===")
-    print(new_item)
+    print(new_item_xml)
     print("======================================")
 else:
     print(f"✓ Isolated staging appcast generated successfully at {candidate_path}")

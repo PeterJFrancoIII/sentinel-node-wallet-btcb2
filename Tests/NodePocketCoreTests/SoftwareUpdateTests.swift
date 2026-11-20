@@ -1395,6 +1395,76 @@ final class SoftwareUpdateTests: XCTestCase {
             "--public-key", pubKeyB64
         ])
         XCTAssertEqual(validBundleRun.status, 0, "Valid Info.plist and public key pass dry run: \(validBundleRun.output)")
+
+        // MARK: - WO-113 Authenticated Signed-Only Production Feed & Legacy Migration
+
+        // 27. WO-113 P0: Unsigned legacy feed in live publish mode fails closed without --prune-unsigned-legacy
+        let legacyUnsignedAppcast = """
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+    <channel>
+        <title>Sentinel Node Wallet Updates</title>
+        <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+        <description>Official updates</description>
+        <language>en</language>
+        <item>
+            <title>Sentinel Node Wallet 1.0 (Build 4)</title>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build4/Sentinel-Node-Wallet-v1.0.0-Build4-macOS-arm64.dmg"
+                sparkle:version="4"
+                sparkle:shortVersionString="1.0"
+                sparkle:os="macos"
+                sparkle:cpu="arm64"
+                length="13927630"
+                type="application/octet-stream" />
+        </item>
+        <item>
+            <title>Sentinel Node Wallet 1.0 (Build 3)</title>
+            <enclosure
+                url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg"
+                sparkle:version="3"
+                sparkle:shortVersionString="1.0"
+                sparkle:os="macos"
+                sparkle:cpu="arm64"
+                length="12429514"
+                type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
+"""
+        let legacyFixtureURL = FileManager.default.temporaryDirectory.appendingPathComponent("legacy-feed-\(UUID().uuidString).xml")
+        try legacyUnsignedAppcast.write(to: legacyFixtureURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: legacyFixtureURL) }
+
+        // Live mode publish to main with unauthenticated legacy items must fail closed if --prune-unsigned-legacy is omitted
+        let unprunedRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--publish-to-main",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", validAppBundle.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--operator-approval", "YES",
+            "--appcast", legacyFixtureURL.path
+        ])
+        XCTAssertNotEqual(unprunedRun.status, 0, "Unsigned legacy enclosures in live mode must fail closed")
+        XCTAssertTrue(unprunedRun.output.contains("FATAL INTEGRITY VIOLATION (WO-113)") || unprunedRun.output.contains("sparkle:edSignature") || unprunedRun.output.contains("Remote release asset"),
+                      "Must cite WO-113 integrity violation or missing remote asset: \(unprunedRun.output)")
+
+        // 28. WO-113 P0: Dry-run with --prune-unsigned-legacy succeeds and prunes unsigned legacy enclosures
+        let prunedRun = runScript(args: [
+            "--tag", "v1.0.0-build5",
+            "--dry-run",
+            "--archive", tempArchiveURL.path,
+            "--app-bundle", validAppBundle.path,
+            "--signature", signatureB64,
+            "--public-key", pubKeyB64,
+            "--prune-unsigned-legacy",
+            "--appcast", legacyFixtureURL.path
+        ])
+        XCTAssertEqual(prunedRun.status, 0, "Dry-run with --prune-unsigned-legacy must pass: \(prunedRun.output)")
+        XCTAssertTrue(prunedRun.output.contains("Pruned") && prunedRun.output.contains("WO-113"),
+                      "Must log pruned legacy items: \(prunedRun.output)")
     }
 
     // MARK: - WO-91 End-to-End Sandboxed Publisher Supply Chain Test
