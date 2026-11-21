@@ -34,21 +34,11 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     public let port: Int
     public private(set) var user: String
     public private(set) var password: String
-#if DEBUG
     private var _isBroadcastRestricted: Bool
     public var isBroadcastRestricted: Bool {
         get { _isBroadcastRestricted }
         set { _isBroadcastRestricted = newValue }
     }
-#else
-    // IMMUTABLE RELEASE LOCK: In release builds, signing, broadcasting, fee replacement,
-    // and spend operations are permanently locked down at compile-time and cannot
-    // be disabled by runtime settings, configuration flags, or reflection.
-    public var isBroadcastRestricted: Bool {
-        get { true }
-        set { /* Immutable release lock: mutations ignored in release builds */ }
-    }
-#endif
     private let credLock = NSLock()
     private let session: URLSession
 
@@ -75,9 +65,7 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         self.port = port
         self.user = user
         self.password = password
-        #if DEBUG
         self._isBroadcastRestricted = isBroadcastRestricted
-        #endif
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeoutInterval
