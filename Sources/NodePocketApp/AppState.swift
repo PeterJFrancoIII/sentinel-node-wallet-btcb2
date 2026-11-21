@@ -972,10 +972,14 @@ public final class AppState: ObservableObject {
     }
 
     public func sendTransaction(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
-        let txid = try await walletManager.send(to: destinationAddress, amount: amount, passphrase: passphrase)
+        guard isWalletTabUnlocked, self.authSession != nil else {
+            throw WalletAuthError.unauthenticated
+        }
+        let amountSats = SatoshiMath.toSats(btc: amount)
+        let defaultFeeQuote = feeQuotes[.normal] ?? FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60)
+        let preview = try await prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: defaultFeeQuote)
+        let txid = try await executeAuthorizedSend(preview: preview, explicitPassphrase: passphrase)
         appendLog("[TRANSACTION] Broadcasted \(amount) BTCB2 to \(destinationAddress): \(txid)")
-        self.walletSnapshot = try? await walletManager.refreshWalletInfo()
-        self.transactions = (try? await walletManager.fetchRecentTransactions(count: 30)) ?? []
         return txid
     }
 
@@ -987,11 +991,25 @@ public final class AppState: ObservableObject {
         guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }
+        let currentWallet = await walletManager.currentWalletName
+        guard let walletName = currentWallet, !walletName.isEmpty else {
+            throw WalletSecurityError.noWalletLoaded
+        }
+        let txContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ",")
+        )
         let approval = try await authCoordinator.requestHighRiskApproval(
             capability: session,
             action: "send",
             target: preview.destinationAddress,
-            reason: "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)"
+            reason: "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)",
+            txContext: txContext
         )
         let txid = try await walletManager.executeAuthorizedSend(
             preview: preview,

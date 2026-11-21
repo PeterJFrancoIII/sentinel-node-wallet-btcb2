@@ -49,4 +49,37 @@ final class WalletIntegrationTests: XCTestCase {
         let canSend = isTipVerified && isWalletUnlocked
         XCTAssertFalse(canSend, "Sending must fail-closed when tip is unverified or wallet locked")
     }
+
+    func testLegacySendCannotBypassApproval() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_legacy_send_guard_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: 59999,
+            user: "test",
+            password: "test",
+            isBroadcastRestricted: false
+        )
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: true
+        )
+
+        do {
+            _ = try await manager.send(to: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 0.0005)
+            XCTFail("Legacy send must fail closed even when allowUnauthenticatedForTesting is true")
+        } catch let err as WalletSecurityError {
+            // If no wallet loaded
+            guard case .noWalletLoaded = err else {
+                XCTFail("Expected noWalletLoaded, got \(err)")
+                return
+            }
+        }
+    }
 }

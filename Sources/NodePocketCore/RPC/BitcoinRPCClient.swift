@@ -29,6 +29,47 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     }
 }
 
+public struct SpendAuthorization: Sendable, Equatable {
+    public let approvalId: UUID
+    public let sessionId: UUID
+    public let walletName: String
+    public let destinationAddress: String
+    public let amountSats: Int64
+    public let maxFeeSats: Int64
+    public let token: String
+    public let issuedAt: Date
+    public let expiresAt: Date
+    public let nonce: String
+
+    public init(
+        approvalId: UUID = UUID(),
+        sessionId: UUID = UUID(),
+        walletName: String,
+        destinationAddress: String,
+        amountSats: Int64,
+        maxFeeSats: Int64,
+        token: String,
+        issuedAt: Date = Date(),
+        expiresAt: Date = Date().addingTimeInterval(60),
+        nonce: String = UUID().uuidString
+    ) {
+        self.approvalId = approvalId
+        self.sessionId = sessionId
+        self.walletName = walletName
+        self.destinationAddress = destinationAddress
+        self.amountSats = amountSats
+        self.maxFeeSats = maxFeeSats
+        self.token = token
+        self.issuedAt = issuedAt
+        self.expiresAt = expiresAt
+        self.nonce = nonce
+    }
+
+    public var isExpired: Bool {
+        Date() > expiresAt
+    }
+}
+
 public final class BitcoinRPCClient: @unchecked Sendable {
     public let host: String
     public let port: Int
@@ -40,12 +81,25 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         set { _isBroadcastRestricted = newValue }
     }
     private let credLock = NSLock()
+    private let authLock = NSLock()
+    private var consumedAuthorizationTokens = Set<String>()
+
+    private func recordAndVerifyToken(tokenKey: String) -> Bool {
+        authLock.lock()
+        defer { authLock.unlock() }
+        if consumedAuthorizationTokens.contains(tokenKey) {
+            return false
+        }
+        consumedAuthorizationTokens.insert(tokenKey)
+        return true
+    }
     private let session: URLSession
 
     // Defense-in-depth: the generic RPC API is publicly callable by other first-party
     // modules. Do not rely solely on SwiftUI or WalletManager to block fund outflow.
     // When isBroadcastRestricted is true (default for tests/isolated safety mode),
-    // these methods fail closed unconditionally.
+    // these methods fail closed unconditionally. When false, they strictly require
+    // a valid, unexpired, single-use SpendAuthorization.
     private static let restrictedSpendMethods: Set<String> = [
         "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
         "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
@@ -97,9 +151,50 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         return "Basic \(data.base64EncodedString())"
     }
 
-    public func call<T: Decodable>(method: String, params: [Any] = [], walletName: String? = nil) async throws -> T {
-        if isBroadcastRestricted {
-            guard !Self.restrictedSpendMethods.contains(method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+    public func call<T: Decodable>(
+        method: String,
+        params: [Any] = [],
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> T {
+        let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if Self.restrictedSpendMethods.contains(normalizedMethod) {
+            guard !isBroadcastRestricted else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+            guard let auth = authorization else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+            guard !auth.isExpired else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+            guard !auth.token.isEmpty else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+            if let wName = walletName, !wName.isEmpty {
+                guard auth.walletName == wName else {
+                    throw RPCClientError.transactionBroadcastDisabled
+                }
+            }
+            if normalizedMethod == "sendtoaddress", params.count >= 2 {
+                guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
+                    throw RPCClientError.transactionBroadcastDisabled
+                }
+                let paramAmountSats: Int64
+                if let amtDouble = params[1] as? Double {
+                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
+                } else if let amtStr = params[1] as? String, let amtDouble = Double(amtStr) {
+                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
+                } else {
+                    paramAmountSats = -1
+                }
+                guard paramAmountSats == auth.amountSats else {
+                    throw RPCClientError.transactionBroadcastDisabled
+                }
+            }
+
+            let tokenKey = "\(auth.approvalId.uuidString):\(auth.token):\(auth.nonce)"
+            guard recordAndVerifyToken(tokenKey: tokenKey) else {
                 throw RPCClientError.transactionBroadcastDisabled
             }
         }
@@ -259,11 +354,16 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "listtransactions", params: ["*", count, 0, true], walletName: walletName)
     }
 
-    public func bumpFee(txid: String, options: [String: Any]? = nil, walletName: String? = nil) async throws -> BumpFeeResponse {
+    public func bumpFee(
+        txid: String,
+        options: [String: Any]? = nil,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> BumpFeeResponse {
         if let options = options {
-            return try await call(method: "bumpfee", params: [txid, options], walletName: walletName)
+            return try await call(method: "bumpfee", params: [txid, options], walletName: walletName, authorization: authorization)
         } else {
-            return try await call(method: "bumpfee", params: [txid], walletName: walletName)
+            return try await call(method: "bumpfee", params: [txid], walletName: walletName, authorization: authorization)
         }
     }
 
@@ -277,7 +377,8 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         comment: String = "",
         feeRateSatPerVB: Int? = nil,
         replaceable: Bool = true,
-        walletName: String? = nil
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
     ) async throws -> String {
         // Enforce 8-decimal fixed-point string representation for Bitcoin Core RPC compatibility
         // Prevents floating-point scientific notation (e.g. 9.718e-05) which causes "RPC Server Error (-3): Invalid amount"
@@ -286,7 +387,7 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         if let feeRate = feeRateSatPerVB, feeRate > 0 {
             params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
         }
-        return try await call(method: "sendtoaddress", params: params, walletName: walletName)
+        return try await call(method: "sendtoaddress", params: params, walletName: walletName, authorization: authorization)
     }
 
     public func walletCreateFundedPsbt(

@@ -1953,6 +1953,134 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let clearedFallback = WalletAuthCoordinator.loadDurableLockoutFallback(username: username)
         XCTAssertNil(clearedFallback, "Fallback lockout must be cleared after successful persisted login")
     }
+
+    func testHighRiskApprovalTransactionSpendContextBindingAndTamperResistance() async throws {
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_tx_context_binding_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "spend_admin")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coordinator.enroll(
+            username: "spend_admin",
+            password: "AdminPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let previewId = UUID()
+        let txContext = TransactionSpendContext(
+            walletName: "vault_spend_1",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 100_000,
+            maxFeeSats: 2_500,
+            satPerVB: 10,
+            previewId: previewId,
+            utxoFingerprint: "mock_txid:0"
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: txContext.destinationAddress,
+            reason: "Approve 0.001 BTCB2 spend",
+            txContext: txContext
+        )
+
+        XCTAssertEqual(approval.action, "send")
+        XCTAssertEqual(approval.target, txContext.destinationAddress)
+        XCTAssertEqual(approval.txContext, txContext)
+
+        // 1. Destination tampering must fail
+        let tamperedDestContext = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: "bc1q9xxxxxx7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint
+        )
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: tamperedDestContext)
+            XCTFail("Destination mismatch must fail")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 2. Amount tampering must fail
+        let tamperedAmountContext = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: 500_000,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint
+        )
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: tamperedAmountContext)
+            XCTFail("Amount mismatch must fail")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 3. Wallet name tampering must fail
+        let tamperedWalletContext = TransactionSpendContext(
+            walletName: "vault_spend_2",
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint
+        )
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: tamperedWalletContext)
+            XCTFail("Wallet mismatch must fail")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+            }
+        }
+
+        // 4. Exact matching spend context consumes successfully
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: txContext)
+        } catch {
+            XCTFail("Exact matching spend context must consume successfully: \(error)")
+        }
+
+        // 5. Replay must fail immediately (single-use)
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: txContext)
+            XCTFail("Replayed approval must fail closed")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Expected unauthorizedHighRiskAction on replay, got \(err)")
+            }
+        }
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

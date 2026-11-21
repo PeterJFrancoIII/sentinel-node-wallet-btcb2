@@ -121,6 +121,40 @@ public struct WalletAuthCapability: Sendable, Equatable, Identifiable, Codable {
     }
 }
 
+public struct TransactionSpendContext: Sendable, Equatable, Codable {
+    public let walletName: String
+    public let destinationAddress: String
+    public let amountSats: Int64
+    public let maxFeeSats: Int64
+    public let satPerVB: Int
+    public let previewId: UUID
+    public let utxoFingerprint: String
+    public let chain: String
+    public let nonce: String
+
+    public init(
+        walletName: String,
+        destinationAddress: String,
+        amountSats: Int64,
+        maxFeeSats: Int64,
+        satPerVB: Int,
+        previewId: UUID,
+        utxoFingerprint: String,
+        chain: String = "main",
+        nonce: String = UUID().uuidString
+    ) {
+        self.walletName = walletName
+        self.destinationAddress = destinationAddress
+        self.amountSats = amountSats
+        self.maxFeeSats = maxFeeSats
+        self.satPerVB = satPerVB
+        self.previewId = previewId
+        self.utxoFingerprint = utxoFingerprint
+        self.chain = chain
+        self.nonce = nonce
+    }
+}
+
 public struct HighRiskApproval: Sendable, Equatable, Identifiable {
     public let id: UUID
     public let action: String
@@ -128,6 +162,7 @@ public struct HighRiskApproval: Sendable, Equatable, Identifiable {
     public let issuedAt: Date
     public let expiresAt: Date
     public let token: String
+    public let txContext: TransactionSpendContext?
 
     fileprivate init(
         id: UUID = UUID(),
@@ -135,7 +170,8 @@ public struct HighRiskApproval: Sendable, Equatable, Identifiable {
         target: String,
         issuedAt: Date = Date(),
         expiresAt: Date,
-        token: String
+        token: String,
+        txContext: TransactionSpendContext? = nil
     ) {
         self.id = id
         self.action = action
@@ -143,6 +179,7 @@ public struct HighRiskApproval: Sendable, Equatable, Identifiable {
         self.issuedAt = issuedAt
         self.expiresAt = expiresAt
         self.token = token
+        self.txContext = txContext
     }
 }
 
@@ -1248,7 +1285,8 @@ public actor WalletAuthCoordinator {
         capability: WalletAuthCapability,
         action: String,
         target: String,
-        reason: String
+        reason: String,
+        txContext: TransactionSpendContext? = nil
     ) async throws -> HighRiskApproval {
         try verifyCapability(capability)
 
@@ -1262,7 +1300,11 @@ public actor WalletAuthCoordinator {
         let issuedAt = Date()
         let expiresAt = issuedAt.addingTimeInterval(60) // 60-second validity window
 
-        let tokenPayload = "\(approvalId.uuidString):\(action):\(target.lowercased()):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(capability.id.uuidString)"
+        let contextDigest = txContext.map {
+            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
+        } ?? "none"
+
+        let tokenPayload = "\(approvalId.uuidString):\(action):\(target.lowercased()):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(capability.id.uuidString):\(contextDigest)"
         let token = Self.hmacSHA256(data: Data(tokenPayload.utf8), key: hmacSecret)
 
         let approval = HighRiskApproval(
@@ -1271,7 +1313,8 @@ public actor WalletAuthCoordinator {
             target: target,
             issuedAt: issuedAt,
             expiresAt: expiresAt,
-            token: token
+            token: token,
+            txContext: txContext
         )
 
         self.activeApprovals[approvalId] = ActiveApprovalRecord(approval: approval, boundSessionId: capability.id)
@@ -1281,7 +1324,8 @@ public actor WalletAuthCoordinator {
     public func consumeHighRiskApproval(
         _ approval: HighRiskApproval,
         action: String,
-        target: String
+        target: String,
+        expectedTxContext: TransactionSpendContext? = nil
     ) throws {
         // 1. Check expiration
         guard Date() <= approval.expiresAt else {
@@ -1304,14 +1348,42 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.unauthorizedHighRiskAction("Approval target mismatch: expected '\(target)', got '\(approval.target)'.")
         }
 
-        // 5. Verify cryptographic HMAC signature
-        let expectedPayload = "\(approval.id.uuidString):\(approval.action):\(approval.target.lowercased()):\(approval.issuedAt.timeIntervalSince1970):\(approval.expiresAt.timeIntervalSince1970):\(record.boundSessionId.uuidString)"
+        // 5. Verify transaction spend context if expected
+        if let expected = expectedTxContext {
+            guard let actual = approval.txContext else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval is missing transaction spend context.")
+            }
+            guard actual.walletName == expected.walletName else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval wallet mismatch: expected '\(expected.walletName)', got '\(actual.walletName)'.")
+            }
+            guard actual.destinationAddress.lowercased() == expected.destinationAddress.lowercased() else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval destination address mismatch: expected '\(expected.destinationAddress)', got '\(actual.destinationAddress)'.")
+            }
+            guard actual.amountSats == expected.amountSats else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval amount mismatch: expected \(expected.amountSats) sats, got \(actual.amountSats) sats.")
+            }
+            guard actual.maxFeeSats == expected.maxFeeSats else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval max fee mismatch: expected \(expected.maxFeeSats) sats, got \(actual.maxFeeSats) sats.")
+            }
+            guard actual.utxoFingerprint == expected.utxoFingerprint else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval UTXO fingerprint mismatch.")
+            }
+            guard actual.previewId == expected.previewId else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval preview ID mismatch: expected '\(expected.previewId)', got '\(actual.previewId)'.")
+            }
+        }
+
+        // 6. Verify cryptographic HMAC signature
+        let contextDigest = approval.txContext.map {
+            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
+        } ?? "none"
+        let expectedPayload = "\(approval.id.uuidString):\(approval.action):\(approval.target.lowercased()):\(approval.issuedAt.timeIntervalSince1970):\(approval.expiresAt.timeIntervalSince1970):\(record.boundSessionId.uuidString):\(contextDigest)"
         let expectedToken = Self.hmacSHA256(data: Data(expectedPayload.utf8), key: hmacSecret)
         guard Self.constantTimeCompareString(approval.token, expectedToken) else {
             throw WalletAuthError.unauthorizedHighRiskAction("Approval token signature verification failed.")
         }
 
-        // 6. Verify bound session is still valid
+        // 7. Verify bound session is still valid
         guard let session = activeSession, session.id == record.boundSessionId, !session.isExpired else {
             throw WalletAuthError.sessionExpired
         }

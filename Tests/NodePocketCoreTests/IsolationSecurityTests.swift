@@ -43,4 +43,48 @@ final class IsolationSecurityTests: XCTestCase {
             }
         }
     }
+
+    func testRestrictedSpendRPCsFailClosedWithoutSpendAuthorization() async throws {
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: 59999,
+            user: "test",
+            password: "test",
+            isBroadcastRestricted: false
+        )
+        let spendMethods = [
+            "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
+            "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
+            "signrawtransactionwithwallet", "signrawtransactionwithkey", "finalizepsbt"
+        ]
+        for method in spendMethods {
+            do {
+                let _: String = try await rpc.call(method: method, params: [])
+                XCTFail("Restricted RPC \(method) must fail closed without authorization even when isBroadcastRestricted == false")
+            } catch let error as RPCClientError {
+                guard case .transactionBroadcastDisabled = error else {
+                    XCTFail("Expected transactionBroadcastDisabled for \(method), got \(error)")
+                    continue
+                }
+            }
+        }
+        do {
+            _ = try await rpc.sendToAddress(address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 0.001)
+            XCTFail("sendToAddress wrapper must fail closed without authorization")
+        } catch let error as RPCClientError {
+            guard case .transactionBroadcastDisabled = error else {
+                XCTFail("Wrong error for sendToAddress: \(error)")
+                return
+            }
+        }
+        do {
+            _ = try await rpc.bumpFee(txid: "0000000000000000000000000000000000000000000000000000000000000000")
+            XCTFail("bumpFee wrapper must fail closed without authorization")
+        } catch let error as RPCClientError {
+            guard case .transactionBroadcastDisabled = error else {
+                XCTFail("Wrong error for bumpFee: \(error)")
+                return
+            }
+        }
+    }
 }

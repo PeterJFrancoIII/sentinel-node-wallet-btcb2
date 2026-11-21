@@ -222,6 +222,7 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case restoreSourceNotFound(String)
     case restoreSourceEmpty(String)
     case restoreTargetWalletAlreadyExists(String)
+    case invalidAmount(String)
 
     public var errorDescription: String? {
         switch self {
@@ -269,6 +270,8 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
             return "Insufficient spendable balance. Available: \(SatoshiMath.toBTC(sats: avail)) BTCB2, Required: \(SatoshiMath.toBTC(sats: req)) BTCB2."
         case .passphrasesDoNotMatch:
             return "Passphrase confirmation does not match."
+        case .invalidAmount(let reason):
+            return "Invalid transaction amount: \(reason)"
         }
     }
 }
@@ -1054,9 +1057,9 @@ public actor WalletManager {
         )
     }
 
-    /// Production safety HOLD: no signing, wallet unlock, or broadcast is permitted
     /// Authorizes and executes an outbound BTCB2 transaction.
-    /// When rpcClient.isBroadcastRestricted is true, fails closed with signingPathUnverified.
+    /// Strictly requires a valid preview, single-use high-risk approval with bound transaction spend context,
+    /// valid allowlisted address, wallet ownership verification, and issues a single-use SpendAuthorization to BitcoinRPCClient.
     public func executeAuthorizedSend(
         preview: FundedTxPreview,
         explicitPassphrase: String? = nil,
@@ -1068,19 +1071,20 @@ public actor WalletManager {
             throw WalletSecurityError.signingPathUnverified
         }
 
-        if !allowUnauthenticatedForTesting {
-            guard let coord = authCoordinator, let app = approval else {
-                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
-            }
-            try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress)
-        }
-
         // 1. Expiry check
         guard !preview.isExpired else {
             throw WalletSecurityError.previewExpired
         }
 
-        // 2. Re-verify destination and allowlist
+        // 2. Validate amount & fee
+        guard preview.amountSats > 0 else {
+            throw WalletSecurityError.invalidAmount("Transaction amount must be strictly greater than 0.")
+        }
+        guard preview.feeSats >= 0 else {
+            throw WalletSecurityError.invalidAmount("Transaction fee must be non-negative.")
+        }
+
+        // 3. Re-verify destination and allowlist
         guard AddressBook.isValidBTCB2MainnetAddress(preview.destinationAddress) else {
             throw WalletSecurityError.invalidMainnetAddress(preview.destinationAddress)
         }
@@ -1090,7 +1094,7 @@ public actor WalletManager {
             }
         }
 
-        // 3. Resolve passphrase & verify ownership
+        // 4. Resolve passphrase & verify ownership
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
@@ -1101,6 +1105,51 @@ public actor WalletManager {
             }
         }
 
+        // 5. Construct immutable transaction spend context
+        let txContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ",")
+        )
+
+        // 6. High-risk approval consumption
+        let approvalToken: String
+        let approvalId: UUID
+        let issuedAt: Date
+        let expiresAt: Date
+        if !allowUnauthenticatedForTesting {
+            guard let coord = authCoordinator, let app = approval else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
+            }
+            try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress, expectedTxContext: txContext)
+            approvalToken = app.token
+            approvalId = app.id
+            issuedAt = app.issuedAt
+            expiresAt = app.expiresAt
+        } else {
+            approvalToken = approval?.token ?? "test_synthetic_token"
+            approvalId = approval?.id ?? UUID()
+            issuedAt = approval?.issuedAt ?? Date()
+            expiresAt = approval?.expiresAt ?? Date().addingTimeInterval(60)
+        }
+
+        // 7. Create single-use SpendAuthorization bound to this specific transaction
+        let spendAuth = SpendAuthorization(
+            approvalId: approvalId,
+            sessionId: capability?.id ?? UUID(),
+            walletName: walletName,
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            token: approvalToken,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt
+        )
+
         let passphrase: String
         if let explicit = explicitPassphrase, !explicit.isEmpty {
             passphrase = explicit
@@ -1108,17 +1157,17 @@ public actor WalletManager {
             passphrase = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
         }
 
-        // 4. Temporarily unlock wallet for 15 seconds to sign and broadcast
+        // 8. Temporarily unlock wallet for 15 seconds to sign and broadcast
         try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
 
-        // 5. Always immediately re-lock wallet on completion or error
+        // Defensively ensure wallet is relocked if task unwinds or cancels
         defer {
             Task { [rpcClient, walletName] in
                 try? await rpcClient.walletLock(walletName: walletName)
             }
         }
 
-        // 6. Broadcast via sendtoaddress with explicit sat/vB fee rate and BIP-125 replacement enabled
+        // 9. Broadcast via sendtoaddress with explicit sat/vB fee rate and SpendAuthorization
         let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
         let txid: String
         do {
@@ -1128,18 +1177,22 @@ public actor WalletManager {
                 comment: "Sentinel Node Wallet",
                 feeRateSatPerVB: preview.satPerVB,
                 replaceable: true,
-                walletName: walletName
+                walletName: walletName,
+                authorization: spendAuth
             )
+            // Synchronously await immediate wallet lock
+            _ = try? await rpcClient.walletLock(walletName: walletName)
         } catch {
-            try? await rpcClient.walletLock(walletName: walletName)
+            _ = try? await rpcClient.walletLock(walletName: walletName)
             throw error
         }
 
-        try? await rpcClient.walletLock(walletName: walletName)
         return txid
     }
 
     /// Legacy compatibility send method with strict V7 guards.
+    /// In Choice B production release, this unapproved legacy path is disabled to prevent
+    /// bypassing single-use HighRiskApproval, funded preview validation, and address allowlist checks.
     public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil, capability: WalletAuthCapability? = nil) async throws -> String {
         try await ensureAuthenticated(capability: capability)
         if rpcClient.isBroadcastRestricted {
@@ -1148,19 +1201,20 @@ public actor WalletManager {
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
-        let pass: String
-        if let explicit = passphrase {
-            pass = explicit
-        } else {
-            pass = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
+        guard amount > 0 else {
+            throw WalletSecurityError.invalidAmount("Send amount must be greater than 0.")
         }
-        try await rpcClient.walletPassphrase(passphrase: pass, timeout: 15, walletName: walletName)
-        defer {
-            Task { [rpcClient, walletName] in
-                try? await rpcClient.walletLock(walletName: walletName)
+        guard AddressBook.isValidBTCB2MainnetAddress(destinationAddress) else {
+            throw WalletSecurityError.invalidMainnetAddress(destinationAddress)
+        }
+        if addressBook.isAllowlistEnabled {
+            guard addressBook.isAllowed(address: destinationAddress) else {
+                throw WalletSecurityError.allowlistBlocked(destinationAddress)
             }
         }
-        return try await rpcClient.sendToAddress(address: destinationAddress, amount: amount, walletName: walletName)
+        // Legacy send() lacks single-use HighRiskApproval and is disabled to prevent authorization bypass.
+        // All outbound transfers must execute via executeAuthorizedSend with a funded preview and user approval.
+        throw WalletAuthError.unauthorizedHighRiskAction("Legacy send() is disabled. Outbound transfers require a funded preview and single-use HighRiskApproval via executeAuthorizedSend.")
     }
 
     /// Restores a wallet from an existing backup file.
