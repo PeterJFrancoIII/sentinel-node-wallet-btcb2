@@ -11,16 +11,11 @@ if [ ! -x "${SIGN_UPDATE}" ]; then
     SIGN_UPDATE="$(find "${ROOT_DIR}/.build" -name "sign_update" -type f -perm +111 2>/dev/null | head -n 1 || true)"
 fi
 
-if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
-    echo "ERROR: Sparkle 'sign_update' binary not found. Run 'swift build' first." >&2
-    exit 1
-fi
-
 usage() {
     cat <<EOF
 Usage:
-  $0 sign <archive-file> [--key-file <key>] [--signature-file-output <file>] [--signature-only]
-  $0 verify <archive-file> <ed-signature>
+  $0 sign <archive-file> [--key-file <key>] [--signature-file-output <file>] [--signature-only] [--trusted-tool-hash <sha256>] [--sign-update-bin <path>]
+  $0 verify <archive-file> <ed-signature> [--trusted-tool-hash <sha256>] [--sign-update-bin <path>]
 
 Commands:
   sign    Generates an EdDSA signature and enclosure snippet for the given archive (.dmg/.zip).
@@ -40,35 +35,67 @@ shift 2
 ARCHIVE_SIZE="$(python3 -c "import os, sys; print(os.path.getsize(sys.argv[1]))" "${ARCHIVE}")"
 ARCHIVE_SHA="$(shasum -a 256 "${ARCHIVE}" | awk '{print $1}')"
 
+KEY_ARGS=()
+SIG_OUTPUT_FILE=""
+SIG_ONLY=0
+EXPECTED_TOOL_HASH="${SPARKLE_SIGN_UPDATE_EXPECTED_SHA256:-}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --key-file)
+            [ $# -ge 2 ] || { echo "ERROR: Missing argument for --key-file" >&2; exit 1; }
+            KEY_ARGS=(--ed-key-file "$2")
+            shift 2
+            ;;
+        --signature-file-output)
+            [ $# -ge 2 ] || { echo "ERROR: Missing argument for --signature-file-output" >&2; exit 1; }
+            SIG_OUTPUT_FILE="$2"
+            shift 2
+            ;;
+        --signature-only)
+            SIG_ONLY=1
+            shift
+            ;;
+        --trusted-tool-hash)
+            [ $# -ge 2 ] || { echo "ERROR: Missing argument for --trusted-tool-hash" >&2; exit 1; }
+            EXPECTED_TOOL_HASH="$2"
+            shift 2
+            ;;
+        --sign-update-bin)
+            [ $# -ge 2 ] || { echo "ERROR: Missing argument for --sign-update-bin" >&2; exit 1; }
+            SIGN_UPDATE="$2"
+            shift 2
+            ;;
+        *)
+            # For verify command, first extra argument might be the target signature
+            if [ "${COMMAND}" = "verify" ] && [ -z "${TARGET_SIG:-}" ]; then
+                TARGET_SIG="$1"
+                shift
+            else
+                echo "WARNING: Unknown option '$1' ignored" >&2
+                shift
+            fi
+            ;;
+    esac
+done
+
+if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
+    echo "ERROR: Sparkle 'sign_update' binary not found at '${SIGN_UPDATE}'." >&2
+    exit 1
+fi
+
+# Verify sign_update tool binary hash if expected hash is provided (WO-122-R4 / O1-G1A-03)
+if [ -n "${EXPECTED_TOOL_HASH}" ]; then
+    ACTUAL_TOOL_HASH="$(shasum -a 256 "${SIGN_UPDATE}" | awk '{print $1}')"
+    if [ "${ACTUAL_TOOL_HASH}" != "${EXPECTED_TOOL_HASH}" ]; then
+        echo "ERROR: Sparkle sign_update binary SHA-256 (${ACTUAL_TOOL_HASH}) does not match trusted tool hash (${EXPECTED_TOOL_HASH}). Execution blocked." >&2
+        exit 1
+    fi
+    echo "✓ Verified Sparkle sign_update tool binary hash: ${ACTUAL_TOOL_HASH}" >&2
+fi
+
 case "${COMMAND}" in
     sign)
-        KEY_ARGS=()
-        SIG_OUTPUT_FILE=""
-        SIG_ONLY=0
-
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                --key-file)
-                    [ $# -ge 2 ] || { echo "ERROR: Missing argument for --key-file" >&2; exit 1; }
-                    KEY_ARGS=(--ed-key-file "$2")
-                    shift 2
-                    ;;
-                --signature-file-output)
-                    [ $# -ge 2 ] || { echo "ERROR: Missing argument for --signature-file-output" >&2; exit 1; }
-                    SIG_OUTPUT_FILE="$2"
-                    shift 2
-                    ;;
-                --signature-only)
-                    SIG_ONLY=1
-                    shift
-                    ;;
-                *)
-                    echo "WARNING: Unknown option '$1' ignored" >&2
-                    shift
-                    ;;
-            esac
-        done
-
         SIG=""
         if [ ${#KEY_ARGS[@]} -gt 0 ]; then
             SIG="$("${SIGN_UPDATE}" -p "${KEY_ARGS[@]}" "${ARCHIVE}")"
@@ -135,8 +162,7 @@ EOF
         ;;
 
     verify)
-        [ $# -ge 1 ] || { echo "ERROR: Missing signature for verification." >&2; usage; }
-        TARGET_SIG="$1"
+        [ -n "${TARGET_SIG:-}" ] || { echo "ERROR: Missing signature for verification." >&2; usage; }
         echo "Verifying '${ARCHIVE}' against EdDSA signature..."
         "${SIGN_UPDATE}" --verify "${ARCHIVE}" "${TARGET_SIG}"
         echo "✓ Signature Verified Successfully!"

@@ -122,25 +122,42 @@ Until `.github/workflows/release-macos.yml` exists on `origin/main`, GitHub Acti
 ## 4. Three-Phase Immutable Release Promotion & Feed Activation (WO-108, WO-115, WO-122-R1, WO-122-R2)
 To eliminate collision errors, avoid re-signing verified binaries, and ensure immutable asset provenance, production releases follow a strict **Three-Phase Promotion** process with separated runner privileges:
 
-### Phase A: Candidate Draft Staging (`release_phase: stage-draft`)
-*Runs under `privileged-release` with `environment: production-release`.*
-1. **Tag Candidate Commit:**
+### Phase A: Candidate Draft Staging (`release_phase: stage-draft`, WO-115, O1-G1A-01, O1-G1A-02, O1-G1A-03)
+*Decoupled secret-free build in Phase 0 (unprivileged) and isolated signing in Phase A (`environment: production-release`).*
+
+1. **Policy B Release Approval Record Prerequisite on Protected Main:**
+   - Before triggering Phase A, an authenticated release approval manifest `docs/RELEASE_APPROVAL.json` must be committed and merged to `origin/main` via protected PR review.
+   - The approval manifest binds the exact 40-character candidate commit SHA, release tag, version, and security attestation (confirming $0.00 spending limit and 12 blocked RPC methods).
+   - If `docs/RELEASE_APPROVAL.json` is missing on `origin/main` or the target commit does not match `approved_commit_sha`, the workflow fails closed in `unprivileged-qualification`.
+
+2. **Tag Candidate Commit:**
    ```bash
    git tag -s v1.0.0-build5 <reviewed-commit-sha> -m "Sentinel Node Wallet v1.0.0 (Build 5)"
    git push origin v1.0.0-build5
    ```
-2. **Trigger Workflow Dispatch (Phase A):**
+
+3. **Trigger Workflow Dispatch (Phase A):**
    - In GitHub Actions -> Select **macOS Production Release & Sparkle Deployment** -> **Run workflow**.
    - Input tag: `v1.0.0-build5`
    - Operator approval confirmed: `YES`
    - Release Phase: `stage-draft` (Phase A default).
-3. **Automated Verification & Privileged Build:**
-   - Unprivileged qualification executes `swift test` (289 tests).
-   - Bitcoin Knots binary provenance is verified against embedded SHA-256 digests.
-   - Privileged job imports Developer ID (`S8QMQZA656`), builds DMG, submits to Apple Notary API, and staples ticket.
-   - DMG is signed with Sparkle private EdDSA key.
-   - GitHub Release is created as a **Draft** via `gh release create --draft`.
-   - Sparkle feed publisher runs in `--dry-run` mode against the notarized DMG.
+
+4. **Automated Verification & Secret-Free Compilation (Phase 0):**
+   - Unprivileged qualification verifies tag regex, build monotonicity (`build > 3`), and Policy B approval record on `origin/main`.
+   - Runs full native unit test suite (`swift test`).
+   - Verifies release broadcast lock (`VerifyReleaseBroadcastLock`).
+   - Compiles release application bundle via `bash scripts/build_app.sh` (zero credentials).
+   - Packages `dist/unsigned-app-bundle.tar.gz`, calculates SHA-256, and uploads it as a workflow artifact.
+   - Exports immutable `verified_commit_sha` and `app_bundle_sha256`.
+
+5. **Privileged Signing & Notarization (Phase A):**
+   - Checks out repository at immutable `verified_commit_sha` (NOT a mutable tag).
+   - Downloads `unsigned-app-bundle.tar.gz` and verifies SHA-256 matches Phase 0 manifest.
+   - Extracts bundle safely into `dist/`.
+   - Executes `bash scripts/build_production_dmg.sh --sign-only` (skipping compilation entirely while credentials exist in memory).
+   - Signs DMG with Sparkle EdDSA key using `scripts/sign_appcast_enclosure.sh` with verified tool provenance.
+   - Emits `RELEASE_ATTESTATION.json` binding `approved_commit_sha`.
+   - Creates GitHub Release as a **Draft** via `gh release create --draft`.
    - Ephemeral keychain and Notary credentials are deleted.
    - **Result:** Immutable draft release staged; public feed on `main` remains untouched.
 

@@ -2532,4 +2532,335 @@ exit 0
         XCTAssertTrue(positiveRes.output.contains("Live CDN verification successful: Build 5 feed exact-byte match"),
                       "Positive run must log CDN match: \(positiveRes.output)")
     }
+
+    // MARK: - Option 1 G1-A Release Trust Boundary Tests (WO-122 / Cases 36-39)
+
+    func testReleaseApprovalSchemaAndPolicyBProofCase36() throws {
+        var currentURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: currentURL.appendingPathComponent("Package.swift").path) {
+            let parent = currentURL.deletingLastPathComponent()
+            if parent.path == currentURL.path { break }
+            currentURL = parent
+        }
+        let rootDir = currentURL
+        let schemaURL = rootDir.appendingPathComponent("docs/RELEASE_APPROVAL.schema.json")
+        let templateURL = rootDir.appendingPathComponent("docs/RELEASE_APPROVAL_TEMPLATE.json")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: schemaURL.path), "docs/RELEASE_APPROVAL.schema.json must exist")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: templateURL.path), "docs/RELEASE_APPROVAL_TEMPLATE.json must exist")
+
+        // 1. Verify template parses as valid JSON and has required keys
+        let templateData = try Data(contentsOf: templateURL)
+        let templateObj = try JSONSerialization.jsonObject(with: templateData) as? [String: Any]
+        XCTAssertNotNil(templateObj)
+        XCTAssertEqual(templateObj?["schema_version"] as? String, "1.0.0")
+
+        let releaseTarget = templateObj?["release_target"] as? [String: Any]
+        XCTAssertNotNil(releaseTarget)
+        XCTAssertEqual(releaseTarget?["target_tag"] as? String, "v1.0.0-build5")
+        XCTAssertEqual((releaseTarget?["approved_commit_sha"] as? String)?.count, 40)
+        XCTAssertEqual(releaseTarget?["build_number"] as? Int, 5)
+
+        let approvalMetadata = templateObj?["approval_metadata"] as? [String: Any]
+        XCTAssertNotNil(approvalMetadata)
+        XCTAssertEqual(approvalMetadata?["authorized_scope"] as? String, "NODEPOCKET_BTCB2_ONLY")
+        XCTAssertEqual(approvalMetadata?["approval_policy"] as? String, "Policy B: Independent Approved Release Commit on Protected Main")
+
+        let securityAttestation = templateObj?["security_attestation"] as? [String: Any]
+        XCTAssertNotNil(securityAttestation)
+        XCTAssertEqual(securityAttestation?["spending_authority_disarmed"] as? Bool, true)
+        XCTAssertEqual(securityAttestation?["authorized_spending_limit_btc"] as? String, "0.00")
+        XCTAssertEqual(securityAttestation?["restricted_rpc_methods_blocked"] as? Int, 12)
+
+        // 2. Python validation script against schema
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case36-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // 3. Test Negative Cases via python validator
+        let pyValidator = """
+import json, re, sys
+
+with open(sys.argv[1]) as f:
+    schema = json.load(f)
+with open(sys.argv[2]) as f:
+    doc = json.load(f)
+
+# Strict manual structural validation
+if doc.get("schema_version") != "1.0.0":
+    sys.exit(10)
+rt = doc.get("release_target", {})
+if not re.match(r"^v[0-9]+\\.[0-9]+\\.[0-9]+-build[0-9]+$", rt.get("target_tag", "")):
+    sys.exit(11)
+if not re.match(r"^[0-9a-f]{40}$", rt.get("approved_commit_sha", "")):
+    sys.exit(12)
+if rt.get("build_number", 0) <= 3:
+    sys.exit(13)
+am = doc.get("approval_metadata", {})
+if am.get("authorized_scope") != "NODEPOCKET_BTCB2_ONLY":
+    sys.exit(14)
+sa = doc.get("security_attestation", {})
+if sa.get("spending_authority_disarmed") is not True or sa.get("authorized_spending_limit_btc") != "0.00" or sa.get("restricted_rpc_methods_blocked") != 12:
+    sys.exit(15)
+sys.exit(0)
+"""
+        let valScript = tempBase.appendingPathComponent("validate.py")
+        try pyValidator.write(to: valScript, atomically: true, encoding: .utf8)
+
+        // Valid template must exit 0
+        let resValid = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, templateURL.path])
+        XCTAssertEqual(resValid.status, 0, "Valid template must pass validation: \(resValid.output)")
+
+        // Negative Case A: Non-40 char commit SHA
+        var badSHAObj = templateObj!
+        var badSHART = releaseTarget!
+        badSHART["approved_commit_sha"] = "short_sha"
+        badSHAObj["release_target"] = badSHART
+        let badSHAFile = tempBase.appendingPathComponent("bad_sha.json")
+        try JSONSerialization.data(withJSONObject: badSHAObj).write(to: badSHAFile)
+        let resBadSHA = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badSHAFile.path])
+        XCTAssertEqual(resBadSHA.status, 12, "Non-40 char commit SHA must fail with code 12")
+
+        // Negative Case B: Build number <= 3
+        var badBuildObj = templateObj!
+        var badBuildRT = releaseTarget!
+        badBuildRT["build_number"] = 3
+        badBuildObj["release_target"] = badBuildRT
+        let badBuildFile = tempBase.appendingPathComponent("bad_build.json")
+        try JSONSerialization.data(withJSONObject: badBuildObj).write(to: badBuildFile)
+        let resBadBuild = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badBuildFile.path])
+        XCTAssertEqual(resBadBuild.status, 13, "Build number <= 3 must fail with code 13")
+
+        // Negative Case C: Scope not NODEPOCKET_BTCB2_ONLY
+        var badScopeObj = templateObj!
+        var badScopeAM = approvalMetadata!
+        badScopeAM["authorized_scope"] = "OTHER_PROJECT"
+        badScopeObj["approval_metadata"] = badScopeAM
+        let badScopeFile = tempBase.appendingPathComponent("bad_scope.json")
+        try JSONSerialization.data(withJSONObject: badScopeObj).write(to: badScopeFile)
+        let resBadScope = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badScopeFile.path])
+        XCTAssertEqual(resBadScope.status, 14, "Unauthorized scope must fail with code 14")
+
+        // Negative Case D: Spending not disarmed ($0.00)
+        var badSpendObj = templateObj!
+        var badSpendSA = securityAttestation!
+        badSpendSA["spending_authority_disarmed"] = false
+        badSpendObj["security_attestation"] = badSpendSA
+        let badSpendFile = tempBase.appendingPathComponent("bad_spend.json")
+        try JSONSerialization.data(withJSONObject: badSpendObj).write(to: badSpendFile)
+        let resBadSpend = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badSpendFile.path])
+        XCTAssertEqual(resBadSpend.status, 15, "Non-disarmed spending must fail with code 15")
+    }
+
+    func testWorkflowImmutableSHAHandoffAndTagMovementCase37() throws {
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case37-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        let repoDir = tempBase.appendingPathComponent("test-repo")
+        _ = runCmd("/usr/bin/git", ["init", "-b", "main", repoDir.path])
+        _ = runCmd("/usr/bin/git", ["config", "user.name", "Test Committer"], cwd: repoDir)
+        _ = runCmd("/usr/bin/git", ["config", "user.email", "committer@nodepocket.app"], cwd: repoDir)
+
+        // Commit A
+        let fileA = repoDir.appendingPathComponent("file.txt")
+        try "Commit A".write(to: fileA, atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/git", ["add", "file.txt"], cwd: repoDir)
+        _ = runCmd("/usr/bin/git", ["commit", "-m", "Commit A"], cwd: repoDir)
+        let commitASHA = runCmd("/usr/bin/git", ["rev-parse", "HEAD"], cwd: repoDir).output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // Tag commit A
+        _ = runCmd("/usr/bin/git", ["tag", "v1.0.0-build5", commitASHA], cwd: repoDir)
+
+        // Commit B
+        try "Commit B".write(to: fileA, atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/git", ["commit", "-am", "Commit B"], cwd: repoDir)
+        let commitBSHA = runCmd("/usr/bin/git", ["rev-parse", "HEAD"], cwd: repoDir).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotEqual(commitASHA, commitBSHA)
+
+        // Verify initial tag commit equals Commit A
+        let tagRefInitial = runCmd("/usr/bin/git", ["rev-list", "-n", "1", "v1.0.0-build5"], cwd: repoDir).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(tagRefInitial, commitASHA)
+
+        // Retarget tag to Commit B (simulating tag movement attack)
+        _ = runCmd("/usr/bin/git", ["tag", "-f", "v1.0.0-build5", commitBSHA], cwd: repoDir)
+        let tagRefMoved = runCmd("/usr/bin/git", ["rev-list", "-n", "1", "v1.0.0-build5"], cwd: repoDir).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(tagRefMoved, commitBSHA)
+
+        // Assert that comparing approved Commit A against tagRefMoved detects the attack
+        XCTAssertNotEqual(commitASHA, tagRefMoved, "Retargeted tag must differ from immutable approved commit SHA")
+
+        // Assert that checkout by immutable SHA (commitASHA) remains at Commit A regardless of tag mutation
+        _ = runCmd("/usr/bin/git", ["checkout", commitASHA], cwd: repoDir)
+        let checkedOutSHA = runCmd("/usr/bin/git", ["rev-parse", "HEAD"], cwd: repoDir).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(checkedOutSHA, commitASHA, "Pinned checkout must remain at approved commit SHA")
+        let contentAtA = try String(contentsOf: fileA, encoding: .utf8)
+        XCTAssertEqual(contentAtA, "Commit A", "Checked out content must match approved commit")
+    }
+
+    func testSignOnlyModeAndUnsignedBundleIntegrityCase38() throws {
+        var currentURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: currentURL.appendingPathComponent("Package.swift").path) {
+            let parent = currentURL.deletingLastPathComponent()
+            if parent.path == currentURL.path { break }
+            currentURL = parent
+        }
+        let rootDir = currentURL
+        let scriptPath = rootDir.appendingPathComponent("scripts/build_production_dmg.sh").path
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case38-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil, env: [String: String]? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            if let env = env {
+                var procEnv = ProcessInfo.processInfo.environment
+                for (k, v) in env { procEnv[k] = v }
+                proc.environment = procEnv
+            }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // Test 1: --sign-only with missing app bundle fails closed
+        let missingApp = tempBase.appendingPathComponent("Nonexistent.app").path
+        let testEnv = [
+            "SENTINEL_RELEASE_SECURITY_APPROVED": "1",
+            "SENTINEL_DEVELOPER_ID_APPLICATION": "Developer ID Application: Peter Franco",
+            "SENTINEL_APPLE_TEAM_ID": "S8QMQZA656",
+            "SENTINEL_WEBCREDENTIALS_DOMAIN": "pool.sentineldefensetechnologies.co.za",
+            "SENTINEL_NOTARY_PROFILE": "test-profile"
+        ]
+        let resMissing = runCmd("/bin/bash", [scriptPath, "--sign-only", "--app-bundle", missingApp], env: testEnv)
+        XCTAssertNotEqual(resMissing.status, 0, "Missing app bundle in --sign-only mode must fail closed")
+        XCTAssertTrue(resMissing.output.contains("Missing pre-built macOS app"),
+                      "Output must indicate missing pre-built app: \(resMissing.output)")
+
+        // Test 2: Unsigned bundle archiving and SHA-256 integrity verification
+        let mockAppDir = tempBase.appendingPathComponent("Mock.app")
+        try FileManager.default.createDirectory(at: mockAppDir.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try "test-binary".write(to: mockAppDir.appendingPathComponent("Contents/MockBinary"), atomically: true, encoding: .utf8)
+
+        let archiveURL = tempBase.appendingPathComponent("unsigned-app-bundle.tar.gz")
+        _ = runCmd("/usr/bin/tar", ["-czf", archiveURL.path, "-C", tempBase.path, "Mock.app"])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: archiveURL.path))
+
+        let archiveData = try Data(contentsOf: archiveURL)
+        let originalSHA = SHA256.hash(data: archiveData).map { String(format: "%02x", $0) }.joined()
+
+        // Tamper with archive
+        var tamperedData = archiveData
+        tamperedData[tamperedData.count - 1] ^= 0xFF
+        let tamperedSHA = SHA256.hash(data: tamperedData).map { String(format: "%02x", $0) }.joined()
+        XCTAssertNotEqual(originalSHA, tamperedSHA, "Corrupted archive must produce mismatched SHA-256")
+    }
+
+    func testTrustedToolAttestationAndSignUpdateHashCase39() throws {
+        var currentURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: currentURL.appendingPathComponent("Package.swift").path) {
+            let parent = currentURL.deletingLastPathComponent()
+            if parent.path == currentURL.path { break }
+            currentURL = parent
+        }
+        let rootDir = currentURL
+        let scriptPath = rootDir.appendingPathComponent("scripts/sign_appcast_enclosure.sh").path
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case39-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil, env: [String: String]? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            if let env = env {
+                var procEnv = ProcessInfo.processInfo.environment
+                for (k, v) in env { procEnv[k] = v }
+                proc.environment = procEnv
+            }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // Create mock archive
+        let dummyArchive = tempBase.appendingPathComponent("test.dmg")
+        try "dummy-dmg-content".write(to: dummyArchive, atomically: true, encoding: .utf8)
+
+        // Create a mock sign_update binary
+        let mockSignUpdate = tempBase.appendingPathComponent("mock_sign_update")
+        let mockScript = """
+#!/usr/bin/env bash
+# Output a valid 64-byte base64 string
+echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+"""
+        try mockScript.write(to: mockSignUpdate, atomically: true, encoding: .utf8)
+        _ = runCmd("/bin/chmod", ["+x", mockSignUpdate.path])
+
+        let toolData = try Data(contentsOf: mockSignUpdate)
+        let actualToolSHA = SHA256.hash(data: toolData).map { String(format: "%02x", $0) }.joined()
+        let wrongToolSHA = String(repeating: "0", count: 64)
+
+        // Test A: Mismatched tool hash fails closed before execution
+        let resMismatch = runCmd("/bin/bash", [
+            scriptPath, "sign", dummyArchive.path,
+            "--sign-update-bin", mockSignUpdate.path,
+            "--trusted-tool-hash", wrongToolSHA
+        ])
+        XCTAssertNotEqual(resMismatch.status, 0, "Mismatched tool hash must exit non-zero")
+        XCTAssertTrue(resMismatch.output.contains("does not match trusted tool hash"),
+                      "Output must report hash mismatch: \(resMismatch.output)")
+
+        // Test B: Matching tool hash succeeds
+        let resMatch = runCmd("/bin/bash", [
+            scriptPath, "sign", dummyArchive.path,
+            "--sign-update-bin", mockSignUpdate.path,
+            "--trusted-tool-hash", actualToolSHA
+        ])
+        XCTAssertEqual(resMatch.status, 0, "Matching tool hash must succeed: \(resMatch.output)")
+        XCTAssertTrue(resMatch.output.contains("Verified Sparkle sign_update tool binary hash"),
+                      "Output must confirm verified tool hash: \(resMatch.output)")
+    }
 }

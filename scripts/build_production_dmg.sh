@@ -12,6 +12,24 @@ BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
 fail() { printf "RELEASE BLOCKED: %s\n" "$*" >&2; exit 1; }
 require() { local key="$1"; [ -n "${!key:-}" ] || fail "Missing required setting ${key}"; }
 
+SIGN_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sign-only)
+            SIGN_ONLY=1
+            shift
+            ;;
+        --app-bundle)
+            [ $# -ge 2 ] || fail "Missing argument for --app-bundle"
+            APP="$2"
+            shift 2
+            ;;
+        *)
+            fail "Unknown option '$1'"
+            ;;
+    esac
+done
+
 [ "${SENTINEL_RELEASE_SECURITY_APPROVED:-}" = "1" ] ||
     fail "Release approval missing. Source and CI alone do not authorize distribution."
 for key in SENTINEL_DEVELOPER_ID_APPLICATION SENTINEL_APPLE_TEAM_ID SENTINEL_WEBCREDENTIALS_DOMAIN SENTINEL_NOTARY_PROFILE; do
@@ -45,9 +63,15 @@ if not isinstance(apps, list) or sys.argv[2] not in apps:
     raise SystemExit(1)
 PY
 
-# Existing builder creates an ad-hoc local bundle after SHA pinning the Knots
-# archive and bitcoind. Re-sign everything before any prospective release.
-"${SCRIPT_DIR}/build_app.sh"
+if [ "${SIGN_ONLY}" = "1" ]; then
+    echo "✓ Running in --sign-only mode: skipping SwiftPM build / compilation in privileged environment."
+    [ -d "${APP}" ] || fail "Missing pre-built macOS app at '${APP}' for sign-only mode."
+else
+    # Existing builder creates an ad-hoc local bundle after SHA pinning the Knots
+    # archive and bitcoind. Re-sign everything before any prospective release.
+    "${SCRIPT_DIR}/build_app.sh"
+fi
+
 [ -d "${APP}" ] || fail "Missing built macOS app."
 plutil -lint "${APP}/Contents/Info.plist" >/dev/null
 ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist" 2>/dev/null || echo "${BUNDLE_ID}")"
