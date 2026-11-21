@@ -131,10 +131,18 @@ jobs:
             exit 1
           }
 
-          APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" <<'PY'
+          APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" "${INPUT_TAG}" "${VERSION}" "${BUILD_NUM}" <<'PY'
           import json, re, sys
 
           tmp_path = sys.argv[1]
+          expected_tag = sys.argv[2].strip()
+          expected_version = sys.argv[3].strip()
+          try:
+              expected_build_num = int(sys.argv[4].strip())
+          except Exception:
+              print(f"ERROR: Invalid expected build number: {sys.argv[4]}", file=sys.stderr)
+              sys.exit(1)
+
           try:
               with open(tmp_path, "r", encoding="utf-8") as f:
                   data = json.load(f)
@@ -149,7 +157,8 @@ jobs:
           rt = data.get("release_target", {})
           sha = rt.get("approved_commit_sha", "").strip().lower()
           tag = rt.get("target_tag", "").strip()
-          build_num = rt.get("build_number", 0)
+          raw_build_num = rt.get("build_number")
+          bundle_ver = rt.get("bundle_version", "").strip()
 
           if not re.match(r"^[0-9a-f]{40}$", sha):
               print("ERROR: approved_commit_sha must be a 40-char lowercase hex string", file=sys.stderr)
@@ -159,8 +168,29 @@ jobs:
               print("ERROR: target_tag does not match required format", file=sys.stderr)
               sys.exit(1)
 
-          if build_num <= 3:
-              print("ERROR: build_number must be > 3", file=sys.stderr)
+          # G1A-R3-01: Strict Release Tuple Binding (tag, version, integer build number)
+          if tag != expected_tag:
+              print(f"ERROR: Approval target_tag '{tag}' does not match requested release tag '{expected_tag}'", file=sys.stderr)
+              sys.exit(1)
+
+          if type(raw_build_num) is not int:
+              print(f"ERROR: build_number must be an integer, got {type(raw_build_num).__name__}", file=sys.stderr)
+              sys.exit(1)
+
+          if raw_build_num <= 3:
+              print(f"ERROR: build_number ({raw_build_num}) must be > 3", file=sys.stderr)
+              sys.exit(1)
+
+          if raw_build_num != expected_build_num:
+              print(f"ERROR: Approval build_number ({raw_build_num}) does not match requested build number ({expected_build_num})", file=sys.stderr)
+              sys.exit(1)
+
+          if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", bundle_ver):
+              print("ERROR: bundle_version does not match required format (major.minor.patch)", file=sys.stderr)
+              sys.exit(1)
+
+          if bundle_ver != expected_version:
+              print(f"ERROR: Approval bundle_version '{bundle_ver}' does not match requested version '{expected_version}'", file=sys.stderr)
               sys.exit(1)
 
           am = data.get("approval_metadata", {})

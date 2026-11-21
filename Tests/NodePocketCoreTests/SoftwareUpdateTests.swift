@@ -2596,20 +2596,32 @@ exit 0
             return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         }
 
-        // 2. Test exact bash workflow shell step using python3 - "${APPROVAL_TMP}" <<'PY' (G1A-R2-01 / G1A-R2-05)
+        // 2. Test exact bash workflow shell step using python3 - "${APPROVAL_TMP}" "${INPUT_TAG}" "${VERSION}" "${BUILD_NUM}" <<'PY' (G1A-R3-01 / G1A-R3-02)
         let workflowBashStepScript = """
 #!/bin/bash
 set -eo pipefail
 
 JSON_SRC="$1"
+INPUT_TAG="${2:-v1.0.0-build5}"
+VERSION="${3:-1.0.0}"
+BUILD_NUM="${4:-5}"
+
 APPROVAL_TMP="$(mktemp -t release_approval.XXXXXX.json 2>/dev/null || mktemp /tmp/release_approval.XXXXXX.json)"
 trap 'rm -f "${APPROVAL_TMP}"' EXIT
 cat "${JSON_SRC}" > "${APPROVAL_TMP}" || { rm -f "${APPROVAL_TMP}"; exit 1; }
 
-APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" <<'PY'
+APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" "${INPUT_TAG}" "${VERSION}" "${BUILD_NUM}" <<'PY'
 import json, re, sys
 
 tmp_path = sys.argv[1]
+expected_tag = sys.argv[2].strip()
+expected_version = sys.argv[3].strip()
+try:
+    expected_build_num = int(sys.argv[4].strip())
+except Exception:
+    print(f"ERROR: Invalid expected build number: {sys.argv[4]}", file=sys.stderr)
+    sys.exit(1)
+
 try:
     with open(tmp_path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -2624,7 +2636,8 @@ if data.get("schema_version") != "1.0.0":
 rt = data.get("release_target", {})
 sha = rt.get("approved_commit_sha", "").strip().lower()
 tag = rt.get("target_tag", "").strip()
-build_num = rt.get("build_number", 0)
+raw_build_num = rt.get("build_number")
+bundle_ver = rt.get("bundle_version", "").strip()
 
 if not re.match(r"^[0-9a-f]{40}$", sha):
     print("ERROR: approved_commit_sha must be a 40-char lowercase hex string", file=sys.stderr)
@@ -2634,8 +2647,29 @@ if not re.match(r"^v[0-9]+\\.[0-9]+\\.[0-9]+-build[0-9]+$", tag):
     print("ERROR: target_tag does not match required format", file=sys.stderr)
     sys.exit(1)
 
-if build_num <= 3:
-    print("ERROR: build_number must be > 3", file=sys.stderr)
+# G1A-R3-01: Strict Release Tuple Binding (tag, version, integer build number)
+if tag != expected_tag:
+    print(f"ERROR: Approval target_tag '{tag}' does not match requested release tag '{expected_tag}'", file=sys.stderr)
+    sys.exit(1)
+
+if type(raw_build_num) is not int:
+    print(f"ERROR: build_number must be an integer, got {type(raw_build_num).__name__}", file=sys.stderr)
+    sys.exit(1)
+
+if raw_build_num <= 3:
+    print(f"ERROR: build_number ({raw_build_num}) must be > 3", file=sys.stderr)
+    sys.exit(1)
+
+if raw_build_num != expected_build_num:
+    print(f"ERROR: Approval build_number ({raw_build_num}) does not match requested build number ({expected_build_num})", file=sys.stderr)
+    sys.exit(1)
+
+if not re.match(r"^[0-9]+\\.[0-9]+\\.[0-9]+$", bundle_ver):
+    print("ERROR: bundle_version does not match required format (major.minor.patch)", file=sys.stderr)
+    sys.exit(1)
+
+if bundle_ver != expected_version:
+    print(f"ERROR: Approval bundle_version '{bundle_ver}' does not match requested version '{expected_version}'", file=sys.stderr)
     sys.exit(1)
 
 am = data.get("approval_metadata", {})
@@ -2675,19 +2709,57 @@ echo "${APPROVED_SHA}"
         try workflowBashStepScript.write(to: bashStepFile, atomically: true, encoding: .utf8)
         _ = runCmdWithStdin("/bin/chmod", ["+x", bashStepFile.path])
 
-        func runStepWithData(_ data: Data) -> (status: Int32, output: String) {
+        func runStepWithData(_ data: Data, tag: String = "v1.0.0-build5", version: String = "1.0.0", buildNum: String = "5") -> (status: Int32, output: String) {
             let tmpDataFile = tempBase.appendingPathComponent("test_data_\(UUID().uuidString).json")
             try? data.write(to: tmpDataFile)
             defer { try? FileManager.default.removeItem(at: tmpDataFile) }
-            return runCmdWithStdin("/bin/bash", [bashStepFile.path, tmpDataFile.path])
+            return runCmdWithStdin("/bin/bash", [bashStepFile.path, tmpDataFile.path, tag, version, buildNum])
         }
 
-        // Valid template must pass through workflow bash step
-        let validRes = runStepWithData(templateData)
+        // 1. Valid template with exact matching release tuple must pass through workflow bash step
+        let validRes = runStepWithData(templateData, tag: "v1.0.0-build5", version: "1.0.0", buildNum: "5")
         XCTAssertEqual(validRes.status, 0, "Valid template must parse cleanly via workflow bash step: \(validRes.output)")
         XCTAssertEqual(validRes.output.trimmingCharacters(in: .whitespacesAndNewlines), "0000000000000000000000000000000000000000")
 
-        // Test with raw string containing adversarial quotes, newlines, and triple quotes (Data Injection Proof)
+        // 2. G1A-R3-02 Negative: Same SHA, but different target tag must FAIL closed
+        let resWrongTag = runStepWithData(templateData, tag: "v1.0.0-build6", version: "1.0.0", buildNum: "6")
+        XCTAssertEqual(resWrongTag.status, 1, "Mismatched target tag must fail closed with code 1")
+        XCTAssertTrue(resWrongTag.output.contains("does not match requested release tag"),
+                      "Error must report tag mismatch: \(resWrongTag.output)")
+
+        // 3. G1A-R3-02 Negative: Same SHA, but different bundle version must FAIL closed
+        let resWrongVer = runStepWithData(templateData, tag: "v1.0.0-build5", version: "1.0.1", buildNum: "5")
+        XCTAssertEqual(resWrongVer.status, 1, "Mismatched bundle version must fail closed with code 1")
+        XCTAssertTrue(resWrongVer.output.contains("does not match requested version"),
+                      "Error must report version mismatch: \(resWrongVer.output)")
+
+        // 4. G1A-R3-02 Negative: Same SHA, but different build number must FAIL closed
+        let resWrongBuild = runStepWithData(templateData, tag: "v1.0.0-build5", version: "1.0.0", buildNum: "6")
+        XCTAssertEqual(resWrongBuild.status, 1, "Mismatched build number must fail closed with code 1")
+        XCTAssertTrue(resWrongBuild.output.contains("does not match requested build number"),
+                      "Error must report build number mismatch: \(resWrongBuild.output)")
+
+        // 5. G1A-R3-02 Negative: Incompatible build_number type (boolean true instead of integer) must FAIL closed
+        var boolBuildObj = templateObj!
+        var boolBuildRT = releaseTarget!
+        boolBuildRT["build_number"] = true
+        boolBuildObj["release_target"] = boolBuildRT
+        let resBoolBuild = runStepWithData(try JSONSerialization.data(withJSONObject: boolBuildObj))
+        XCTAssertEqual(resBoolBuild.status, 1, "Boolean build_number must fail closed with code 1")
+        XCTAssertTrue(resBoolBuild.output.contains("must be an integer, got bool"),
+                      "Error must report non-integer type: \(resBoolBuild.output)")
+
+        // 6. G1A-R3-02 Negative: Incompatible build_number type (string instead of integer) must FAIL closed
+        var strBuildObj = templateObj!
+        var strBuildRT = releaseTarget!
+        strBuildRT["build_number"] = "5"
+        strBuildObj["release_target"] = strBuildRT
+        let resStrBuild = runStepWithData(try JSONSerialization.data(withJSONObject: strBuildObj))
+        XCTAssertEqual(resStrBuild.status, 1, "String build_number must fail closed with code 1")
+        XCTAssertTrue(resStrBuild.output.contains("must be an integer, got str"),
+                      "Error must report non-integer type: \(resStrBuild.output)")
+
+        // 7. Test with raw string containing adversarial quotes, newlines, and triple quotes (Data Injection Proof)
         var injectedObj = templateObj!
         var injectedAM = approvalMetadata!
         injectedAM["review_reference"] = "Malicious review ''''' \"\"\" ; os.system('echo pwned') # /*"
@@ -2696,7 +2768,7 @@ echo "${APPROVED_SHA}"
         let injectedRes = runStepWithData(injectedData)
         XCTAssertEqual(injectedRes.status, 0, "Data injection attempt in string field must be safely handled: \(injectedRes.output)")
 
-        // Negative Case A: Non-40 char commit SHA
+        // 8. Negative Case A: Non-40 char commit SHA
         var badSHAObj = templateObj!
         var badSHART = releaseTarget!
         badSHART["approved_commit_sha"] = "short_sha"
@@ -2704,15 +2776,15 @@ echo "${APPROVED_SHA}"
         let resBadSHA = runStepWithData(try JSONSerialization.data(withJSONObject: badSHAObj))
         XCTAssertEqual(resBadSHA.status, 1, "Non-40 char commit SHA must fail with code 1")
 
-        // Negative Case B: Build number <= 3
+        // 9. Negative Case B: Build number <= 3
         var badBuildObj = templateObj!
         var badBuildRT = releaseTarget!
         badBuildRT["build_number"] = 3
         badBuildObj["release_target"] = badBuildRT
-        let resBadBuild = runStepWithData(try JSONSerialization.data(withJSONObject: badBuildObj))
+        let resBadBuild = runStepWithData(try JSONSerialization.data(withJSONObject: badBuildObj), tag: "v1.0.0-build3", version: "1.0.0", buildNum: "3")
         XCTAssertEqual(resBadBuild.status, 1, "Build number <= 3 must fail with code 1")
 
-        // Negative Case C: Scope not NODEPOCKET_BTCB2_ONLY
+        // 10. Negative Case C: Scope not NODEPOCKET_BTCB2_ONLY
         var badScopeObj = templateObj!
         var badScopeAM = approvalMetadata!
         badScopeAM["authorized_scope"] = "OTHER_PROJECT"
@@ -2720,7 +2792,7 @@ echo "${APPROVED_SHA}"
         let resBadScope = runStepWithData(try JSONSerialization.data(withJSONObject: badScopeObj))
         XCTAssertEqual(resBadScope.status, 1, "Unauthorized scope must fail with code 1")
 
-        // Negative Case D: Spending not disarmed ($0.00)
+        // 11. Negative Case D: Spending not disarmed ($0.00)
         var badSpendObj = templateObj!
         var badSpendSA = securityAttestation!
         badSpendSA["spending_authority_disarmed"] = false
@@ -2728,7 +2800,7 @@ echo "${APPROVED_SHA}"
         let resBadSpend = runStepWithData(try JSONSerialization.data(withJSONObject: badSpendObj))
         XCTAssertEqual(resBadSpend.status, 1, "Non-disarmed spending must fail with code 1")
 
-        // Negative Case E: Malformed JSON syntax (exits 2 from python json.load)
+        // 12. Negative Case E: Malformed JSON syntax (exits 2 from python json.load)
         let malformedData = Data("{\"unclosed_json: true".utf8)
         let resMalformed = runStepWithData(malformedData)
         XCTAssertEqual(resMalformed.status, 2, "Malformed JSON must fail fail-closed with code 2")
