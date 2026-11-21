@@ -109,6 +109,8 @@ public final class AppState: ObservableObject {
         let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.walletInventory = inv
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
+        // Unlock transaction broadcast for live wallet operation in the native app
+        self.nodeManager.rpcClient.isBroadcastRestricted = false
         self.accountPurgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoord,
             walletInventory: inv,
