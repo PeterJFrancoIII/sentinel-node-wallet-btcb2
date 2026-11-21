@@ -153,9 +153,10 @@ To eliminate collision errors, avoid re-signing verified binaries, and ensure im
 5. **Privileged Signing & Notarization (Phase A):**
    - Checks out repository at immutable `verified_commit_sha` (NOT a mutable tag).
    - Downloads `unsigned-app-bundle.tar.gz` and verifies SHA-256 matches Phase 0 manifest.
-   - Extracts bundle safely into `dist/`.
+   - Inspects archive members before extraction, asserting no absolute paths, no directory traversal (`..`), and no escaping symlinks/hardlinks.
+   - Extracts verified bundle safely into `dist/`.
    - Executes `bash scripts/build_production_dmg.sh --sign-only` (skipping compilation entirely while credentials exist in memory).
-   - Signs DMG with Sparkle EdDSA key using `scripts/sign_appcast_enclosure.sh` with verified tool provenance.
+   - Signs DMG with Sparkle EdDSA key using `scripts/sign_appcast_enclosure.sh` requiring mandatory `--trusted-tool-hash` matching pinned Sparkle 2.10.1 `sign_update` binary hash (`43c249771bafc3aa581228abae00731a012d324691b8292860896635050be76b`).
    - Emits `RELEASE_ATTESTATION.json` binding `approved_commit_sha`.
    - Creates GitHub Release as a **Draft** via `gh release create --draft`.
    - Ephemeral keychain and Notary credentials are deleted.

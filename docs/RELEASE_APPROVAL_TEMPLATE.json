@@ -1,5 +1,5 @@
 {
-  "NOTE": "This template illustrates the field structure for docs/RELEASE_APPROVAL.json required on protected origin/main under Policy B. This template file itself does NOT constitute an approved release record.",
+  "$comment": "This template illustrates the field structure for docs/RELEASE_APPROVAL.json required on protected origin/main under Policy B. This template file itself does NOT constitute an approved release record.",
   "schema_version": "1.0.0",
   "release_target": {
     "target_tag": "v1.0.0-build5",

@@ -2533,7 +2533,7 @@ exit 0
                       "Positive run must log CDN match: \(positiveRes.output)")
     }
 
-    // MARK: - Option 1 G1-A Release Trust Boundary Tests (WO-122 / Cases 36-39)
+    // MARK: - Option 1 G1-A Release Trust Boundary Tests (WO-122 / Cases 36-39 Rework)
 
     func testReleaseApprovalSchemaAndPolicyBProofCase36() throws {
         var currentURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
@@ -2572,98 +2572,138 @@ exit 0
         XCTAssertEqual(securityAttestation?["authorized_spending_limit_btc"] as? String, "0.00")
         XCTAssertEqual(securityAttestation?["restricted_rpc_methods_blocked"] as? Int, 12)
 
-        // 2. Python validation script against schema
         let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case36-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempBase) }
 
-        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil) -> (status: Int32, output: String) {
+        func runCmdWithStdin(_ exe: String, _ args: [String], input: Data? = nil, cwd: URL? = nil) -> (status: Int32, output: String) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: exe)
             proc.arguments = args
             if let cwd = cwd { proc.currentDirectoryURL = cwd }
-            let pipe = Pipe()
-            proc.standardOutput = pipe
-            proc.standardError = pipe
+            let stdinPipe = Pipe()
+            let stdoutPipe = Pipe()
+            proc.standardInput = stdinPipe
+            proc.standardOutput = stdoutPipe
+            proc.standardError = stdoutPipe
             try? proc.run()
+            if let input = input {
+                stdinPipe.fileHandleForWriting.write(input)
+                try? stdinPipe.fileHandleForWriting.close()
+            }
             proc.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
             return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         }
 
-        // 3. Test Negative Cases via python validator
-        let pyValidator = """
+        // 2. Test exact stdin streaming parser used in workflow (P0 Data Injection Resistance)
+        let workflowParserScript = """
 import json, re, sys
 
-with open(sys.argv[1]) as f:
-    schema = json.load(f)
-with open(sys.argv[2]) as f:
-    doc = json.load(f)
+try:
+    data = json.load(sys.stdin)
+except Exception as e:
+    print(f"ERROR: Failed to parse origin/main:docs/RELEASE_APPROVAL.json as JSON: {e}", file=sys.stderr)
+    sys.exit(2)
 
-# Strict manual structural validation
-if doc.get("schema_version") != "1.0.0":
-    sys.exit(10)
-rt = doc.get("release_target", {})
-if not re.match(r"^v[0-9]+\\.[0-9]+\\.[0-9]+-build[0-9]+$", rt.get("target_tag", "")):
-    sys.exit(11)
-if not re.match(r"^[0-9a-f]{40}$", rt.get("approved_commit_sha", "")):
-    sys.exit(12)
-if rt.get("build_number", 0) <= 3:
-    sys.exit(13)
-am = doc.get("approval_metadata", {})
+if data.get("schema_version") != "1.0.0":
+    print("ERROR: Unsupported schema_version in approval record", file=sys.stderr)
+    sys.exit(1)
+
+rt = data.get("release_target", {})
+sha = rt.get("approved_commit_sha", "").strip().lower()
+tag = rt.get("target_tag", "").strip()
+build_num = rt.get("build_number", 0)
+
+if not re.match(r"^[0-9a-f]{40}$", sha):
+    print("ERROR: approved_commit_sha must be a 40-char lowercase hex string", file=sys.stderr)
+    sys.exit(1)
+
+if not re.match(r"^v[0-9]+\\.[0-9]+\\.[0-9]+-build[0-9]+$", tag):
+    print("ERROR: target_tag does not match required format", file=sys.stderr)
+    sys.exit(1)
+
+if build_num <= 3:
+    print("ERROR: build_number must be > 3", file=sys.stderr)
+    sys.exit(1)
+
+am = data.get("approval_metadata", {})
 if am.get("authorized_scope") != "NODEPOCKET_BTCB2_ONLY":
-    sys.exit(14)
-sa = doc.get("security_attestation", {})
-if sa.get("spending_authority_disarmed") is not True or sa.get("authorized_spending_limit_btc") != "0.00" or sa.get("restricted_rpc_methods_blocked") != 12:
-    sys.exit(15)
-sys.exit(0)
-"""
-        let valScript = tempBase.appendingPathComponent("validate.py")
-        try pyValidator.write(to: valScript, atomically: true, encoding: .utf8)
+    print("ERROR: authorized_scope must be NODEPOCKET_BTCB2_ONLY", file=sys.stderr)
+    sys.exit(1)
 
-        // Valid template must exit 0
-        let resValid = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, templateURL.path])
-        XCTAssertEqual(resValid.status, 0, "Valid template must pass validation: \(resValid.output)")
+if am.get("approval_policy") != "Policy B: Independent Approved Release Commit on Protected Main":
+    print("ERROR: approval_policy mismatch", file=sys.stderr)
+    sys.exit(1)
+
+sa = data.get("security_attestation", {})
+if sa.get("spending_authority_disarmed") is not True:
+    print("ERROR: spending_authority_disarmed must be true", file=sys.stderr)
+    sys.exit(1)
+
+if sa.get("authorized_spending_limit_btc") != "0.00":
+    print("ERROR: authorized_spending_limit_btc must be '0.00'", file=sys.stderr)
+    sys.exit(1)
+
+if sa.get("restricted_rpc_methods_blocked") != 12:
+    print("ERROR: restricted_rpc_methods_blocked must be 12", file=sys.stderr)
+    sys.exit(1)
+
+print(sha)
+"""
+        let parserScriptFile = tempBase.appendingPathComponent("parser.py")
+        try workflowParserScript.write(to: parserScriptFile, atomically: true, encoding: .utf8)
+
+        // Valid template must pass through stdin without interpolation
+        let validRes = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: templateData)
+        XCTAssertEqual(validRes.status, 0, "Valid template must parse cleanly from stdin: \(validRes.output)")
+        XCTAssertEqual(validRes.output.trimmingCharacters(in: .whitespacesAndNewlines), "0000000000000000000000000000000000000000")
+
+        // Test with raw string containing adversarial quotes, newlines, and triple quotes (Data Injection Proof)
+        var injectedObj = templateObj!
+        var injectedAM = approvalMetadata!
+        injectedAM["review_reference"] = "Malicious review ''''' \"\"\" ; os.system('echo pwned') # /*"
+        injectedObj["approval_metadata"] = injectedAM
+        let injectedData = try JSONSerialization.data(withJSONObject: injectedObj)
+        let injectedRes = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: injectedData)
+        XCTAssertEqual(injectedRes.status, 0, "Data injection attempt in string field must be safely handled: \(injectedRes.output)")
 
         // Negative Case A: Non-40 char commit SHA
         var badSHAObj = templateObj!
         var badSHART = releaseTarget!
         badSHART["approved_commit_sha"] = "short_sha"
         badSHAObj["release_target"] = badSHART
-        let badSHAFile = tempBase.appendingPathComponent("bad_sha.json")
-        try JSONSerialization.data(withJSONObject: badSHAObj).write(to: badSHAFile)
-        let resBadSHA = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badSHAFile.path])
-        XCTAssertEqual(resBadSHA.status, 12, "Non-40 char commit SHA must fail with code 12")
+        let resBadSHA = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badSHAObj))
+        XCTAssertEqual(resBadSHA.status, 1, "Non-40 char commit SHA must fail with code 1")
 
         // Negative Case B: Build number <= 3
         var badBuildObj = templateObj!
         var badBuildRT = releaseTarget!
         badBuildRT["build_number"] = 3
         badBuildObj["release_target"] = badBuildRT
-        let badBuildFile = tempBase.appendingPathComponent("bad_build.json")
-        try JSONSerialization.data(withJSONObject: badBuildObj).write(to: badBuildFile)
-        let resBadBuild = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badBuildFile.path])
-        XCTAssertEqual(resBadBuild.status, 13, "Build number <= 3 must fail with code 13")
+        let resBadBuild = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badBuildObj))
+        XCTAssertEqual(resBadBuild.status, 1, "Build number <= 3 must fail with code 1")
 
         // Negative Case C: Scope not NODEPOCKET_BTCB2_ONLY
         var badScopeObj = templateObj!
         var badScopeAM = approvalMetadata!
         badScopeAM["authorized_scope"] = "OTHER_PROJECT"
         badScopeObj["approval_metadata"] = badScopeAM
-        let badScopeFile = tempBase.appendingPathComponent("bad_scope.json")
-        try JSONSerialization.data(withJSONObject: badScopeObj).write(to: badScopeFile)
-        let resBadScope = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badScopeFile.path])
-        XCTAssertEqual(resBadScope.status, 14, "Unauthorized scope must fail with code 14")
+        let resBadScope = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badScopeObj))
+        XCTAssertEqual(resBadScope.status, 1, "Unauthorized scope must fail with code 1")
 
         // Negative Case D: Spending not disarmed ($0.00)
         var badSpendObj = templateObj!
         var badSpendSA = securityAttestation!
         badSpendSA["spending_authority_disarmed"] = false
         badSpendObj["security_attestation"] = badSpendSA
-        let badSpendFile = tempBase.appendingPathComponent("bad_spend.json")
-        try JSONSerialization.data(withJSONObject: badSpendObj).write(to: badSpendFile)
-        let resBadSpend = runCmd("/usr/bin/python3", [valScript.path, schemaURL.path, badSpendFile.path])
-        XCTAssertEqual(resBadSpend.status, 15, "Non-disarmed spending must fail with code 15")
+        let resBadSpend = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badSpendObj))
+        XCTAssertEqual(resBadSpend.status, 1, "Non-disarmed spending must fail with code 1")
+
+        // Negative Case E: Malformed JSON syntax
+        let malformedData = Data("{\"unclosed_json: true".utf8)
+        let resMalformed = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: malformedData)
+        XCTAssertEqual(resMalformed.status, 2, "Malformed JSON must fail with code 2")
     }
 
     func testWorkflowImmutableSHAHandoffAndTagMovementCase37() throws {
@@ -2724,6 +2764,12 @@ sys.exit(0)
         XCTAssertEqual(checkedOutSHA, commitASHA, "Pinned checkout must remain at approved commit SHA")
         let contentAtA = try String(contentsOf: fileA, encoding: .utf8)
         XCTAssertEqual(contentAtA, "Commit A", "Checked out content must match approved commit")
+
+        // Delete tag entirely; checkout by SHA still functions
+        _ = runCmd("/usr/bin/git", ["tag", "-d", "v1.0.0-build5"], cwd: repoDir)
+        _ = runCmd("/usr/bin/git", ["checkout", commitASHA], cwd: repoDir)
+        let postDeleteSHA = runCmd("/usr/bin/git", ["rev-parse", "HEAD"], cwd: repoDir).output.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertEqual(postDeleteSHA, commitASHA, "Checkout by verified SHA must succeed even if tag is deleted")
     }
 
     func testSignOnlyModeAndUnsignedBundleIntegrityCase38() throws {
@@ -2773,23 +2819,58 @@ sys.exit(0)
         XCTAssertTrue(resMissing.output.contains("Missing pre-built macOS app"),
                       "Output must indicate missing pre-built app: \(resMissing.output)")
 
-        // Test 2: Unsigned bundle archiving and SHA-256 integrity verification
-        let mockAppDir = tempBase.appendingPathComponent("Mock.app")
-        try FileManager.default.createDirectory(at: mockAppDir.appendingPathComponent("Contents"), withIntermediateDirectories: true)
-        try "test-binary".write(to: mockAppDir.appendingPathComponent("Contents/MockBinary"), atomically: true, encoding: .utf8)
+        // Test 2: Archive path traversal and malicious entry detection (P0 Tar Injection Defense)
+        let archiveValidatorScript = """
+import tarfile, sys
 
-        let archiveURL = tempBase.appendingPathComponent("unsigned-app-bundle.tar.gz")
-        _ = runCmd("/usr/bin/tar", ["-czf", archiveURL.path, "-C", tempBase.path, "Mock.app"])
-        XCTAssertTrue(FileManager.default.fileExists(atPath: archiveURL.path))
+archive_path = sys.argv[1]
+with tarfile.open(archive_path, "r:gz") as tar:
+    for member in tar.getmembers():
+        name = member.name
+        if name.startswith("._") or "/._" in name:
+            continue
+        if name.startswith("/") or name.startswith("\\\\"):
+            print(f"ERROR: Archive contains absolute path: {name}", file=sys.stderr)
+            sys.exit(1)
+        parts = name.replace("\\\\", "/").split("/")
+        if ".." in parts:
+            print(f"ERROR: Archive contains directory traversal: {name}", file=sys.stderr)
+            sys.exit(1)
+        if not (name == "Sentinel Node Wallet.app" or name.startswith("Sentinel Node Wallet.app/")):
+            print(f"ERROR: Archive contains unauthorized root entry: {name}", file=sys.stderr)
+            sys.exit(1)
+        if member.issym() or member.islnk():
+            link_target = member.linkname
+            if link_target.startswith("/") or ".." in link_target.split("/"):
+                print(f"ERROR: Archive contains escaping link: {name} -> {link_target}", file=sys.stderr)
+                sys.exit(1)
+print("OK")
+sys.exit(0)
+"""
+        let valPy = tempBase.appendingPathComponent("val_tar.py")
+        try archiveValidatorScript.write(to: valPy, atomically: true, encoding: .utf8)
 
-        let archiveData = try Data(contentsOf: archiveURL)
-        let originalSHA = SHA256.hash(data: archiveData).map { String(format: "%02x", $0) }.joined()
+        // Build valid archive
+        let validAppDir = tempBase.appendingPathComponent("Sentinel Node Wallet.app")
+        try FileManager.default.createDirectory(at: validAppDir.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        try "valid".write(to: validAppDir.appendingPathComponent("Contents/Valid"), atomically: true, encoding: .utf8)
+        let validTar = tempBase.appendingPathComponent("valid.tar.gz")
+        _ = runCmd("/usr/bin/tar", ["-czf", validTar.path, "-C", tempBase.path, "Sentinel Node Wallet.app"], env: ["COPYFILE_DISABLE": "1"])
 
-        // Tamper with archive
-        var tamperedData = archiveData
-        tamperedData[tamperedData.count - 1] ^= 0xFF
-        let tamperedSHA = SHA256.hash(data: tamperedData).map { String(format: "%02x", $0) }.joined()
-        XCTAssertNotEqual(originalSHA, tamperedSHA, "Corrupted archive must produce mismatched SHA-256")
+        let resValTar = runCmd("/usr/bin/python3", [valPy.path, validTar.path])
+        XCTAssertEqual(resValTar.status, 0, "Valid archive must pass tar validation: \(resValTar.output)")
+
+        // Build malicious archive with unauthorized root entry
+        let evilDir = tempBase.appendingPathComponent("EvilRoot")
+        try FileManager.default.createDirectory(at: evilDir, withIntermediateDirectories: true)
+        try "evil".write(to: evilDir.appendingPathComponent("evil.sh"), atomically: true, encoding: .utf8)
+        let evilTar = tempBase.appendingPathComponent("evil.tar.gz")
+        _ = runCmd("/usr/bin/tar", ["-czf", evilTar.path, "-C", tempBase.path, "EvilRoot"], env: ["COPYFILE_DISABLE": "1"])
+
+        let resEvilTar = runCmd("/usr/bin/python3", [valPy.path, evilTar.path])
+        XCTAssertEqual(resEvilTar.status, 1, "Archive with unauthorized root entry must fail tar validation")
+        XCTAssertTrue(resEvilTar.output.contains("unauthorized root entry"),
+                      "Error must report unauthorized root entry: \(resEvilTar.output)")
     }
 
     func testTrustedToolAttestationAndSignUpdateHashCase39() throws {
@@ -2843,7 +2924,17 @@ echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
         let actualToolSHA = SHA256.hash(data: toolData).map { String(format: "%02x", $0) }.joined()
         let wrongToolSHA = String(repeating: "0", count: 64)
 
-        // Test A: Mismatched tool hash fails closed before execution
+        // Test A: Calling sign with --require-trusted-tool-hash WITHOUT --trusted-tool-hash must FAIL CLOSED immediately (P0 Invariant)
+        let resNoHash = runCmd("/bin/bash", [
+            scriptPath, "sign", dummyArchive.path,
+            "--sign-update-bin", mockSignUpdate.path,
+            "--require-trusted-tool-hash"
+        ])
+        XCTAssertNotEqual(resNoHash.status, 0, "Signing without trusted tool hash must fail closed")
+        XCTAssertTrue(resNoHash.output.contains("Mandatory --trusted-tool-hash is missing"),
+                      "Output must indicate missing mandatory tool hash: \(resNoHash.output)")
+
+        // Test B: Mismatched tool hash fails closed before execution
         let resMismatch = runCmd("/bin/bash", [
             scriptPath, "sign", dummyArchive.path,
             "--sign-update-bin", mockSignUpdate.path,
@@ -2853,7 +2944,7 @@ echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
         XCTAssertTrue(resMismatch.output.contains("does not match trusted tool hash"),
                       "Output must report hash mismatch: \(resMismatch.output)")
 
-        // Test B: Matching tool hash succeeds
+        // Test C: Matching tool hash succeeds
         let resMatch = runCmd("/bin/bash", [
             scriptPath, "sign", dummyArchive.path,
             "--sign-update-bin", mockSignUpdate.path,

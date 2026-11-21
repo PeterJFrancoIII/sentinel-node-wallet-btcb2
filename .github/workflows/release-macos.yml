@@ -122,38 +122,65 @@ jobs:
             exit 1
           fi
 
-          APPROVAL_JSON="$(git show origin/main:docs/RELEASE_APPROVAL.json)"
-          APPROVED_SHA="$(python3 -c "
-          import json, sys
-          try:
-              data = json.loads('''${APPROVAL_JSON}''')
-              sha = data.get('release_target', {}).get('approved_commit_sha', '').strip().lower()
-              tag = data.get('release_target', {}).get('target_tag', '').strip()
-              scope = data.get('approval_metadata', {}).get('authorized_scope', '').strip()
-              disarmed = data.get('security_attestation', {}).get('spending_authority_disarmed')
-              limit = data.get('security_attestation', {}).get('authorized_spending_limit_btc', '').strip()
-              rpcs = data.get('security_attestation', {}).get('restricted_rpc_methods_blocked')
+          # Stream origin/main:docs/RELEASE_APPROVAL.json via stdin as pure data (O1-G1A-01 P0 Rework)
+          APPROVED_SHA="$(git show origin/main:docs/RELEASE_APPROVAL.json | python3 - <<'PY'
+          import json, re, sys
 
-              if len(sha) != 40:
-                  print(f'ERROR: Invalid approved_commit_sha length: {len(sha)}', file=sys.stderr)
-                  sys.exit(1)
-              if tag != '${INPUT_TAG}':
-                  print(f'ERROR: Approval target_tag ({tag}) does not match input tag (${INPUT_TAG})', file=sys.stderr)
-                  sys.exit(1)
-              if scope != 'NODEPOCKET_BTCB2_ONLY':
-                  print(f'ERROR: Approval scope ({scope}) is not NODEPOCKET_BTCB2_ONLY', file=sys.stderr)
-                  sys.exit(1)
-              if disarmed is not True or limit != '0.00' or rpcs != 12:
-                  print('ERROR: Security attestation does not confirm $0.00 disarmed spend and 12 blocked RPCs', file=sys.stderr)
-                  sys.exit(1)
-              print(sha)
+          try:
+              data = json.load(sys.stdin)
           except Exception as e:
-              print(f'ERROR: Malformed origin/main:docs/RELEASE_APPROVAL.json: {e}', file=sys.stderr)
+              print(f"ERROR: Failed to parse origin/main:docs/RELEASE_APPROVAL.json as JSON: {e}", file=sys.stderr)
               sys.exit(2)
-          ")"
+
+          if data.get("schema_version") != "1.0.0":
+              print("ERROR: Unsupported schema_version in approval record", file=sys.stderr)
+              sys.exit(1)
+
+          rt = data.get("release_target", {})
+          sha = rt.get("approved_commit_sha", "").strip().lower()
+          tag = rt.get("target_tag", "").strip()
+          build_num = rt.get("build_number", 0)
+
+          if not re.match(r"^[0-9a-f]{40}$", sha):
+              print("ERROR: approved_commit_sha must be a 40-char lowercase hex string", file=sys.stderr)
+              sys.exit(1)
+
+          if not re.match(r"^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$", tag):
+              print("ERROR: target_tag does not match required format", file=sys.stderr)
+              sys.exit(1)
+
+          if build_num <= 3:
+              print("ERROR: build_number must be > 3", file=sys.stderr)
+              sys.exit(1)
+
+          am = data.get("approval_metadata", {})
+          if am.get("authorized_scope") != "NODEPOCKET_BTCB2_ONLY":
+              print("ERROR: authorized_scope must be NODEPOCKET_BTCB2_ONLY", file=sys.stderr)
+              sys.exit(1)
+
+          if am.get("approval_policy") != "Policy B: Independent Approved Release Commit on Protected Main":
+              print("ERROR: approval_policy mismatch", file=sys.stderr)
+              sys.exit(1)
+
+          sa = data.get("security_attestation", {})
+          if sa.get("spending_authority_disarmed") is not True:
+              print("ERROR: spending_authority_disarmed must be true", file=sys.stderr)
+              sys.exit(1)
+
+          if sa.get("authorized_spending_limit_btc") != "0.00":
+              print("ERROR: authorized_spending_limit_btc must be '0.00'", file=sys.stderr)
+              sys.exit(1)
+
+          if sa.get("restricted_rpc_methods_blocked") != 12:
+              print("ERROR: restricted_rpc_methods_blocked must be 12", file=sys.stderr)
+              sys.exit(1)
+
+          print(sha)
+          PY
+          )"
 
           if [ $? -ne 0 ] || [ -z "${APPROVED_SHA}" ]; then
-            echo "ERROR: Failed to parse valid approved_commit_sha from origin/main:docs/RELEASE_APPROVAL.json." >&2
+            echo "ERROR: Failed to validate origin/main:docs/RELEASE_APPROVAL.json." >&2
             exit 1
           fi
 
@@ -201,14 +228,14 @@ jobs:
       - name: Cache & verify official Bitcoin Knots binaries
         run: bash scripts/fetch-verify-knots.sh
 
-      # Gating Stage 6: Unprivileged Phase 0 Compilation & Bundle Packaging (O1-G1A-03)
+      # Gating Stage 6: Unprivileged Phase 0 Compilation & Bundle Packaging (O1-G1A-03, zero secrets)
       - name: Build Unsigned Application Bundle (Phase 0)
         id: package_unsigned_app
         env:
           SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
           SENTINEL_SHORT_VERSION: "${{ steps.validate_tag.outputs.short_version }}"
           SENTINEL_BUILD_NUMBER: "${{ steps.validate_tag.outputs.build_number }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY }}"
           SENTINEL_REQUIRE_SPARKLE_KEY: "1"
         run: |
           echo "Compiling and packaging unprivileged unsigned application bundle..."
@@ -220,7 +247,7 @@ jobs:
             exit 1
           fi
 
-          tar -czf dist/unsigned-app-bundle.tar.gz -C dist "Sentinel Node Wallet.app"
+          COPYFILE_DISABLE=1 tar -czf dist/unsigned-app-bundle.tar.gz -C dist "Sentinel Node Wallet.app"
           BUNDLE_SHA="$(shasum -a 256 dist/unsigned-app-bundle.tar.gz | awk '{print $1}')"
           echo "app_bundle_sha256=${BUNDLE_SHA}" >> "$GITHUB_OUTPUT"
           echo "✓ Unsigned app bundle created: dist/unsigned-app-bundle.tar.gz (SHA-256: ${BUNDLE_SHA})"
@@ -254,14 +281,14 @@ jobs:
           ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
           fetch-depth: 0
 
-      # Download and verify unprivileged unsigned bundle (O1-G1A-03)
+      # Pre-Credentials Artifact Verification & Safe Extraction (O1-G1A-02/03 P0 Rework)
       - name: Download Unsigned App Bundle Artifact
         uses: actions/download-artifact@v4
         with:
           name: unsigned-app-bundle
           path: dist
 
-      - name: Verify and Extract Unsigned App Bundle Artifact
+      - name: Verify and Safely Extract Unsigned App Bundle Artifact
         env:
           EXPECTED_SHA: "${{ needs.unprivileged-qualification.outputs.app_bundle_sha256 }}"
         run: |
@@ -277,6 +304,31 @@ jobs:
             exit 1
           fi
           echo "✓ Verified artifact SHA-256 matches Phase 0 manifest: ${ACTUAL_SHA}"
+
+          # Inspect archive members to prevent path traversal or link escapes
+          python3 - "${ARCHIVE_PATH}" <<'PY' || { echo "ERROR: Malicious or invalid archive entries detected." >&2; exit 1; }
+          import tarfile, sys
+          archive_path = sys.argv[1]
+          with tarfile.open(archive_path, "r:gz") as tar:
+              for member in tar.getmembers():
+                  name = member.name
+                  if name.startswith("/") or name.startswith("\\"):
+                      print(f"ERROR: Archive contains absolute path: {name}", file=sys.stderr)
+                      sys.exit(1)
+                  parts = name.replace("\\", "/").split("/")
+                  if ".." in parts:
+                      print(f"ERROR: Archive contains directory traversal: {name}", file=sys.stderr)
+                      sys.exit(1)
+                  if not (name == "Sentinel Node Wallet.app" or name.startswith("Sentinel Node Wallet.app/")):
+                      print(f"ERROR: Archive contains unauthorized root entry: {name}", file=sys.stderr)
+                      sys.exit(1)
+                  if member.issym() or member.islnk():
+                      link_target = member.linkname
+                      if link_target.startswith("/") or ".." in link_target.split("/"):
+                          print(f"ERROR: Archive contains escaping link: {name} -> {link_target}", file=sys.stderr)
+                          sys.exit(1)
+          print("✓ Archive entries inspected and verified safe: zero traversal or absolute path escapes.")
+          PY
 
           tar -xzf "${ARCHIVE_PATH}" -C dist/
           test -d "dist/Sentinel Node Wallet.app" || { echo "ERROR: Extraction failed." >&2; exit 1; }
@@ -313,7 +365,6 @@ jobs:
             exit 1
           fi
 
-          # Strict validation of SPARKLE_PUB_KEY format (valid Base64 decoding to 32 bytes, WO-122-R4)
           python3 - "${SPARKLE_PUB_KEY}" <<'PY' || exit 1
           import base64, sys
           k = sys.argv[1].strip()
@@ -378,13 +429,17 @@ jobs:
         run: |
           bash scripts/build_production_dmg.sh --sign-only
 
-      # Sparkle Signing & Appcast Enclosure Generation
-      - name: Sign DMG with Sparkle EdDSA Key
+      # Sparkle Signing & Appcast Enclosure Generation with Verified Tool Provenance (O1-G1A-03 P0 Rework)
+      - name: Sign DMG with Sparkle EdDSA Key (Verified Tool Provenance)
         env:
           SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
+          SPARKLE_TOOL_HASH: "${{ vars.SPARKLE_SIGN_UPDATE_SHA256 || '43c249771bafc3aa581228abae00731a012d324691b8292860896635050be76b' }}"
         run: |
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
-          bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" --signature-file-output dist/SPARKLE_SIGNATURE.base64 > dist/SPARKLE_ENCLOSURE.txt
+          bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" \
+            --require-trusted-tool-hash \
+            --trusted-tool-hash "${SPARKLE_TOOL_HASH}" \
+            --signature-file-output dist/SPARKLE_SIGNATURE.base64 > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
           test -s dist/SPARKLE_SIGNATURE.base64 || { echo "ERROR: dist/SPARKLE_SIGNATURE.base64 is missing or empty." >&2; exit 1; }
 
@@ -414,7 +469,6 @@ jobs:
           fi
           ED_SIG="$(tr -d '\r\n ' < dist/SPARKLE_SIGNATURE.base64)"
 
-          # Pre-release cryptographic verification of EdDSA signature against DMG bytes (WO-122-R3)
           python3 - "${SPARKLE_PUBLIC_ED_KEY}" "${ED_SIG}" "${DMG_FILE}" <<'PY' || exit 1
           import base64, sys, subprocess
 
@@ -459,7 +513,6 @@ jobs:
           print("✓ Pre-release Swift CryptoKit Ed25519 signature verified successfully against exact notarized DMG bytes.")
           PY
 
-          # Verify notarization ticket is actually stapled before recording in attestation (WO-121)
           if xcrun stapler validate "${DMG_FILE}" >/dev/null 2>&1; then
             STAPLED_VAL="True"
           else

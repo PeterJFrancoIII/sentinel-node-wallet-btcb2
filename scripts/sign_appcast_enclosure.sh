@@ -14,7 +14,7 @@ fi
 usage() {
     cat <<EOF
 Usage:
-  $0 sign <archive-file> [--key-file <key>] [--signature-file-output <file>] [--signature-only] [--trusted-tool-hash <sha256>] [--sign-update-bin <path>]
+  $0 sign <archive-file> [--require-trusted-tool-hash] [--trusted-tool-hash <sha256>] [--key-file <key>] [--signature-file-output <file>] [--signature-only] [--sign-update-bin <path>]
   $0 verify <archive-file> <ed-signature> [--trusted-tool-hash <sha256>] [--sign-update-bin <path>]
 
 Commands:
@@ -38,6 +38,7 @@ ARCHIVE_SHA="$(shasum -a 256 "${ARCHIVE}" | awk '{print $1}')"
 KEY_ARGS=()
 SIG_OUTPUT_FILE=""
 SIG_ONLY=0
+REQUIRE_TOOL_HASH=0
 EXPECTED_TOOL_HASH="${SPARKLE_SIGN_UPDATE_EXPECTED_SHA256:-}"
 
 while [ $# -gt 0 ]; do
@@ -56,6 +57,10 @@ while [ $# -gt 0 ]; do
             SIG_ONLY=1
             shift
             ;;
+        --require-trusted-tool-hash)
+            REQUIRE_TOOL_HASH=1
+            shift
+            ;;
         --trusted-tool-hash)
             [ $# -ge 2 ] || { echo "ERROR: Missing argument for --trusted-tool-hash" >&2; exit 1; }
             EXPECTED_TOOL_HASH="$2"
@@ -67,7 +72,6 @@ while [ $# -gt 0 ]; do
             shift 2
             ;;
         *)
-            # For verify command, first extra argument might be the target signature
             if [ "${COMMAND}" = "verify" ] && [ -z "${TARGET_SIG:-}" ]; then
                 TARGET_SIG="$1"
                 shift
@@ -84,7 +88,13 @@ if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
     exit 1
 fi
 
-# Verify sign_update tool binary hash if expected hash is provided (WO-122-R4 / O1-G1A-03)
+# Fail closed if --require-trusted-tool-hash was specified but no hash was provided
+if [ "${REQUIRE_TOOL_HASH}" = "1" ] && [ -z "${EXPECTED_TOOL_HASH}" ]; then
+    echo "ERROR: Mandatory --trusted-tool-hash is missing. Privileged signing requires verified tool provenance." >&2
+    exit 1
+fi
+
+# Verify sign_update tool binary hash against expected trusted digest
 if [ -n "${EXPECTED_TOOL_HASH}" ]; then
     ACTUAL_TOOL_HASH="$(shasum -a 256 "${SIGN_UPDATE}" | awk '{print $1}')"
     if [ "${ACTUAL_TOOL_HASH}" != "${EXPECTED_TOOL_HASH}" ]; then
