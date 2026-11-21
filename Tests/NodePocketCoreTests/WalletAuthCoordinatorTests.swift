@@ -142,7 +142,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_migration_fault_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         // Write an initial registry record with legacy plaintext TOTP
         let initialRecord = AuthRegistryRecord(
@@ -186,11 +189,209 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertTrue(migratedRecord.isTotpInKeychain)
     }
 
+    func testTOTPKeychainUpdateFailureNeverDeletesExistingCredential() throws {
+        defer {
+            WalletAuthCoordinator.resetKeychainCallCounters()
+            WalletAuthCoordinator.clearTestOverrides()
+        }
+
+        let failureStatuses: [OSStatus] = [
+            errSecMissingEntitlement, // -34018
+            errSecAuthFailed,          // -25293
+            errSecInteractionNotAllowed, // -25308
+            errSecUserCanceled,        // -128
+            errSecItemNotFound,        // -25300
+            errSecIO                   // -36
+        ]
+
+        for failureStatus in failureStatuses {
+            WalletAuthCoordinator.resetKeychainCallCounters()
+            WalletAuthCoordinator.clearTestOverrides()
+
+            // SecItemAdd returns duplicate item, forcing an update
+            WalletAuthCoordinator.secItemAddHook = { _, _ in errSecDuplicateItem }
+            // SecItemUpdate fails with the simulated error
+            WalletAuthCoordinator.secItemUpdateHook = { _, _ in failureStatus }
+
+            XCTAssertThrowsError(try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: "operator_synthetic", secretBase32: "JBSWY3DPEHPK3PXP")) { error in
+                guard let authErr = error as? WalletAuthError,
+                      case .storageError(let msg) = authErr else {
+                    XCTFail("Expected storageError but got \(error)")
+                    return
+                }
+                XCTAssertTrue(msg.contains("\(failureStatus)"), "Error must contain status code: \(msg)")
+            }
+
+            // CRITICAL WO-22 ASSERTION: Exactly ZERO calls to SecItemDelete!
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.addItemCount, 1)
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.updateItemCount, 1)
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0,
+                           "Under NO circumstances may SecItemDelete be called when SecItemUpdate fails!")
+        }
+    }
+
+    func testTwoSyntheticLegacyOperatorsWithKeychainMigrationFailureAndRecovery() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_two_user_migration_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+            WalletAuthCoordinator.resetKeychainCallCounters()
+            WalletAuthCoordinator.clearTestOverrides()
+        }
+
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+
+        // 1. Create two synthetic operators with unmigrated legacy TOTP secrets
+        let salt1 = try WalletAuthCoordinator.randomBytes(count: 32)
+        let passHash1 = try WalletAuthCoordinator.deriveKey(password: "SyntheticPassword1!#", salt: salt1)
+        let record1 = AuthRegistryRecord(
+            username: "synthetic_alpha",
+            saltHex: salt1.map { String(format: "%02x", $0) }.joined(),
+            passwordHashHex: passHash1.map { String(format: "%02x", $0) }.joined(),
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: "JBSWY3DPEHPK3PXP",
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+
+        let salt2 = try WalletAuthCoordinator.randomBytes(count: 32)
+        let passHash2 = try WalletAuthCoordinator.deriveKey(password: "SyntheticPassword2!#", salt: salt2)
+        let record2 = AuthRegistryRecord(
+            username: "synthetic_beta",
+            saltHex: salt2.map { String(format: "%02x", $0) }.joined(),
+            passwordHashHex: passHash2.map { String(format: "%02x", $0) }.joined(),
+            isTotpInKeychain: false,
+            legacyTotpSecretBase32: "KRUGS4ZANFZSAYJA",
+            recoveryCodes: [],
+            legacyRecoveryCodeHashes: nil,
+            failedAttempts: 0,
+            lockedUntil: nil,
+            lastUsedTimeStep: 0,
+            version: 1
+        )
+
+        let records = ["synthetic_alpha": record1, "synthetic_beta": record2]
+        let multiRegistry = MultiAuthRegistry(version: 2, users: records)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        let data = try encoder.encode(multiRegistry)
+        try data.write(to: registryURL)
+
+        // 2. Stage A: Simulate missing entitlement (-34018)
+        WalletAuthCoordinator.resetKeychainCallCounters()
+        WalletAuthCoordinator.secItemAddHook = { _, _ in errSecDuplicateItem }
+        WalletAuthCoordinator.secItemUpdateHook = { _, _ in errSecMissingEntitlement }
+
+        _ = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Assert zero SecItemDelete was invoked across both operators
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0,
+                       "SecItemDelete must NOT be called on failed entitlement!")
+
+        // Read registry from disk and verify both accounts are completely intact
+        let diskDataA = try Data(contentsOf: registryURL)
+        let diskRecordsA = try JSONDecoder().decode(MultiAuthRegistry.self, from: diskDataA).users
+        XCTAssertEqual(diskRecordsA.count, 2)
+        XCTAssertEqual(diskRecordsA["synthetic_alpha"]?.legacyTotpSecretBase32, "JBSWY3DPEHPK3PXP")
+        XCTAssertFalse(diskRecordsA["synthetic_alpha"]?.isTotpInKeychain ?? true)
+        XCTAssertEqual(diskRecordsA["synthetic_alpha"]?.failedAttempts, 0)
+
+        XCTAssertEqual(diskRecordsA["synthetic_beta"]?.legacyTotpSecretBase32, "KRUGS4ZANFZSAYJA")
+        XCTAssertFalse(diskRecordsA["synthetic_beta"]?.isTotpInKeychain ?? true)
+        XCTAssertEqual(diskRecordsA["synthetic_beta"]?.failedAttempts, 0)
+
+        // 3. Stage B: Simulate compatible signed migration succeeding
+        WalletAuthCoordinator.resetKeychainCallCounters()
+        final class MockStorage: @unchecked Sendable {
+            private let lock = NSLock()
+            private var dict: [String: String] = [:]
+            func set(_ val: String, for k: String) { lock.lock(); defer { lock.unlock() }; dict[k] = val }
+            func get(_ k: String) -> String? { lock.lock(); defer { lock.unlock() }; return dict[k] }
+        }
+        let mockStorage = MockStorage()
+
+        WalletAuthCoordinator.secItemAddHook = { query, _ in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let data = q[kSecValueData as String] as? Data,
+                  let secret = String(data: data, encoding: .utf8) else {
+                return errSecParam
+            }
+            mockStorage.set(secret, for: account)
+            return errSecSuccess
+        }
+        WalletAuthCoordinator.secItemUpdateHook = { query, attrs in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let a = attrs as? [String: Any],
+                  let data = a[kSecValueData as String] as? Data,
+                  let secret = String(data: data, encoding: .utf8) else {
+                return errSecParam
+            }
+            mockStorage.set(secret, for: account)
+            return errSecSuccess
+        }
+        WalletAuthCoordinator.secItemCopyMatchingHook = { query, result in
+            guard let q = query as? [String: Any],
+                  let account = q[kSecAttrAccount as String] as? String,
+                  let secret = mockStorage.get(account) else {
+                return errSecItemNotFound
+            }
+            if let res = result {
+                let data = secret.data(using: .utf8)! as CFData
+                res.pointee = data
+            }
+            return errSecSuccess
+        }
+
+        // Re-initialize coordinator with working Keychain
+        let workingCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Verify on-disk registry now safely migrated both accounts
+        let diskDataB = try Data(contentsOf: registryURL)
+        let diskRecordsB = try JSONDecoder().decode(MultiAuthRegistry.self, from: diskDataB).users
+        XCTAssertEqual(diskRecordsB.count, 2)
+
+        XCTAssertNil(diskRecordsB["synthetic_alpha"]?.legacyTotpSecretBase32, "Alpha legacy secret safely removed")
+        XCTAssertTrue(diskRecordsB["synthetic_alpha"]?.isTotpInKeychain ?? false)
+        XCTAssertEqual(diskRecordsB["synthetic_alpha"]?.failedAttempts, 0)
+
+        XCTAssertNil(diskRecordsB["synthetic_beta"]?.legacyTotpSecretBase32, "Beta legacy secret safely removed")
+        XCTAssertTrue(diskRecordsB["synthetic_beta"]?.isTotpInKeychain ?? false)
+        XCTAssertEqual(diskRecordsB["synthetic_beta"]?.failedAttempts, 0)
+
+        // Both accounts can authenticate cleanly with their password and correct TOTP
+        let time = Date().timeIntervalSince1970
+        let codeAlpha = WalletAuthCoordinator.generateTOTP(secret: "JBSWY3DPEHPK3PXP", time: time)
+        let capAlpha = try await workingCoordinator.login(
+            username: "synthetic_alpha",
+            password: "SyntheticPassword1!#",
+            totpCode: codeAlpha
+        )
+        XCTAssertEqual(capAlpha.username, "synthetic_alpha")
+
+        let codeBeta = WalletAuthCoordinator.generateTOTP(secret: "KRUGS4ZANFZSAYJA", time: time)
+        let capBeta = try await workingCoordinator.login(
+            username: "synthetic_beta",
+            password: "SyntheticPassword2!#",
+            totpCode: codeBeta
+        )
+        XCTAssertEqual(capBeta.username, "synthetic_beta")
+    }
+
     func testLoginWithLegacyFallbackRequiresDeviceOwnerAndPurgesPlaintext() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_login_fallback_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let salt = try WalletAuthCoordinator.randomBytes(count: 32)
         let hash = try WalletAuthCoordinator.deriveKey(password: "MigratePassword123!@#", salt: salt)
@@ -259,7 +460,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_test_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         let isEnrolledInitially = await coordinator.isEnrolled
@@ -351,7 +555,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_rate_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator")
@@ -394,7 +601,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_rec_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -436,7 +646,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_auth_approval_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -524,7 +737,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_concurrent_login_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         WalletAuthCoordinator.clearTestOverrides()
         WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
@@ -599,7 +815,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_abort_prompt_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let salt = try WalletAuthCoordinator.randomBytes(count: 32)
         let hash = try WalletAuthCoordinator.deriveKey(password: "TestPassword123!@#", salt: salt)
@@ -672,7 +891,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_abort_recovery_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         WalletAuthCoordinator.clearTestOverrides()
         WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
@@ -734,7 +956,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_backup_auth_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -829,7 +1054,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_backup_overwrite_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
         await coordinator.setMockDeviceOwnerSuccessForTesting(true)
@@ -878,6 +1106,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             allowUnauthenticatedForTesting: false,
             initialWalletName: "protected_wallet"
         )
+        try await activeManager.walletInventory.setOwner(for: "protected_wallet", owner: "safety_operator")
         let existingFileURL = tempDir.appendingPathComponent("existing_backup.dat")
         let originalContent = "CRITICAL_ORIGINAL_BACKUP_DO_NOT_DESTROY"
         try originalContent.write(to: existingFileURL, atomically: true, encoding: .utf8)
@@ -1111,7 +1340,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_pipeline_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1148,6 +1380,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             totpCode: enrollCode,
             recoveryCodes: enrollment.recoveryCodes
         )
+        try await manager.walletInventory.setOwner(for: "e2e_wallet", owner: "operator_e2e")
 
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,
@@ -1198,7 +1431,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_rpc_fail_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1235,6 +1471,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             totpCode: enrollCode,
             recoveryCodes: enrollment.recoveryCodes
         )
+        try await manager.walletInventory.setOwner(for: "fail_wallet", owner: "operator_fail")
 
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,
@@ -1276,7 +1513,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_empty_staged_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1313,6 +1553,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             totpCode: enrollCode,
             recoveryCodes: enrollment.recoveryCodes
         )
+        try await manager.walletInventory.setOwner(for: "empty_wallet", owner: "operator_empty")
 
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,
@@ -1351,7 +1592,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
     func testPurgeStaleStagingDirectoriesRemovesOldSessions() async throws {
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_purge_stale_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let stagingDir = tempDir.appendingPathComponent("staging")
         try FileManager.default.createDirectory(at: stagingDir, withIntermediateDirectories: true)
@@ -1390,7 +1634,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_bio_autofill_\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: tempDir) }
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
 
         let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
 
@@ -1430,6 +1677,281 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertEqual(creds.password, "BioSecurePassword123!@#", "Operator password must be retrieved from Keychain upon successful biometric auth")
         XCTAssertNotNil(creds.totpCode, "2FA TOTP code must be generated from Keychain upon successful biometric auth")
         XCTAssertEqual(creds.totpCode?.count, 6)
+    }
+
+    func testInvalidTOTPDoesNotLeakCredentialOracle() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_totp_oracle_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "totp_operator")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        _ = try await coordinator.enroll(
+            username: "totp_operator",
+            password: "CorrectPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Valid password + wrong TOTP must throw generic .invalidCredentials to avoid credential oracle
+        do {
+            _ = try await coordinator.login(
+                username: "totp_operator",
+                password: "CorrectPassword123!@#",
+                totpCode: "999999"
+            )
+            XCTFail("Wrong TOTP must fail")
+        } catch let err as WalletAuthError {
+            XCTAssertEqual(err, .invalidCredentials, "Mismatched TOTP code must throw generic .invalidCredentials to prevent credential oracle leaking password validity")
+        }
+    }
+
+    func testTOTPWhitespaceAndHyphenNormalization() {
+        let secret = "JBSWY3DPEHPK3PXP"
+        let now = Date().timeIntervalSince1970
+        let cleanCode = WalletAuthCoordinator.generateTOTP(secret: secret, time: now)
+
+        let first3 = String(cleanCode.prefix(3))
+        let last3 = String(cleanCode.suffix(3))
+
+        let spaced = "\(first3) \(last3)"
+        let hyphenated = "\(first3)-\(last3)"
+        let padded = "  \(cleanCode)  "
+
+        let (validSpaced, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: spaced, time: now)
+        XCTAssertTrue(validSpaced, "Spaced TOTP code from Apple Passwords / Google Authenticator must verify")
+
+        let (validHyphen, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: hyphenated, time: now)
+        XCTAssertTrue(validHyphen, "Hyphenated TOTP code must verify")
+
+        let (validPadded, _) = WalletAuthCoordinator.verifyTOTP(secret: secret, code: padded, time: now)
+        XCTAssertTrue(validPadded, "Whitespace padded TOTP code must verify")
+    }
+
+    func testReloadRecordsFromDiskReflectsExternalChanges() async throws {
+        WalletAuthCoordinator.clearTestOverrides()
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_reload_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: "reload_user")
+        let enrollCode = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32)
+        _ = try await coordinator.enroll(
+            username: "reload_user",
+            password: "ReloadPassword123!@#",
+            secretBase32: enrollment.secretBase32,
+            totpCode: enrollCode,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Induce a failed attempt
+        do {
+            _ = try await coordinator.login(username: "reload_user", password: "WrongPassword!", totpCode: enrollCode)
+        } catch {}
+
+        // Modify registry on disk to reset failed attempts
+        let registryURL = tempDir.appendingPathComponent("auth_registry.json")
+        let data = try Data(contentsOf: registryURL)
+        var json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        var users = json["users"] as! [String: [String: Any]]
+        users["reload_user"]!["failedAttempts"] = 0
+        json["users"] = users
+        let updatedData = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted])
+        try updatedData.write(to: registryURL, options: .atomic)
+
+        // Calling reloadRecordsFromDisk should reload disk state
+        try await coordinator.reloadRecordsFromDisk()
+        let names = await coordinator.enrolledUsernames
+        XCTAssertTrue(names.contains("reload_user"))
+    }
+
+    func testValueDataOnlyKeychainUpdatePreservesExistingACLAndAccessGroup() throws {
+        WalletAuthCoordinator.setupMockKeychainStore()
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let user = "operator_gamma"
+        let initialSecret = "JBSWY3DPEHPK3PXP"
+        let initialData = initialSecret.data(using: .utf8)!
+        let totpAccount = "totp_" + user
+        let legacyAclDesc = "kSecAccessControlUserPresence"
+        let legacyGroup = "group.app.nodepocket.btcb2.auth"
+        let legacyAccessible = kSecAttrAccessibleWhenUnlockedThisDeviceOnly as String
+
+        // Seed mock Keychain with legacy item having .userPresence ACL and access group
+        WalletAuthCoordinator.mockKeychainStore[totpAccount] = WalletAuthCoordinator.MockKeychainItemRecord(
+            service: "app.nodepocket.btcb2.auth",
+            account: totpAccount,
+            valueData: initialData,
+            accessControlDescription: legacyAclDesc,
+            accessibleAttribute: legacyAccessible,
+            accessGroup: legacyGroup,
+            label: "Sentinel Node Wallet - BTCB2 TOTP: \(user)"
+        )
+
+        // Perform saveTOTPSecretToKeychain update
+        let updatedSecret = "KRSXG5CTMVRXEZLU"
+        try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: user, secretBase32: updatedSecret)
+
+        // Verify that update was called and ONLY kSecValueData was updated
+        XCTAssertGreaterThanOrEqual(WalletAuthCoordinator.keychainCounters.updateItemCount, 1)
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.lastUpdateAttrsKeys, [kSecValueData as String])
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0, "WO-22 / WO-27 Invariant: Zero deletes on update")
+
+        // Verify that ACL, accessGroup, and accessibleAttribute were preserved untouched
+        let updatedRecord = try XCTUnwrap(WalletAuthCoordinator.mockKeychainStore[totpAccount])
+        XCTAssertEqual(String(data: updatedRecord.valueData, encoding: .utf8), updatedSecret)
+        XCTAssertEqual(updatedRecord.accessControlDescription, legacyAclDesc, "Preserves SecAccessControl userPresence ACL")
+        XCTAssertEqual(updatedRecord.accessGroup, legacyGroup, "Preserves access group")
+        XCTAssertEqual(updatedRecord.accessibleAttribute, legacyAccessible, "Preserves accessible attribute")
+
+        // Now test saveOperatorPasswordToKeychain value-data-only update
+        let pwAccount = "operator_login_" + user
+        let initialPw = "InitialStrongPass123!@#"
+        let initialPwData = initialPw.data(using: .utf8)!
+        WalletAuthCoordinator.mockKeychainStore[pwAccount] = WalletAuthCoordinator.MockKeychainItemRecord(
+            service: "app.nodepocket.btcb2.auth",
+            account: pwAccount,
+            valueData: initialPwData,
+            accessControlDescription: legacyAclDesc,
+            accessibleAttribute: legacyAccessible,
+            accessGroup: legacyGroup,
+            label: "Sentinel Node Wallet (Apple Passwords): \(user)"
+        )
+
+        let updatedPw = "UpdatedStrongPass456$%^"
+        try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: updatedPw)
+
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.lastUpdateAttrsKeys, [kSecValueData as String])
+        XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0, "Zero deletes on password update")
+        let updatedPwRecord = try XCTUnwrap(WalletAuthCoordinator.mockKeychainStore[pwAccount])
+        XCTAssertEqual(String(data: updatedPwRecord.valueData, encoding: .utf8), updatedPw)
+        XCTAssertEqual(updatedPwRecord.accessControlDescription, legacyAclDesc)
+        XCTAssertEqual(updatedPwRecord.accessGroup, legacyGroup)
+        XCTAssertEqual(updatedPwRecord.accessibleAttribute, legacyAccessible)
+
+        // Now test update failures (-34018, -25308, -25293, -128):
+        // Under all failure codes, existing item bytes and ACL must remain completely untouched with ZERO deletes
+        let failureStatuses: [OSStatus] = [
+            errSecMissingEntitlement, // -34018
+            errSecInteractionNotAllowed, // -25308
+            errSecAuthFailed, // -25293
+            errSecUserCanceled // -128
+        ]
+
+        for status in failureStatuses {
+            WalletAuthCoordinator.setupMockKeychainStore(simulatedUpdateStatus: status)
+            // Re-seed item
+            WalletAuthCoordinator.mockKeychainStore[totpAccount] = WalletAuthCoordinator.MockKeychainItemRecord(
+                service: "app.nodepocket.btcb2.auth",
+                account: totpAccount,
+                valueData: initialData,
+                accessControlDescription: legacyAclDesc,
+                accessibleAttribute: legacyAccessible,
+                accessGroup: legacyGroup,
+                label: "Sentinel Node Wallet - BTCB2 TOTP: \(user)"
+            )
+
+            XCTAssertThrowsError(
+                try WalletAuthCoordinator.saveTOTPSecretToKeychain(username: user, secretBase32: "NEWSECRETFAILED12"),
+                "Must throw typed error on failure status \(status)"
+            )
+
+            XCTAssertEqual(WalletAuthCoordinator.keychainCounters.deleteItemCount, 0, "Zero deletes on update failure for status \(status)")
+            let preservedRecord = try XCTUnwrap(WalletAuthCoordinator.mockKeychainStore[totpAccount])
+            XCTAssertEqual(preservedRecord.valueData, initialData, "Original data preserved on failure status \(status)")
+            XCTAssertEqual(preservedRecord.accessControlDescription, legacyAclDesc, "Original ACL preserved on failure status \(status)")
+            XCTAssertEqual(preservedRecord.accessGroup, legacyGroup, "Original group preserved on failure status \(status)")
+        }
+    }
+
+    func testFailedAttemptPersistenceErrorRecordsFailureWithoutCorruptingLockout() async throws {
+        let tempDir = FileManager.default.temporaryDirectory.appendingPathComponent("np_auth_fail_persist_" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        WalletAuthCoordinator.setAllowInMemoryMockForTesting(true)
+        defer { WalletAuthCoordinator.clearTestOverrides() }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let username = "persist_fail_operator"
+        let validPassword = try WalletAuthCoordinator.generateStrongOperatorPassword()
+
+        let enrollment = try await coordinator.generateEnrollmentSecret(username: username)
+        let time = Date().timeIntervalSince1970
+        let validTotp = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: time)
+        _ = try await coordinator.enroll(
+            username: username,
+            password: validPassword,
+            secretBase32: enrollment.secretBase32,
+            totpCode: validTotp,
+            recoveryCodes: enrollment.recoveryCodes
+        )
+
+        // Make the containing dataDirectory non-writable (mode 0555) to trigger storage write failure during registerFailedAttempt
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: tempDir.path)
+
+        // Attempt 1: bad password with non-writable storage
+        let badPassword = validPassword + "_wrong"
+        do {
+            _ = try await coordinator.login(username: username, password: badPassword, totpCode: validTotp, time: time)
+            XCTFail("Login with bad password under broken storage must throw")
+        } catch let error as WalletAuthError {
+            guard case .registryStorageError = error else {
+                XCTFail("Expected registryStorageError on disk write failure (WO-33 fail-closed policy), got \(error)")
+                return
+            }
+        }
+
+        // Verify fail-closed durable record error handling:
+        // 1. Coordinator recorded .registryUnavailable failure stage
+        let failureStage = await coordinator.lastFailureStage
+        XCTAssertEqual(failureStage, .registryUnavailable, "Must record .registryUnavailable on disk write failure")
+
+        // 2. Coordinator captured registryLoadError
+        let storageError = await coordinator.registryLoadError
+        XCTAssertNotNil(storageError, "Must capture typed storage error on disk write failure")
+
+        // 3. Fallback lockout in UserDefaults was written
+        let fallback = WalletAuthCoordinator.loadDurableLockoutFallback(username: username)
+        XCTAssertNotNil(fallback, "Must persist fallback lockout to UserDefaults when file write fails")
+        XCTAssertEqual(fallback?.failedAttempts, 1)
+
+        // 4. WO-33 Crash/Restart Simulation:
+        // Spawn a brand new coordinator instance simulating app termination and relaunch
+        let restartedCoordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        let record = await restartedCoordinator.getRecordForTesting(username: username)
+        let reloadedUser = try XCTUnwrap(record)
+        XCTAssertEqual(reloadedUser.failedAttempts, 1, "Restarted coordinator must merge fallback failedAttempts from UserDefaults")
+
+        // 5. Restore filesystem permissions
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: tempDir.path)
+
+        // 6. Valid operator login works once filesystem is restored, persists cleanly, and clears fallback
+        let loginTime = time + 60
+        let loginTotp = WalletAuthCoordinator.generateTOTP(secret: enrollment.secretBase32, time: loginTime)
+        let session = try await restartedCoordinator.login(username: username, password: validPassword, totpCode: loginTotp, time: loginTime)
+        XCTAssertEqual(session.username, username)
+        let clearedFallback = WalletAuthCoordinator.loadDurableLockoutFallback(username: username)
+        XCTAssertNil(clearedFallback, "Fallback lockout must be cleared after successful persisted login")
     }
 }
 

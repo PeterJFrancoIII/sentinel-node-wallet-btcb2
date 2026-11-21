@@ -286,7 +286,7 @@ public actor WalletManager {
     public let walletInventory: WalletInventory
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
-    private var isCreatingWallet = false
+    public private(set) var isCreatingWallet = false
     private var activeStagingSessionIDs = Set<String>()
 
     public func resetActiveWallet() {
@@ -415,15 +415,26 @@ public actor WalletManager {
         // STRICT MULTI-OPERATOR ISOLATION:
         // When an authenticated capability is provided, load ONLY a wallet owned by this operator.
         if let user = capability?.username, !user.isEmpty {
+            let userKey = user.lowercased()
             let summaries = try await walletInventory.refreshInventory(capability: capability)
-            if let firstOwned = summaries.first(where: { !$0.isArchived })?.name ?? summaries.first?.name {
+            let savedPreferred = UserDefaults.standard.string(forKey: "nodepocket_selected_wallet_\(userKey)")
+
+            let selectedCandidate: String?
+            if let pref = savedPreferred, summaries.contains(where: { $0.name == pref && !$0.isArchived }) {
+                selectedCandidate = pref
+            } else {
+                selectedCandidate = summaries.first(where: { !$0.isArchived })?.name ?? summaries.first?.name
+            }
+
+            if let targetWallet = selectedCandidate {
                 let loaded = try await rpcClient.listWallets()
-                if !loaded.contains(firstOwned) {
-                    _ = try await rpcClient.loadWallet(name: firstOwned)
+                if !loaded.contains(targetWallet) {
+                    _ = try await rpcClient.loadWallet(name: targetWallet)
                 }
-                self.currentWalletName = firstOwned
+                self.currentWalletName = targetWallet
+                UserDefaults.standard.set(targetWallet, forKey: "nodepocket_selected_wallet_\(userKey)")
                 _ = try? await refreshWalletInfo(capability: capability)
-                return firstOwned
+                return targetWallet
             } else {
                 // This operator owns no wallets yet. Do NOT load another operator's wallet!
                 self.currentWalletName = nil
@@ -556,12 +567,23 @@ public actor WalletManager {
             throw WalletCreationError.nodeUnreachable("Failed checking existing wallets: \(err.localizedDescription)")
         }
 
-        let isLoaded = loaded.contains(name)
-        let existsOnDisk = walletDir.wallets.contains(where: { $0.name == name })
+        let isLoaded = loaded.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
+        let existsOnDisk = walletDir.wallets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })
+        let isNameInUse = await walletInventory.isWalletNameInUse(name)
 
-        if isLoaded || existsOnDisk {
-            // Idempotent recovery: If an interrupted previous attempt succeeded on bitcoind,
-            // verify whether it is a valid encrypted descriptor wallet matching this passphrase.
+        if isLoaded || existsOnDisk || isNameInUse {
+            let caller = capability?.username ?? ""
+            let existingOwner = await walletInventory.getOwner(for: name)
+
+            // Foreign, unassigned, or quarantined wallet: reject immediately!
+            // Never attempt to adopt, unlock, or overwrite!
+            if existingOwner == nil || existingOwner?.lowercased() != caller.lowercased() || caller.isEmpty {
+                throw WalletCreationError.walletAlreadyExists(
+                    "A wallet named '\(name)' already exists. Please choose a different wallet name."
+                )
+            }
+
+            // Same operator recovering an interrupted creation:
             if !isLoaded && existsOnDisk {
                 _ = try? await rpcClient.loadWallet(name: name)
             }
@@ -572,11 +594,13 @@ public actor WalletManager {
                 do {
                     try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 1, walletName: name)
                     try await rpcClient.walletLock(walletName: name)
-                    // Successfully unlocked with matching passphrase! Adopt idempotently.
+                    // Successfully unlocked with matching passphrase! Adopt idempotently for the SAME operator.
                     if storeInKeychain {
                         try await ensurePassphraseCustody(passphrase, account: name)
                     }
+                    try await walletInventory.setOwner(for: name, owner: caller)
                     self.currentWalletName = name
+                    UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(caller.lowercased())")
                     _ = try await refreshWalletInfo(capability: capability)
                     return WalletCreationResult(
                         walletName: name,
@@ -589,10 +613,14 @@ public actor WalletManager {
                 } catch let custodyError as WalletCreationError {
                     throw custodyError
                 } catch {
-                    throw WalletSecurityError.walletAlreadyExists(name)
+                    throw WalletCreationError.walletAlreadyExists(
+                        "A wallet named '\(name)' already exists. Please choose a different wallet name."
+                    )
                 }
             } else {
-                throw WalletSecurityError.walletAlreadyExists(name)
+                throw WalletCreationError.walletAlreadyExists(
+                    "A wallet named '\(name)' already exists. Please choose a different wallet name."
+                )
             }
         }
 
@@ -641,15 +669,16 @@ public actor WalletManager {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
 
+        // Record operator ownership for multi-operator isolation BEFORE refreshWalletInfo
+        if let user = capability?.username, !user.isEmpty {
+            try await walletInventory.setOwner(for: name, owner: user)
+            UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
+        }
+
         self.currentWalletName = name
         let snapshot = try await refreshWalletInfo(capability: capability)
         guard snapshot.isEncrypted, snapshot.descriptors else {
             throw WalletSecurityError.walletCreationVerificationFailed
-        }
-
-        // Record operator ownership for multi-operator isolation
-        if let user = capability?.username, !user.isEmpty {
-            await walletInventory.setOwner(for: name, owner: user)
         }
 
         // Generate and lock Canonical Receive Address for new wallet
@@ -686,6 +715,9 @@ public actor WalletManager {
             _ = try await rpcClient.loadWallet(name: name)
         }
         self.currentWalletName = name
+        if let user = capability?.username, !user.isEmpty {
+            UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
+        }
         _ = try await refreshWalletInfo(capability: capability)
     }
 
@@ -752,7 +784,7 @@ public actor WalletManager {
         receiveAddressStore.migrateWallet(from: cleanOld, to: cleanNew)
 
         // Migrate metadata registry ownership
-        await walletInventory.renameWalletMetadata(from: cleanOld, to: cleanNew)
+        try await walletInventory.renameWalletMetadata(from: cleanOld, to: cleanNew)
 
         // Reload under new name
         if wasLoaded {
@@ -1165,7 +1197,8 @@ public actor WalletManager {
         }
         let resp = try await rpcClient.restoreWallet(name: trimmedName, backupFile: backupFile.path)
         if let user = capability?.username, !user.isEmpty {
-            await walletInventory.setOwner(for: resp.name, owner: user)
+            try await walletInventory.setOwner(for: resp.name, owner: user)
+            UserDefaults.standard.set(resp.name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
         }
         self.currentWalletName = resp.name
         _ = try await refreshWalletInfo(capability: capability)

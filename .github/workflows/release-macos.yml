@@ -1,0 +1,791 @@
+name: macOS Production Release & Sparkle Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Git release tag to publish (e.g. v1.0.0-build5)'
+        required: true
+        type: string
+      operator_approval_confirmed:
+        description: 'Explicit human operator release approval confirmation (type YES to confirm)'
+        required: true
+        type: string
+        default: 'NO'
+      release_phase:
+        description: 'Release Phase: "stage-draft" (Phase A: Build, sign, notarize, stage draft release), "promote-feed" (Phase B: Promote draft to public, stage feed branch), or "verify-deployed" (Phase C: Verify deployed feed on main post-merge)'
+        required: true
+        type: choice
+        default: 'stage-draft'
+        options:
+          - 'stage-draft'
+          - 'promote-feed'
+          - 'verify-deployed'
+      is_draft:
+        description: 'Legacy parameter: set true for stage-draft, false for promote-feed'
+        required: false
+        type: boolean
+        default: true
+      is_prerelease:
+        description: 'Publish release as a Pre-release (Beta channel)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release-macos
+  cancel-in-progress: false
+
+jobs:
+  unprivileged-qualification:
+    name: Unprivileged Build Qualification & Gating
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      verified_tag: ${{ steps.validate_tag.outputs.verified_tag }}
+      verified_commit_sha: ${{ steps.validate_tag.outputs.verified_commit_sha }}
+      short_version: ${{ steps.validate_tag.outputs.short_version }}
+      build_number: ${{ steps.validate_tag.outputs.build_number }}
+      effective_phase: ${{ steps.validate_tag.outputs.effective_phase }}
+      app_bundle_sha256: ${{ steps.package_unsigned_app.outputs.app_bundle_sha256 }}
+    steps:
+      - name: Checkout repository at candidate release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag_name }}
+          fetch-depth: 0
+
+      - name: Display Swift toolchain
+        run: swift --version
+
+      # Gating Stage 1: Validate Release Tag, Policy B Approval Record, and Operator Authorization
+      - name: Validate Release Tag and Policy B Approval Record
+        id: validate_tag
+        env:
+          INPUT_TAG: "${{ github.event.inputs.tag_name }}"
+          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
+          INPUT_PHASE: "${{ github.event.inputs.release_phase }}"
+          IS_DRAFT_INPUT: "${{ github.event.inputs.is_draft }}"
+        run: |
+          if [ "${OPERATOR_APPROVAL}" != "YES" ]; then
+            echo "ERROR: Operator release authorization missing or invalid. Received '${OPERATOR_APPROVAL}', expected 'YES'." >&2
+            exit 1
+          fi
+
+          if [ -z "${INPUT_TAG}" ]; then
+            echo "ERROR: Target release tag cannot be empty." >&2
+            exit 1
+          fi
+
+          TAG_REGEX='^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$'
+          if ! [[ "${INPUT_TAG}" =~ ${TAG_REGEX} ]]; then
+            echo "ERROR: Release tag '${INPUT_TAG}' does not match required format: ^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$" >&2
+            exit 1
+          fi
+
+          VERSION="${INPUT_TAG#v}"
+          VERSION="${VERSION%%-build*}"
+          BUILD_NUM="${INPUT_TAG##*-build}"
+
+          if [ "${BUILD_NUM}" -le 3 ]; then
+            echo "ERROR: Build number ${BUILD_NUM} must be greater than 3 to maintain monotonic sequence (Build 3 is published)." >&2
+            exit 1
+          fi
+
+          TAG_COMMIT="$(git rev-list -n 1 "${INPUT_TAG}" 2>/dev/null || echo "")"
+          if [ -z "${TAG_COMMIT}" ]; then
+            echo "ERROR: Release tag '${INPUT_TAG}' does not exist in repository git history." >&2
+            exit 1
+          fi
+
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "${TAG_COMMIT}" != "${HEAD_COMMIT}" ]; then
+            echo "ERROR: Target tag commit (${TAG_COMMIT}) does not match current HEAD commit (${HEAD_COMMIT})." >&2
+            exit 1
+          fi
+
+          # Policy B Verification: Authenticate human operator release approval record from origin/main
+          echo "Authenticating Policy B release approval record from origin/main..."
+          git fetch origin main:refs/remotes/origin/main || {
+            echo "ERROR: Failed to fetch fresh origin/main from remote. Cannot verify release approval record." >&2
+            exit 1
+          }
+
+          if ! git cat-file -e origin/main:docs/RELEASE_APPROVAL.json 2>/dev/null; then
+            echo "ERROR: Release approval record docs/RELEASE_APPROVAL.json does not exist on origin/main." >&2
+            echo "Policy B requires an independently reviewed and merged approval record on protected main authorizing this release." >&2
+            exit 1
+          fi
+
+          # Secure Temporary Data File Parser for origin/main:docs/RELEASE_APPROVAL.json (G1A-R2-01 P0 Rework)
+          APPROVAL_TMP="$(mktemp -t release_approval.XXXXXX.json 2>/dev/null || mktemp "${RUNNER_TEMP:-/tmp}/release_approval.XXXXXX.json")"
+          trap 'rm -f "${APPROVAL_TMP}"' EXIT
+          git show origin/main:docs/RELEASE_APPROVAL.json > "${APPROVAL_TMP}" || {
+            echo "ERROR: Failed to retrieve origin/main:docs/RELEASE_APPROVAL.json" >&2
+            rm -f "${APPROVAL_TMP}"
+            exit 1
+          }
+
+          APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" "${INPUT_TAG}" "${VERSION}" "${BUILD_NUM}" <<'PY'
+          import json, re, sys
+
+          tmp_path = sys.argv[1]
+          expected_tag = sys.argv[2].strip()
+          expected_version = sys.argv[3].strip()
+          try:
+              expected_build_num = int(sys.argv[4].strip())
+          except Exception:
+              print(f"ERROR: Invalid expected build number: {sys.argv[4]}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              with open(tmp_path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
+          except Exception as e:
+              print(f"ERROR: Failed to parse origin/main:docs/RELEASE_APPROVAL.json as JSON: {e}", file=sys.stderr)
+              sys.exit(2)
+
+          if data.get("schema_version") != "1.0.0":
+              print("ERROR: Unsupported schema_version in approval record", file=sys.stderr)
+              sys.exit(1)
+
+          rt = data.get("release_target", {})
+          sha = rt.get("approved_commit_sha", "").strip().lower()
+          tag = rt.get("target_tag", "").strip()
+          raw_build_num = rt.get("build_number")
+          bundle_ver = rt.get("bundle_version", "").strip()
+
+          if not re.match(r"^[0-9a-f]{40}$", sha):
+              print("ERROR: approved_commit_sha must be a 40-char lowercase hex string", file=sys.stderr)
+              sys.exit(1)
+
+          if not re.match(r"^v[0-9]+\.[0-9]+\.[0-9]+-build[0-9]+$", tag):
+              print("ERROR: target_tag does not match required format", file=sys.stderr)
+              sys.exit(1)
+
+          # G1A-R3-01: Strict Release Tuple Binding (tag, version, integer build number)
+          if tag != expected_tag:
+              print(f"ERROR: Approval target_tag '{tag}' does not match requested release tag '{expected_tag}'", file=sys.stderr)
+              sys.exit(1)
+
+          if type(raw_build_num) is not int:
+              print(f"ERROR: build_number must be an integer, got {type(raw_build_num).__name__}", file=sys.stderr)
+              sys.exit(1)
+
+          if raw_build_num <= 3:
+              print(f"ERROR: build_number ({raw_build_num}) must be > 3", file=sys.stderr)
+              sys.exit(1)
+
+          if raw_build_num != expected_build_num:
+              print(f"ERROR: Approval build_number ({raw_build_num}) does not match requested build number ({expected_build_num})", file=sys.stderr)
+              sys.exit(1)
+
+          if not re.match(r"^[0-9]+\.[0-9]+\.[0-9]+$", bundle_ver):
+              print("ERROR: bundle_version does not match required format (major.minor.patch)", file=sys.stderr)
+              sys.exit(1)
+
+          if bundle_ver != expected_version:
+              print(f"ERROR: Approval bundle_version '{bundle_ver}' does not match requested version '{expected_version}'", file=sys.stderr)
+              sys.exit(1)
+
+          am = data.get("approval_metadata", {})
+          if am.get("authorized_scope") != "NODEPOCKET_BTCB2_ONLY":
+              print("ERROR: authorized_scope must be NODEPOCKET_BTCB2_ONLY", file=sys.stderr)
+              sys.exit(1)
+
+          if am.get("approval_policy") != "Policy B: Independent Approved Release Commit on Protected Main":
+              print("ERROR: approval_policy mismatch", file=sys.stderr)
+              sys.exit(1)
+
+          sa = data.get("security_attestation", {})
+          if sa.get("spending_authority_disarmed") is not True:
+              print("ERROR: spending_authority_disarmed must be true", file=sys.stderr)
+              sys.exit(1)
+
+          if sa.get("authorized_spending_limit_btc") != "0.00":
+              print("ERROR: authorized_spending_limit_btc must be '0.00'", file=sys.stderr)
+              sys.exit(1)
+
+          if sa.get("restricted_rpc_methods_blocked") != 12:
+              print("ERROR: restricted_rpc_methods_blocked must be 12", file=sys.stderr)
+              sys.exit(1)
+
+          print(sha)
+          PY
+          )"
+          PARSE_STATUS=$?
+          rm -f "${APPROVAL_TMP}"
+
+          if [ ${PARSE_STATUS} -ne 0 ] || [ -z "${APPROVED_SHA}" ]; then
+            echo "ERROR: Failed to validate origin/main:docs/RELEASE_APPROVAL.json." >&2
+            exit 1
+          fi
+
+          if [ "${HEAD_COMMIT}" != "${APPROVED_SHA}" ]; then
+            echo "ERROR: Candidate commit (${HEAD_COMMIT}) does not match approved commit (${APPROVED_SHA}) in origin/main:docs/RELEASE_APPROVAL.json." >&2
+            exit 1
+          fi
+
+          EFFECTIVE_PHASE="${INPUT_PHASE}"
+          if [ -z "${EFFECTIVE_PHASE}" ]; then
+            if [ "${IS_DRAFT_INPUT}" = "false" ]; then
+              EFFECTIVE_PHASE="promote-feed"
+            else
+              EFFECTIVE_PHASE="stage-draft"
+            fi
+          fi
+
+          echo "verified_tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "verified_commit_sha=${APPROVED_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "build_number=${BUILD_NUM}" >> "$GITHUB_OUTPUT"
+          echo "effective_phase=${EFFECTIVE_PHASE}" >> "$GITHUB_OUTPUT"
+          echo "✓ Operator release approval and Policy B tag validation passed: ${INPUT_TAG} (v${VERSION} build ${BUILD_NUM}) [Phase: ${EFFECTIVE_PHASE}] -> ${APPROVED_SHA}"
+
+      # Gating Stage 2: Full Automated Test Suite
+      - name: Run native unit tests
+        run: swift test
+
+      # Gating Stage 3: Verify Release Broadcast Lock & Purge Safety (WO-25, WO-39, WO-44, WO-59)
+      - name: Verify release broadcast lock and spend gate enforcement
+        run: swift run -c release VerifyReleaseBroadcastLock
+
+      # Gating Stage 4: Packaging Shell Syntax Validation
+      - name: Validate script syntax
+        run: |
+          bash -n scripts/build_app.sh \
+                  scripts/build_dmg.sh \
+                  scripts/build_production_dmg.sh \
+                  scripts/sign_appcast_enclosure.sh \
+                  scripts/publish_production_appcast.sh \
+                  scripts/fetch-verify-knots.sh \
+                  scripts/package_appstore_archive.sh
+
+      # Gating Stage 5: Verify Bitcoin Knots Binary Provenance
+      - name: Cache & verify official Bitcoin Knots binaries
+        run: bash scripts/fetch-verify-knots.sh
+
+      # Gating Stage 6: Unprivileged Phase 0 Compilation & Bundle Packaging (O1-G1A-03, zero secrets)
+      - name: Build Unsigned Application Bundle (Phase 0)
+        id: package_unsigned_app
+        env:
+          SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
+          SENTINEL_SHORT_VERSION: "${{ steps.validate_tag.outputs.short_version }}"
+          SENTINEL_BUILD_NUMBER: "${{ steps.validate_tag.outputs.build_number }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY }}"
+          SENTINEL_REQUIRE_SPARKLE_KEY: "1"
+        run: |
+          echo "Compiling and packaging unprivileged unsigned application bundle..."
+          bash scripts/build_app.sh
+
+          APP_DIR="dist/Sentinel Node Wallet.app"
+          if [ ! -d "${APP_DIR}" ]; then
+            echo "ERROR: Built application directory '${APP_DIR}' not found." >&2
+            exit 1
+          fi
+
+          COPYFILE_DISABLE=1 tar -czf dist/unsigned-app-bundle.tar.gz -C dist "Sentinel Node Wallet.app"
+          BUNDLE_SHA="$(shasum -a 256 dist/unsigned-app-bundle.tar.gz | awk '{print $1}')"
+          echo "app_bundle_sha256=${BUNDLE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "✓ Unsigned app bundle created: dist/unsigned-app-bundle.tar.gz (SHA-256: ${BUNDLE_SHA})"
+
+      # Upload Unprivileged Unsigned Artifact for Phase A
+      - name: Upload Unsigned App Bundle Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-app-bundle
+          path: dist/unsigned-app-bundle.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  # =========================================================================
+  # Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
+  # =========================================================================
+  stage-candidate-draft:
+    name: "Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)"
+    needs: unprivileged-qualification
+    if: needs.unprivileged-qualification.outputs.effective_phase == 'stage-draft'
+    runs-on: macos-latest
+    timeout-minutes: 45
+    environment: production-release
+    permissions:
+      contents: write
+    steps:
+      # Immutable Checkout pinned to verified candidate commit SHA (O1-G1A-02)
+      - name: Checkout repository at verified candidate commit SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
+          fetch-depth: 0
+
+      # Pre-Credentials Artifact Verification & Safe Extraction (O1-G1A-02/03 P0 Rework)
+      - name: Download Unsigned App Bundle Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: unsigned-app-bundle
+          path: dist
+
+      - name: Verify and Safely Extract Unsigned App Bundle Artifact
+        env:
+          EXPECTED_SHA: "${{ needs.unprivileged-qualification.outputs.app_bundle_sha256 }}"
+        run: |
+          ARCHIVE_PATH="dist/unsigned-app-bundle.tar.gz"
+          if [ ! -f "${ARCHIVE_PATH}" ]; then
+            echo "ERROR: Artifact ${ARCHIVE_PATH} missing." >&2
+            exit 1
+          fi
+
+          ACTUAL_SHA="$(shasum -a 256 "${ARCHIVE_PATH}" | awk '{print $1}')"
+          if [ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "ERROR: Artifact SHA-256 (${ACTUAL_SHA}) does not match Phase 0 hash (${EXPECTED_SHA})." >&2
+            exit 1
+          fi
+          echo "✓ Verified artifact SHA-256 matches Phase 0 manifest: ${ACTUAL_SHA}"
+
+          # Inspect archive members to prevent path traversal or link escapes
+          python3 - "${ARCHIVE_PATH}" <<'PY' || { echo "ERROR: Malicious or invalid archive entries detected." >&2; exit 1; }
+          import tarfile, sys
+          archive_path = sys.argv[1]
+          with tarfile.open(archive_path, "r:gz") as tar:
+              for member in tar.getmembers():
+                  name = member.name
+                  if name.startswith("/") or name.startswith("\\"):
+                      print(f"ERROR: Archive contains absolute path: {name}", file=sys.stderr)
+                      sys.exit(1)
+                  parts = name.replace("\\", "/").split("/")
+                  if ".." in parts:
+                      print(f"ERROR: Archive contains directory traversal: {name}", file=sys.stderr)
+                      sys.exit(1)
+                  if not (name == "Sentinel Node Wallet.app" or name.startswith("Sentinel Node Wallet.app/")):
+                      print(f"ERROR: Archive contains unauthorized root entry: {name}", file=sys.stderr)
+                      sys.exit(1)
+                  if member.issym() or member.islnk():
+                      link_target = member.linkname
+                      if link_target.startswith("/") or ".." in link_target.split("/"):
+                          print(f"ERROR: Archive contains escaping link: {name} -> {link_target}", file=sys.stderr)
+                          sys.exit(1)
+          print("✓ Archive entries inspected and verified safe: zero traversal or absolute path escapes.")
+          PY
+
+          tar -xzf "${ARCHIVE_PATH}" -C dist/
+          test -d "dist/Sentinel Node Wallet.app" || { echo "ERROR: Extraction failed." >&2; exit 1; }
+          echo "✓ Successfully extracted verified application bundle."
+
+      # Gating Stage 6: Environment & Secrets Verification (Fail-Closed)
+      - name: Verify production signing prerequisites (Fail-Closed)
+        env:
+          APPLE_CERT_B64: "${{ secrets.APPLE_CERTIFICATE_BASE64 }}"
+          APPLE_CERT_PASS: "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+          NOTARY_KEY_B64: "${{ secrets.NOTARY_API_KEY_BASE64 }}"
+          NOTARY_KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
+          NOTARY_ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
+          SPARKLE_PRIV_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
+          SPARKLE_PUB_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          MISSING=""
+          if [ -z "${APPLE_CERT_B64}" ] || [ -z "${APPLE_CERT_PASS}" ]; then
+            MISSING="${MISSING} APPLE_CERTIFICATE"
+          fi
+          if [ -z "${NOTARY_KEY_B64}" ] || [ -z "${NOTARY_KEY_ID}" ] || [ -z "${NOTARY_ISSUER_ID}" ]; then
+            MISSING="${MISSING} NOTARY_CREDENTIALS"
+          fi
+          if [ -z "${SPARKLE_PRIV_KEY}" ]; then
+            MISSING="${MISSING} SPARKLE_PRIVATE_KEY"
+          fi
+          if [ -z "${SPARKLE_PUB_KEY}" ]; then
+            MISSING="${MISSING} SPARKLE_PUBLIC_KEY"
+          fi
+
+          if [ -n "${MISSING}" ]; then
+            echo "ERROR: Production release blocked fail-closed. Missing mandatory signing credentials:${MISSING}." >&2
+            echo "Official production distribution requires an Apple Developer ID Application certificate, Apple Notary credentials, and Sparkle Ed25519 keypair." >&2
+            exit 1
+          fi
+
+          python3 - "${SPARKLE_PUB_KEY}" <<'PY' || exit 1
+          import base64, sys
+          k = sys.argv[1].strip()
+          try:
+              raw = base64.b64decode(k, validate=True)
+              if len(raw) != 32:
+                  print(f"ERROR: SPARKLE_PUBLIC_ED_KEY decoded length is {len(raw)} bytes (expected 32 bytes).", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: SPARKLE_PUBLIC_ED_KEY is not valid Base64: {e}", file=sys.stderr)
+              sys.exit(1)
+          print("✓ Verified SPARKLE_PUBLIC_ED_KEY format: valid 32-byte Ed25519 public key.")
+          PY
+
+      # Configure Ephemeral Keychain for Developer ID Application
+      - name: Configure ephemeral keychain and Developer ID identity
+        env:
+          CERT_BASE64: "${{ secrets.APPLE_CERTIFICATE_BASE64 }}"
+          CERT_PASSWORD: "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/build.keychain"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+
+          CERT_FILE="${RUNNER_TEMP}/cert.p12"
+          echo "${CERT_BASE64}" | base64 --decode > "${CERT_FILE}"
+          security import "${CERT_FILE}" -k "${KEYCHAIN_PATH}" -P "${CERT_PASSWORD}" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}" $(security list-keychains -d user | tr -d '"')
+          rm -f "${CERT_FILE}"
+
+      # Configure Apple Notary Service Credentials
+      - name: Configure Apple Notary credentials
+        env:
+          KEY_BASE64: "${{ secrets.NOTARY_API_KEY_BASE64 }}"
+          KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
+          ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
+        run: |
+          API_KEY_PATH="${RUNNER_TEMP}/AuthKey_${KEY_ID}.p8"
+          echo "${KEY_BASE64}" | base64 --decode > "${API_KEY_PATH}"
+          xcrun notarytool store-credentials "sentinel-notary-profile" \
+            --key "${API_KEY_PATH}" \
+            --key-id "${KEY_ID}" \
+            --issuer "${ISSUER_ID}"
+          rm -f "${API_KEY_PATH}"
+
+      # Production Sign and Notarize (Hardened Runtime, Developer ID, Staple) with --sign-only (O1-G1A-03)
+      - name: Sign and Notarize Production DMG (--sign-only)
+        env:
+          SENTINEL_RELEASE_SECURITY_APPROVED: "1"
+          SENTINEL_BUNDLE_ID: pool.sentineldefensetechnologies.co.za
+          SENTINEL_DEVELOPER_ID_APPLICATION: "${{ secrets.DEVELOPER_ID_APPLICATION_NAME || 'Developer ID Application: Peter Franco' }}"
+          SENTINEL_APPLE_TEAM_ID: "${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}"
+          SENTINEL_WEBCREDENTIALS_DOMAIN: pool.sentineldefensetechnologies.co.za
+          SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SENTINEL_REQUIRE_SPARKLE_KEY: "1"
+          SENTINEL_SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
+          SENTINEL_BUILD_NUMBER: "${{ needs.unprivileged-qualification.outputs.build_number }}"
+        run: |
+          bash scripts/build_production_dmg.sh --sign-only
+
+      # Sparkle Signing & Appcast Enclosure Generation with Verified Tool Provenance (O1-G1A-03 P0 Rework)
+      - name: Sign DMG with Sparkle EdDSA Key (Verified Tool Provenance)
+        env:
+          SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
+          SPARKLE_TOOL_HASH: "${{ vars.SPARKLE_SIGN_UPDATE_SHA256 || '43c249771bafc3aa581228abae00731a012d324691b8292860896635050be76b' }}"
+        run: |
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" \
+            --require-trusted-tool-hash \
+            --trusted-tool-hash "${SPARKLE_TOOL_HASH}" \
+            --signature-file-output dist/SPARKLE_SIGNATURE.base64 > dist/SPARKLE_ENCLOSURE.txt
+          cat dist/SPARKLE_ENCLOSURE.txt
+          test -s dist/SPARKLE_SIGNATURE.base64 || { echo "ERROR: dist/SPARKLE_SIGNATURE.base64 is missing or empty." >&2; exit 1; }
+
+      # Generate Authenticated Release Attestation (WO-117, WO-121, WO-122-R3, O1-G1A-02)
+      - name: Generate Authenticated Release Attestation
+        env:
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          VERIFIED_COMMIT_SHA: "${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}"
+          SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
+          BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          HEAD_COMMIT="$(git rev-parse HEAD)"
+          if [ "${HEAD_COMMIT}" != "${VERIFIED_COMMIT_SHA}" ]; then
+            echo "ERROR: Checked-out HEAD (${HEAD_COMMIT}) does not match verified candidate commit SHA (${VERIFIED_COMMIT_SHA})." >&2
+            exit 1
+          fi
+
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          DMG_NAME="$(basename "${DMG_FILE}")"
+          DMG_SHA="$(shasum -a 256 "${DMG_FILE}" | awk '{print $1}')"
+          DMG_LEN="$(stat -f%z "${DMG_FILE}" 2>/dev/null || stat -c%s "${DMG_FILE}")"
+
+          if [ ! -f "dist/SPARKLE_SIGNATURE.base64" ]; then
+            echo "ERROR: dist/SPARKLE_SIGNATURE.base64 sidecar missing." >&2
+            exit 1
+          fi
+          ED_SIG="$(tr -d '\r\n ' < dist/SPARKLE_SIGNATURE.base64)"
+
+          python3 - "${SPARKLE_PUBLIC_ED_KEY}" "${ED_SIG}" "${DMG_FILE}" <<'PY' || exit 1
+          import base64, sys, subprocess
+
+          pub_b64, sig_b64, dmg_path = sys.argv[1:4]
+
+          try:
+              raw_pub = base64.b64decode(pub_b64, validate=True)
+              if len(raw_pub) != 32:
+                  print(f"ERROR: Decoded public key length is {len(raw_pub)} bytes (expected 32 bytes).", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: Failed to Base64 decode SPARKLE_PUBLIC_ED_KEY: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          try:
+              raw_sig = base64.b64decode(sig_b64, validate=True)
+              if len(raw_sig) != 64:
+                  print(f"ERROR: Decoded signature length is {len(raw_sig)} bytes (expected 64 bytes).", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: Failed to Base64 decode ED_SIG: {e}", file=sys.stderr)
+              sys.exit(1)
+
+          swift_verify = f"""
+          import Foundation
+          import CryptoKit
+
+          guard let pubData = Data(base64Encoded: "{pub_b64}"),
+                let sigData = Data(base64Encoded: "{sig_b64}"),
+                let fileData = try? Data(contentsOf: URL(fileURLWithPath: "{dmg_path}")) else {{
+              exit(1)
+          }}
+          guard let pubKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubData),
+                pubKey.isValidSignature(sigData, for: fileData) else {{
+              exit(2)
+          }}
+          """
+          res = subprocess.run(["swift", "-e", swift_verify], capture_output=True)
+          if res.returncode != 0:
+              print(f"ERROR: Pre-release Swift CryptoKit Ed25519 signature verification failed for {dmg_path}.", file=sys.stderr)
+              sys.exit(1)
+          print("✓ Pre-release Swift CryptoKit Ed25519 signature verified successfully against exact notarized DMG bytes.")
+          PY
+
+          if xcrun stapler validate "${DMG_FILE}" >/dev/null 2>&1; then
+            STAPLED_VAL="True"
+          else
+            echo "ERROR: Stapler validation failed on notarized DMG." >&2
+            exit 1
+          fi
+
+          python3 - <<PY
+          import json, os, datetime
+
+          attestation = {
+              "tag": "${TAG}",
+              "approved_commit_sha": "${VERIFIED_COMMIT_SHA}",
+              "release_phase": "stage-draft",
+              "git_commit": "${HEAD_COMMIT}",
+              "bundle_version": "${SHORT_VERSION}",
+              "build_number": int("${BUILD_NUM}"),
+              "appcast_enclosure": {
+                  "filename": "${DMG_NAME}",
+                  "length_bytes": int("${DMG_LEN}"),
+                  "sha256": "${DMG_SHA}"
+              },
+              "sparkle_ed_signature": "${ED_SIG}",
+              "sparkle_public_ed_key": "${SPARKLE_PUBLIC_ED_KEY}",
+              "sparkle_cryptokit_verified": True,
+              "developer_id_notarized": True,
+              "notarization_ticket_stapled": (${STAPLED_VAL} == True),
+              "attestation_timestamp_utc": datetime.datetime.now(datetime.timezone.utc).isoformat()
+          }
+
+          os.makedirs("dist", exist_ok=True)
+          with open("dist/RELEASE_ATTESTATION.json", "w") as f:
+              json.dump(attestation, f, indent=2)
+
+          print("✓ Generated authenticated RELEASE_ATTESTATION.json (WO-122-R3 / O1-G1A-02):")
+          print(json.dumps(attestation, indent=2))
+          PY
+
+      # Create Staged Draft Release on GitHub (WO-115)
+      - name: Create Candidate Draft Release on GitHub
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          VERIFIED_COMMIT_SHA: "${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}"
+          IS_PRERELEASE: "${{ github.event.inputs.is_prerelease }}"
+        run: |
+          echo "Staging Candidate Draft Release for ${TAG} at ${VERIFIED_COMMIT_SHA}..."
+          DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+
+          PRERELEASE_FLAG=""
+          if [ "${IS_PRERELEASE}" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          NOTES_FILE="${RUNNER_TEMP}/release_notes.md"
+          cat <<EOF > "${NOTES_FILE}"
+          # Sentinel Node Wallet (BTCB2 / XBT) — Release ${TAG}
+
+          Official production release candidate for Sentinel Node Wallet macOS client.
+
+          ### Authenticated Release Manifest
+          - **Release Tag:** \`${TAG}\`
+          - **Approved Source Commit:** \`${VERIFIED_COMMIT_SHA}\`
+          - **DMG Package:** \`$(basename "${DMG_FILE}")\`
+          - **DMG SHA-256:** \`$(shasum -a 256 "${DMG_FILE}" | awk '{print $1}')\`
+          - **Sparkle 2 EdDSA Signature:** Verified via Swift CryptoKit (see attached sidecar \`SPARKLE_SIGNATURE.base64\`)
+          - **Codesign & Notarization:** Apple Hardened Runtime, Developer ID Application (\`${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}\`), Ticket Stapled.
+
+          > [!NOTE]
+          > This release is staged as a **DRAFT** pending live verification and formal operator promotion.
+          EOF
+
+          gh release create "${TAG}" \
+            --target "${VERIFIED_COMMIT_SHA}" \
+            --title "Sentinel Node Wallet ${TAG}" \
+            --notes-file "${NOTES_FILE}" \
+            --draft \
+            ${PRERELEASE_FLAG} \
+            "${DMG_FILE}" \
+            dist/SPARKLE_SIGNATURE.base64 \
+            dist/RELEASE_ATTESTATION.json \
+            dist/BUILD_MANIFEST.json \
+            dist/SHA256SUMS.txt
+
+          echo "✓ Draft Release ${TAG} created successfully."
+
+      # Clean Up Ephemeral Keychain
+      - name: Cleanup ephemeral signing keychain
+        if: always()
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/build.keychain"
+          if [ -f "${KEYCHAIN_PATH}" ]; then
+            security delete-keychain "${KEYCHAIN_PATH}" || true
+            echo "Ephemeral signing keychain destroyed."
+          fi
+
+      # Step Summary
+      - name: Output Phase A Summary
+        run: |
+          echo "### Release Status: CANDIDATE_DRAFT_STAGED" >> $GITHUB_STEP_SUMMARY
+          echo "Phase A completed successfully. GitHub Draft Release **${{ needs.unprivileged-qualification.outputs.verified_tag }}** is staged." >> $GITHUB_STEP_SUMMARY
+          echo "Target commit SHA: \`${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Next Steps:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Run manual local installation trial on a dedicated test machine." >> $GITHUB_STEP_SUMMARY
+          echo "2. Re-dispatch this workflow with \`release_phase: promote-feed\` to publish the release and stage the Sparkle appcast feed branch." >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # Phase B: Public Promotion & Candidate Appcast Feed Staging (WO-115, WO-118)
+  # =========================================================================
+  promote-public-feed:
+    name: "Phase B: Public Promotion & Candidate Appcast Feed Staging (WO-115, WO-118)"
+    needs: unprivileged-qualification
+    if: needs.unprivileged-qualification.outputs.effective_phase == 'promote-feed'
+    runs-on: macos-latest
+    timeout-minutes: 20
+    environment: production-promotion
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout repository at verified candidate commit SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
+          fetch-depth: 0
+
+      # Step 1: Download Staged Assets from Draft Release
+      - name: Download Staged Release Assets
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+        run: |
+          echo "Downloading staged draft assets for ${TAG}..."
+          mkdir -p dist/staged-assets
+          gh release download "${TAG}" --dir dist/staged-assets
+          ls -la dist/staged-assets
+
+      # Step 2: Preflight Verification before Promotion (WO-120)
+      - name: Run Feed Staging Preflight Verification (WO-120)
+        env:
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --prune-unsigned-legacy \
+            --preflight
+          echo "✓ Pre-promotion preflight validation succeeded (WO-120): Live feed publish prerequisites and binary verifiers satisfied before public promotion."
+
+      # Step 3: Promote Verified Draft Release to Public (WO-115, WO-117)
+      - name: Promote Draft Release to Public
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+        run: |
+          echo "Promoting verified draft release ${TAG} to public..."
+          gh release edit "${TAG}" --draft=false
+          echo "✓ Release ${TAG} promoted to public."
+
+      # Step 4: Stage Sparkle Production Appcast Feed for PR Review (WO-118, WO-122-R1)
+      - name: Stage Candidate Production Appcast Feed to Feed Branch
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --operator-approval "${OPERATOR_APPROVAL}" \
+            --stage-feed-branch \
+            --prune-unsigned-legacy
+          echo "✓ Candidate appcast feed staged to feed/${TAG} branch (WO-122-R1). Awaiting operator PR review and merge to main."
+
+      # Step 5: Output Release Status Summary (WO-122-R2)
+      - name: Output Release Status Summary
+        run: |
+          echo "### Release Status: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING" >> $GITHUB_STEP_SUMMARY
+          echo "The GitHub Release **${{ needs.unprivileged-qualification.outputs.verified_tag }}** is now PUBLIC." >> $GITHUB_STEP_SUMMARY
+          echo "Candidate Sparkle appcast has been staged to branch **feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}**." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Operator Actions Required to Complete Live Deployment:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review and merge Pull Request from \`feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}\` into \`main\`." >> $GITHUB_STEP_SUMMARY
+          echo "2. Re-dispatch this workflow with \`release_phase: verify-deployed\` to verify live CDN readback fail-closed." >> $GITHUB_STEP_SUMMARY
+
+  # =========================================================================
+  # Phase C: Post-Merge Live Deployed Feed Verification (WO-122-R2)
+  # =========================================================================
+  verify-deployed-feed:
+    name: "Phase C: Post-Merge Live Deployed Feed Verification (WO-122-R2)"
+    needs: unprivileged-qualification
+    if: needs.unprivileged-qualification.outputs.effective_phase == 'verify-deployed'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository at verified candidate commit SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
+          fetch-depth: 0
+
+      - name: Download Staged Release Assets and Verify Deployed Feed
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          echo "Downloading public release assets for ${TAG}..."
+          mkdir -p dist/staged-assets
+          gh release download "${TAG}" --dir dist/staged-assets
+
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+
+          echo "Verifying deployed feed on main via CDN readback (fail-closed, WO-122-R2)..."
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --verify-deployed-feed

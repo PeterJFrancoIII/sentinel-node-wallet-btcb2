@@ -17,21 +17,25 @@ public struct AdvancedSheet: View {
     @State private var enableInboundP2P: Bool = false
 
     // Clean Uninstall & Data Wipe States
-    @State private var settingsTab: Int = 0 // 0 = Node & Storage, 1 = Full Uninstallation
+    @State private var settingsTab: Int = 0 // 0 = Node & Storage, 1 = Software Updates, 2 = Full Uninstallation
     @State private var showWipeConfirmation: Bool = false
     @State private var isWipingData: Bool = false
     @State private var wipeCompleted: Bool = false
     @State private var wipeErrorMessage: String? = nil
     @State private var uninstallResult: AppState.UninstallResult? = nil
 
+    public init(initialTab: Int = 0) {
+        _settingsTab = State(initialValue: initialTab)
+    }
+
     public var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Advanced Node & Storage Settings")
+                    Text(settingsTab == 1 ? "Software Updates & Maintenance" : (settingsTab == 2 ? "Full Uninstallation & Data Wipe" : "Advanced Node & Storage Settings"))
                         .font(.title2)
                         .bold()
-                    Text("Configure storage modes, pruning limits, and sync intensity")
+                    Text(settingsTab == 1 ? "Configure automatic updates, release channels, and check for new releases" : (settingsTab == 2 ? "Permanently remove blockchain data and uninstall application" : "Configure storage modes, pruning limits, and sync intensity"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -46,7 +50,8 @@ public struct AdvancedSheet: View {
 
             Picker("Settings Section", selection: $settingsTab) {
                 Label("Node & Storage", systemImage: "server.rack").tag(0)
-                Label("Full Uninstallation", systemImage: "trash.fill").tag(1)
+                Label("Software Updates", systemImage: "arrow.triangle.2.circlepath").tag(1)
+                Label("Full Uninstallation", systemImage: "trash.fill").tag(2)
             }
             .pickerStyle(.segmented)
             .padding(.bottom, 2)
@@ -89,7 +94,7 @@ public struct AdvancedSheet: View {
 
                                 rollingHistorySelectionPreview
 
-                                Text("ℹ️ Note: Pruning limits apply to historical raw block files (reducing ~700 GB of blocks down to your selected target). All Bitcoin full nodes must also maintain the live UTXO chainstate database (~18 GB) to validate consensus and verify spendability.")
+                                Text("ℹ️ Note: Pruning limits apply to historical raw block files. A compact pruned node performs 100% cryptographic validation of all blocks while maintaining the live UTXO chainstate database required for consensus verification.")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }
@@ -105,7 +110,7 @@ public struct AdvancedSheet: View {
                                         .bold()
                                 }
 
-                                Text("Full-History / Archival mode requires retaining ~800+ GB of historical blocks. Because internal Mac storage is constrained, archival mode must be hosted on an external drive with ≥ 1 TB free space.")
+                                Text("Full-History / Archival mode requires retaining all historical blocks. Because internal Mac storage is constrained, archival mode must be hosted on an external drive with adequate free space (≥ 1 TB).")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
 
@@ -255,13 +260,13 @@ public struct AdvancedSheet: View {
                             Text("Looking to completely remove this application?")
                                 .font(.caption)
                                 .fontWeight(.medium)
-                            Text("Wipe all 18 GB of synced blocks and uninstall the app bundle.")
+                            Text("Wipe all synced blockchain data, UTXO state, and uninstall the app bundle.")
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
                         Button("Go to Full Uninstall") {
-                            settingsTab = 1
+                            settingsTab = 2
                         }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
@@ -269,6 +274,11 @@ public struct AdvancedSheet: View {
                     .padding(10)
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.08)))
                 }
+            }
+        } else if settingsTab == 1 {
+            ScrollView {
+                SoftwareUpdatesSettingsView(coordinator: state.updateCoordinator)
+                    .padding(.bottom, 8)
             }
         } else {
             fullUninstallationTab
@@ -293,15 +303,15 @@ public struct AdvancedSheet: View {
                 }
                 .buttonStyle(.bordered)
                 Spacer()
-                Button("Cancel / Done") {
+                Button("Done") {
                     dismiss()
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.borderedProminent)
             }
         }
         }
-        .padding(24)
-        .frame(width: 540, height: 600)
+        .padding(20)
+        .frame(minWidth: 560, idealWidth: 600, maxWidth: 660, minHeight: 580, idealHeight: 640, maxHeight: 720)
         .onAppear {
             loadCurrentSettings()
         }
@@ -321,7 +331,7 @@ public struct AdvancedSheet: View {
                 }
             }
         } message: {
-            Text("This will permanently remove Sentinel Node Wallet from your Mac:\n\n• All synchronized blockchain blocks and chainstate (~18 GB)\n• All wallet databases, auth records, and configuration\n• The application bundle itself\n\nThis action cannot be undone. Are you sure you want to proceed?")
+            Text("This will permanently remove Sentinel Node Wallet from your Mac:\n\n• All synchronized blockchain blocks and chainstate (\(state.storageBreakdown?.isAvailable == true ? state.storageBreakdown!.formattedTotalSize : "measured dynamically"))\n• All wallet databases, auth records, and configuration\n• The application bundle itself\n\nThis action cannot be undone. Are you sure you want to proceed?")
         }
         .alert("Uninstallation Complete", isPresented: $wipeCompleted) {
             Button("Exit App Now") {
@@ -402,7 +412,7 @@ public struct AdvancedSheet: View {
                                 .foregroundColor(.red)
                                 .frame(width: 20)
                             VStack(alignment: .leading, spacing: 1) {
-                                Text("Synchronized Blockchain Storage (~18 GB)")
+                                Text("Synchronized Blockchain Storage (\(state.storageBreakdown?.isAvailable == true ? state.storageBreakdown!.formattedTotalSize : "measured dynamically"))")
                                     .font(.caption)
                                     .bold()
                                 Text(state.nodeManager.config.dataDirectory.path)

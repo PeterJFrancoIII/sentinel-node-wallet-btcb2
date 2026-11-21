@@ -143,6 +143,20 @@ struct NodePocketApp: App {
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)
         .commands {
+            CommandGroup(after: .appInfo) {
+                Button("Check for Updates…") {
+                    appState.activeSettingsTab = 1
+                    appState.showSettingsSheet = true
+                }
+                Divider()
+            }
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") {
+                    appState.activeSettingsTab = 0
+                    appState.showSettingsSheet = true
+                }
+                .keyboardShortcut(",", modifiers: [.command])
+            }
             CommandGroup(replacing: .newItem) {
                 Button("Show Sentinel Node Wallet") {
                     appDelegate.showMainWindow()
@@ -180,6 +194,11 @@ struct NodePocketApp: App {
                 }
                 Button("Clean Uninstall & Storage Wipe…") {
                     appState.showUninstallWipeSheet = true
+                }
+                Divider()
+                Button("Check for Updates…") {
+                    appState.activeSettingsTab = 1
+                    appState.showSettingsSheet = true
                 }
             }
         }

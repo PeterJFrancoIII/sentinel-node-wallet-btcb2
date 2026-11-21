@@ -3,12 +3,56 @@ import XCTest
 
 final class SystemHealthTests: XCTestCase {
     func testSystemHealthMonitorProducesValidMetrics() {
-        let tempDir = FileManager.default.temporaryDirectory
-        let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: tempDir)
+        let rootDir = URL(fileURLWithPath: NSHomeDirectory())
+        let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: rootDir)
 
-        XCTAssertGreaterThan(snapshot.freeDiskBytes, 0)
+        XCTAssertGreaterThan(snapshot.freeDiskBytes, 0, "Valid host filesystem must report strictly positive free bytes")
         XCTAssertGreaterThan(snapshot.freeDiskGB, 0.0)
+        XCTAssertFalse(snapshot.isDiskSpaceUnknown)
         XCTAssertFalse(snapshot.thermalDescription.isEmpty)
+    }
+
+    func testSystemHealthMonitorUnavailablePathReturnsUnknown() {
+        let unavailableDir = URL(fileURLWithPath: "/dev/null/non_existent_mount_\(UUID().uuidString)")
+        let snapshot = SystemHealthMonitor.shared.checkHealth(dataDirectory: unavailableDir)
+
+        XCTAssertEqual(snapshot.freeDiskBytes, -1)
+        XCTAssertTrue(snapshot.isDiskSpaceUnknown)
+        XCTAssertEqual(snapshot.freeDiskGB, -1.0)
+        XCTAssertFalse(snapshot.isDiskSpaceLow)
+        XCTAssertEqual(snapshot.diskCapacityDescription, "Unknown disk capacity")
+    }
+
+    func testSystemHealthSnapshotZeroFreeDiskSpaceIsLowAndNotUnknown() {
+        let snapshot = SystemHealthSnapshot(
+            thermalState: .nominal,
+            freeDiskBytes: 0,
+            powerState: .charging,
+            isLowPowerMode: false
+        )
+
+        XCTAssertFalse(snapshot.isDiskSpaceUnknown)
+        XCTAssertEqual(snapshot.freeDiskBytes, 0)
+        XCTAssertEqual(snapshot.freeDiskGB, 0.0)
+        XCTAssertTrue(snapshot.isDiskSpaceLow)
+        XCTAssertTrue(snapshot.isDiskSpaceCritical)
+        XCTAssertEqual(snapshot.diskCapacityDescription, "0 B available (Critical: full)")
+    }
+
+    func testSystemHealthSnapshotNegativeFreeDiskSpaceIsUnknown() {
+        let snapshot = SystemHealthSnapshot(
+            thermalState: .nominal,
+            freeDiskBytes: -1,
+            powerState: .charging,
+            isLowPowerMode: false
+        )
+
+        XCTAssertTrue(snapshot.isDiskSpaceUnknown)
+        XCTAssertEqual(snapshot.freeDiskBytes, -1)
+        XCTAssertEqual(snapshot.freeDiskGB, -1.0)
+        XCTAssertFalse(snapshot.isDiskSpaceLow)
+        XCTAssertFalse(snapshot.isDiskSpaceCritical)
+        XCTAssertEqual(snapshot.diskCapacityDescription, "Unknown disk capacity")
     }
 
     func testSmoothedHashrateCalculation() {

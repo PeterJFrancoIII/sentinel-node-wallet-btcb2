@@ -257,6 +257,12 @@ final class EncryptedWalletOnboardingTests: XCTestCase {
                 storeInKeychain: false
             )
             XCTFail("Must not overwrite an existing wallet")
+        } catch let err as WalletCreationError {
+            guard case .walletAlreadyExists(let msg) = err else {
+                XCTFail("Expected walletAlreadyExists, got \(err)")
+                return
+            }
+            XCTAssertTrue(msg.contains("main_wallet"))
         } catch WalletSecurityError.walletAlreadyExists(let name) {
             XCTAssertEqual(name, "main_wallet")
         }
