@@ -83,14 +83,22 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
-    echo "ERROR: Sparkle 'sign_update' binary not found at '${SIGN_UPDATE}'." >&2
-    exit 1
-fi
-
 # Fail closed if --require-trusted-tool-hash was specified but no hash was provided
 if [ "${REQUIRE_TOOL_HASH}" = "1" ] && [ -z "${EXPECTED_TOOL_HASH}" ]; then
     echo "ERROR: Mandatory --trusted-tool-hash is missing. Privileged signing requires verified tool provenance." >&2
+    exit 1
+fi
+
+# Validate format of expected tool hash if provided
+if [ -n "${EXPECTED_TOOL_HASH}" ]; then
+    if ! [[ "${EXPECTED_TOOL_HASH}" =~ ^[0-9a-f]{64}$ ]]; then
+        echo "ERROR: Invalid trusted tool hash format (must be 64-char lowercase hex SHA-256): '${EXPECTED_TOOL_HASH}'." >&2
+        exit 1
+    fi
+fi
+
+if [ -z "${SIGN_UPDATE}" ] || [ ! -x "${SIGN_UPDATE}" ]; then
+    echo "ERROR: Sparkle 'sign_update' binary not found or not executable at '${SIGN_UPDATE}'." >&2
     exit 1
 fi
 
