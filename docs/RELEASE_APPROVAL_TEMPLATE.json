@@ -1,0 +1,24 @@
+{
+  "$comment": "This template illustrates the field structure for docs/RELEASE_APPROVAL.json required on protected origin/main under Policy B. This template file itself does NOT constitute an approved release record.",
+  "schema_version": "1.0.0",
+  "release_target": {
+    "target_tag": "v1.0.0-build5",
+    "approved_commit_sha": "0000000000000000000000000000000000000000",
+    "bundle_version": "1.0.0",
+    "build_number": 5
+  },
+  "approval_metadata": {
+    "approver_identity": "PeterJFrancoIII",
+    "approval_policy": "Policy B: Independent Approved Release Commit on Protected Main",
+    "approved_at_utc": "2026-11-20T00:00:00Z",
+    "authorized_scope": "NODEPOCKET_BTCB2_ONLY",
+    "review_reference": "Independent Architect Review Receipt 196 / WO-122"
+  },
+  "security_attestation": {
+    "spending_authority_disarmed": true,
+    "authorized_spending_limit_btc": "0.00",
+    "restricted_rpc_methods_blocked": 12,
+    "sparkle_public_ed_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "expected_unsigned_bundle_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

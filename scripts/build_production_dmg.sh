@@ -8,9 +8,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 APP="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 DIST="${ROOT_DIR}/dist"
-BUNDLE_ID="app.nodepocket.btcb2"
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
 fail() { printf "RELEASE BLOCKED: %s\n" "$*" >&2; exit 1; }
 require() { local key="$1"; [ -n "${!key:-}" ] || fail "Missing required setting ${key}"; }
+
+SIGN_ONLY=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --sign-only)
+            SIGN_ONLY=1
+            shift
+            ;;
+        --app-bundle)
+            [ $# -ge 2 ] || fail "Missing argument for --app-bundle"
+            APP="$2"
+            shift 2
+            ;;
+        *)
+            fail "Unknown option '$1'"
+            ;;
+    esac
+done
 
 [ "${SENTINEL_RELEASE_SECURITY_APPROVED:-}" = "1" ] ||
     fail "Release approval missing. Source and CI alone do not authorize distribution."
@@ -45,11 +63,22 @@ if not isinstance(apps, list) or sys.argv[2] not in apps:
     raise SystemExit(1)
 PY
 
-# Existing builder creates an ad-hoc local bundle after SHA pinning the Knots
-# archive and bitcoind. Re-sign everything before any prospective release.
-"${SCRIPT_DIR}/build_app.sh"
+if [ "${SIGN_ONLY}" = "1" ]; then
+    echo "✓ Running in --sign-only mode: skipping SwiftPM build / compilation in privileged environment."
+    [ -d "${APP}" ] || fail "Missing pre-built macOS app at '${APP}' for sign-only mode."
+else
+    # Existing builder creates an ad-hoc local bundle after SHA pinning the Knots
+    # archive and bitcoind. Re-sign everything before any prospective release.
+    "${SCRIPT_DIR}/build_app.sh"
+fi
+
 [ -d "${APP}" ] || fail "Missing built macOS app."
 plutil -lint "${APP}/Contents/Info.plist" >/dev/null
+ACTUAL_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist" 2>/dev/null || echo "${BUNDLE_ID}")"
+[ "${ACTUAL_BUNDLE_ID}" = "${BUNDLE_ID}" ] || fail "CFBundleIdentifier in Info.plist (${ACTUAL_BUNDLE_ID}) does not match expected BUNDLE_ID (${BUNDLE_ID})"
+PUBLIC_KEY="$(/usr/libexec/PlistBuddy -c 'Print :SUPublicEDKey' "${APP}/Contents/Info.plist" 2>/dev/null || true)"
+[ -n "${PUBLIC_KEY}" ] || fail "App bundle Info.plist missing mandatory SUPublicEDKey for production auto-update."
+
 ENTITLEMENTS="${DIST}/Production.entitlements.plist"
 cat > "${ENTITLEMENTS}" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,9 +87,21 @@ cat > "${ENTITLEMENTS}" <<EOF
 <plist version="1.0"><dict>
 <key>com.apple.developer.associated-domains</key>
 <array><string>webcredentials:${DOMAIN}</string></array>
+<key>keychain-access-groups</key>
+<array><string>${SENTINEL_APPLE_TEAM_ID}.${ACTUAL_BUNDLE_ID}</string></array>
 </dict></plist>
 EOF
 plutil -lint "${ENTITLEMENTS}" >/dev/null
+
+# Sign nested frameworks inside-out before signing the outer application bundle
+if [ -d "${APP}/Contents/Frameworks/Sparkle.framework" ]; then
+    find "${APP}/Contents/Frameworks/Sparkle.framework" -type f -perm +111 -exec \
+        codesign --force --options runtime --timestamp \
+        --sign "${SENTINEL_DEVELOPER_ID_APPLICATION}" {} +
+    codesign --force --options runtime --timestamp \
+        --sign "${SENTINEL_DEVELOPER_ID_APPLICATION}" "${APP}/Contents/Frameworks/Sparkle.framework"
+fi
+
 for binary in bitcoind bitcoin-cli; do
     codesign --force --options runtime --timestamp \
         --sign "${SENTINEL_DEVELOPER_ID_APPLICATION}" "${APP}/Contents/MacOS/${binary}"
@@ -88,7 +129,7 @@ cat > "${DIST}/BUILD_MANIFEST.json" <<EOF
   "build_type": "developer_id_notarized_candidate",
   "git_commit": "$(git -C "${ROOT_DIR}" rev-parse HEAD)",
   "team_id": "${SENTINEL_APPLE_TEAM_ID}",
-  "bundle_id": "${BUNDLE_ID}",
+  "bundle_id": "${ACTUAL_BUNDLE_ID}",
   "associated_domain": "${DOMAIN}",
   "artifacts": {
     "SentinelNodeWallet_sha256": "${APP_SHA}",
@@ -100,7 +141,8 @@ cat > "${DIST}/BUILD_MANIFEST.json" <<EOF
 EOF
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")"
-DMG="${DIST}/Sentinel-Node-Wallet-BTCB2-v${VERSION}-macOS-arm64-notarized.dmg"
+BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP}/Contents/Info.plist" 2>/dev/null || echo "0")"
+DMG="${DIST}/Sentinel-Node-Wallet-BTCB2-v${VERSION}-build${BUILD}-macOS-arm64-notarized.dmg"
 STAGING="${DIST}/dmg_staging"
 mkdir -p "${STAGING}"
 cp -R "${APP}" "${STAGING}/"
@@ -121,6 +163,13 @@ PY
 xcrun stapler staple "${DMG}"
 xcrun stapler validate "${DMG}"
 hdiutil verify "${DMG}" >/dev/null
+
+# Verify Gatekeeper compliance on signed application bundle and stapled DMG
+spctl --assess --type execute --verbose "${APP}" ||
+    fail "Gatekeeper spctl assessment failed on signed app bundle."
+spctl --assess --type open --context context:primary-signature --verbose "${DMG}" ||
+    fail "Gatekeeper spctl assessment failed on stapled DMG."
+
 shasum -a 256 "${DMG}" > "${DIST}/SHA256SUMS.txt"
 printf "Notarized build candidate: %s\n" "${DMG}"
 printf "No production deployment or real-funds authorization is implied.\n"
