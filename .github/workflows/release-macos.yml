@@ -312,6 +312,28 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # The exact Sparkle tool bytes are transported as UNTRUSTED DATA from
+      # the secret-free job. The trusted main signer must verify these bytes
+      # against an independently operator-approved SHA-256 before executing.
+      - name: Prepare Sparkle tool transport (unprivileged, no signing keys)
+        run: |
+          TOOL=".build/artifacts/sparkle/Sparkle/bin/sign_update"
+          if [ ! -f "$TOOL" ] || [ ! -x "$TOOL" ]; then
+            echo "ERROR: SwiftPM Sparkle sign_update missing at expected artifact path." >&2
+            exit 1
+          fi
+          mkdir -p dist/sparkle-tool-transport
+          cp "$TOOL" dist/sparkle-tool-transport/sign_update
+          echo "Untrusted Sparkle tool staged for isolated hash validation; NOT executed."
+
+      - name: Upload untrusted Sparkle tool bytes for isolated verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: untrusted-sparkle-sign-update
+          path: dist/sparkle-tool-transport/sign_update
+          retention-days: 1
+          if-no-files-found: error
+
   # =========================================================================
   # Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
   # =========================================================================
@@ -346,6 +368,12 @@ jobs:
         with:
           name: unsigned-app-bundle
           path: dist
+
+      - name: Download untrusted Sparkle tool bytes
+        uses: actions/download-artifact@v4
+        with:
+          name: untrusted-sparkle-sign-update
+          path: dist/trusted-tools
 
       - name: Verify and Safely Extract Unsigned App Bundle Artifact
         env:
@@ -392,6 +420,31 @@ jobs:
           tar -xzf "${ARCHIVE_PATH}" -C dist/
           test -d "dist/Sentinel Node Wallet.app" || { echo "ERROR: Extraction failed." >&2; exit 1; }
           echo "✓ Successfully extracted verified application bundle."
+
+      # The downloaded tool is NEVER run until a digest controlled outside
+      # the candidate checkout is checked. No signing secrets in this step.
+      - name: Verify Sparkle sign_update tool bytes before credential access
+        env:
+          EXPECTED_TOOL_SHA256: ${{ vars.SPARKLE_SIGN_UPDATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          TOOL="dist/trusted-tools/sign_update"
+          if [[ ! "$EXPECTED_TOOL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: Missing or malformed independently approved Sparkle tool digest." >&2
+            exit 1
+          fi
+          if [ ! -f "$TOOL" ] || [ -L "$TOOL" ]; then
+            echo "ERROR: Sparkle tool artifact missing or is a symbolic link." >&2
+            exit 1
+          fi
+          ACTUAL_TOOL_SHA256="$(shasum -a 256 "$TOOL" | awk '{print $1}')"
+          if [ "$ACTUAL_TOOL_SHA256" != "$EXPECTED_TOOL_SHA256" ]; then
+            echo "ERROR: Transported Sparkle tool does not match owner-controlled digest." >&2
+            exit 1
+          fi
+          chmod 500 "$TOOL"
+          test -x "$TOOL" || { echo "ERROR: Verified Sparkle tool is not executable." >&2; exit 1; }
+          echo "Verified transported Sparkle sign_update bytes against trusted release configuration."
 
       # Gating Stage 6: Environment & Secrets Verification (Fail-Closed)
       - name: Verify production signing prerequisites (Fail-Closed)
@@ -514,6 +567,7 @@ jobs:
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" \
             --require-trusted-tool-hash \
+            --sign-update-bin dist/trusted-tools/sign_update \
             --trusted-tool-hash "${SPARKLE_TOOL_HASH}" \
             --signature-file-output dist/SPARKLE_SIGNATURE.base64 > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
