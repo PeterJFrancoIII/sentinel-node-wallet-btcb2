@@ -122,12 +122,22 @@ jobs:
             exit 1
           fi
 
-          # Stream origin/main:docs/RELEASE_APPROVAL.json via stdin as pure data (O1-G1A-01 P0 Rework)
-          APPROVED_SHA="$(git show origin/main:docs/RELEASE_APPROVAL.json | python3 - <<'PY'
+          # Secure Temporary Data File Parser for origin/main:docs/RELEASE_APPROVAL.json (G1A-R2-01 P0 Rework)
+          APPROVAL_TMP="$(mktemp -t release_approval.XXXXXX.json 2>/dev/null || mktemp "${RUNNER_TEMP:-/tmp}/release_approval.XXXXXX.json")"
+          trap 'rm -f "${APPROVAL_TMP}"' EXIT
+          git show origin/main:docs/RELEASE_APPROVAL.json > "${APPROVAL_TMP}" || {
+            echo "ERROR: Failed to retrieve origin/main:docs/RELEASE_APPROVAL.json" >&2
+            rm -f "${APPROVAL_TMP}"
+            exit 1
+          }
+
+          APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" <<'PY'
           import json, re, sys
 
+          tmp_path = sys.argv[1]
           try:
-              data = json.load(sys.stdin)
+              with open(tmp_path, "r", encoding="utf-8") as f:
+                  data = json.load(f)
           except Exception as e:
               print(f"ERROR: Failed to parse origin/main:docs/RELEASE_APPROVAL.json as JSON: {e}", file=sys.stderr)
               sys.exit(2)
@@ -178,8 +188,10 @@ jobs:
           print(sha)
           PY
           )"
+          PARSE_STATUS=$?
+          rm -f "${APPROVAL_TMP}"
 
-          if [ $? -ne 0 ] || [ -z "${APPROVED_SHA}" ]; then
+          if [ ${PARSE_STATUS} -ne 0 ] || [ -z "${APPROVED_SHA}" ]; then
             echo "ERROR: Failed to validate origin/main:docs/RELEASE_APPROVAL.json." >&2
             exit 1
           fi

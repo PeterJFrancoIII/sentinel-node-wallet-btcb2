@@ -2596,12 +2596,23 @@ exit 0
             return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
         }
 
-        // 2. Test exact stdin streaming parser used in workflow (P0 Data Injection Resistance)
-        let workflowParserScript = """
+        // 2. Test exact bash workflow shell step using python3 - "${APPROVAL_TMP}" <<'PY' (G1A-R2-01 / G1A-R2-05)
+        let workflowBashStepScript = """
+#!/bin/bash
+set -eo pipefail
+
+JSON_SRC="$1"
+APPROVAL_TMP="$(mktemp -t release_approval.XXXXXX.json 2>/dev/null || mktemp /tmp/release_approval.XXXXXX.json)"
+trap 'rm -f "${APPROVAL_TMP}"' EXIT
+cat "${JSON_SRC}" > "${APPROVAL_TMP}" || { rm -f "${APPROVAL_TMP}"; exit 1; }
+
+APPROVED_SHA="$(python3 - "${APPROVAL_TMP}" <<'PY'
 import json, re, sys
 
+tmp_path = sys.argv[1]
 try:
-    data = json.load(sys.stdin)
+    with open(tmp_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 except Exception as e:
     print(f"ERROR: Failed to parse origin/main:docs/RELEASE_APPROVAL.json as JSON: {e}", file=sys.stderr)
     sys.exit(2)
@@ -2650,13 +2661,30 @@ if sa.get("restricted_rpc_methods_blocked") != 12:
     sys.exit(1)
 
 print(sha)
-"""
-        let parserScriptFile = tempBase.appendingPathComponent("parser.py")
-        try workflowParserScript.write(to: parserScriptFile, atomically: true, encoding: .utf8)
+PY
+)"
+PARSE_STATUS=$?
+rm -f "${APPROVAL_TMP}"
 
-        // Valid template must pass through stdin without interpolation
-        let validRes = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: templateData)
-        XCTAssertEqual(validRes.status, 0, "Valid template must parse cleanly from stdin: \(validRes.output)")
+if [ ${PARSE_STATUS} -ne 0 ] || [ -z "${APPROVED_SHA}" ]; then
+  exit 1
+fi
+echo "${APPROVED_SHA}"
+"""
+        let bashStepFile = tempBase.appendingPathComponent("workflow_step.sh")
+        try workflowBashStepScript.write(to: bashStepFile, atomically: true, encoding: .utf8)
+        _ = runCmdWithStdin("/bin/chmod", ["+x", bashStepFile.path])
+
+        func runStepWithData(_ data: Data) -> (status: Int32, output: String) {
+            let tmpDataFile = tempBase.appendingPathComponent("test_data_\(UUID().uuidString).json")
+            try? data.write(to: tmpDataFile)
+            defer { try? FileManager.default.removeItem(at: tmpDataFile) }
+            return runCmdWithStdin("/bin/bash", [bashStepFile.path, tmpDataFile.path])
+        }
+
+        // Valid template must pass through workflow bash step
+        let validRes = runStepWithData(templateData)
+        XCTAssertEqual(validRes.status, 0, "Valid template must parse cleanly via workflow bash step: \(validRes.output)")
         XCTAssertEqual(validRes.output.trimmingCharacters(in: .whitespacesAndNewlines), "0000000000000000000000000000000000000000")
 
         // Test with raw string containing adversarial quotes, newlines, and triple quotes (Data Injection Proof)
@@ -2665,7 +2693,7 @@ print(sha)
         injectedAM["review_reference"] = "Malicious review ''''' \"\"\" ; os.system('echo pwned') # /*"
         injectedObj["approval_metadata"] = injectedAM
         let injectedData = try JSONSerialization.data(withJSONObject: injectedObj)
-        let injectedRes = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: injectedData)
+        let injectedRes = runStepWithData(injectedData)
         XCTAssertEqual(injectedRes.status, 0, "Data injection attempt in string field must be safely handled: \(injectedRes.output)")
 
         // Negative Case A: Non-40 char commit SHA
@@ -2673,7 +2701,7 @@ print(sha)
         var badSHART = releaseTarget!
         badSHART["approved_commit_sha"] = "short_sha"
         badSHAObj["release_target"] = badSHART
-        let resBadSHA = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badSHAObj))
+        let resBadSHA = runStepWithData(try JSONSerialization.data(withJSONObject: badSHAObj))
         XCTAssertEqual(resBadSHA.status, 1, "Non-40 char commit SHA must fail with code 1")
 
         // Negative Case B: Build number <= 3
@@ -2681,7 +2709,7 @@ print(sha)
         var badBuildRT = releaseTarget!
         badBuildRT["build_number"] = 3
         badBuildObj["release_target"] = badBuildRT
-        let resBadBuild = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badBuildObj))
+        let resBadBuild = runStepWithData(try JSONSerialization.data(withJSONObject: badBuildObj))
         XCTAssertEqual(resBadBuild.status, 1, "Build number <= 3 must fail with code 1")
 
         // Negative Case C: Scope not NODEPOCKET_BTCB2_ONLY
@@ -2689,7 +2717,7 @@ print(sha)
         var badScopeAM = approvalMetadata!
         badScopeAM["authorized_scope"] = "OTHER_PROJECT"
         badScopeObj["approval_metadata"] = badScopeAM
-        let resBadScope = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badScopeObj))
+        let resBadScope = runStepWithData(try JSONSerialization.data(withJSONObject: badScopeObj))
         XCTAssertEqual(resBadScope.status, 1, "Unauthorized scope must fail with code 1")
 
         // Negative Case D: Spending not disarmed ($0.00)
@@ -2697,13 +2725,13 @@ print(sha)
         var badSpendSA = securityAttestation!
         badSpendSA["spending_authority_disarmed"] = false
         badSpendObj["security_attestation"] = badSpendSA
-        let resBadSpend = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: try JSONSerialization.data(withJSONObject: badSpendObj))
+        let resBadSpend = runStepWithData(try JSONSerialization.data(withJSONObject: badSpendObj))
         XCTAssertEqual(resBadSpend.status, 1, "Non-disarmed spending must fail with code 1")
 
-        // Negative Case E: Malformed JSON syntax
+        // Negative Case E: Malformed JSON syntax (exits 2 from python json.load)
         let malformedData = Data("{\"unclosed_json: true".utf8)
-        let resMalformed = runCmdWithStdin("/usr/bin/python3", [parserScriptFile.path], input: malformedData)
-        XCTAssertEqual(resMalformed.status, 2, "Malformed JSON must fail with code 2")
+        let resMalformed = runStepWithData(malformedData)
+        XCTAssertEqual(resMalformed.status, 2, "Malformed JSON must fail fail-closed with code 2")
     }
 
     func testWorkflowImmutableSHAHandoffAndTagMovementCase37() throws {
