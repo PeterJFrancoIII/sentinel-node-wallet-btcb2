@@ -91,6 +91,17 @@ struct VerifierDeviceOwnerChallenger: DeviceOwnerChallenger {
     }
 }
 
+struct MaliciousAlwaysApproveVerifier: SpendAuthorizationVerifier {
+    func verify(
+        authorization: SpendAuthorization,
+        method: String,
+        params: [Any],
+        walletName: String?
+    ) -> Bool {
+        return true
+    }
+}
+
 @main
 struct ReleaseLockVerifier {
     static func main() async {
@@ -214,7 +225,7 @@ struct ReleaseLockVerifier {
             dataDirectory: tempDir,
             deviceOwnerChallenger: VerifierDeviceOwnerChallenger()
         )
-        client.registerAuthorizationVerifier(authCoord.spendAuthorizationVerifier)
+        try! client.registerAuthorizationVerifier(authCoord.spendAuthorizationVerifier)
 
         let (secret, _, codes) = try! await authCoord.generateEnrollmentSecret(username: "operator_ci")
         let code = WalletAuthCoordinator.generateTOTP(secret: secret)
@@ -302,6 +313,42 @@ struct ReleaseLockVerifier {
         // SECTION 3: Negative Security Validations & Bypass Prevention
         // -------------------------------------------------------------
         print("\n--- Section 3: Negative Security Validations (Tampering, Replay, Expiry, Allowlist) ---")
+
+        // 3-pre-A: Attempt to inject malicious always-approve verifier after registration fails closed
+        do {
+            try client.registerAuthorizationVerifier(MaliciousAlwaysApproveVerifier())
+            fatalError("FAILURE: Malicious verifier was accepted by RPC client after registration!")
+        } catch let err as RPCClientError {
+            if case .verifierAlreadyRegistered = err {
+                print("✓ Verified: Malicious verifier replacement after registration failed closed with verifierAlreadyRegistered.")
+            } else {
+                fatalError("FAILURE: Malicious verifier replacement threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Malicious verifier replacement threw unexpected error: \(error)")
+        }
+
+        // 3-pre-B: Attempt to inject malicious verifier before trusted registration fails closed
+        let uninitializedClient = BitcoinRPCClient(user: "ci", password: "ci", urlSession: spySession, isBroadcastRestricted: false)
+        do {
+            try uninitializedClient.registerAuthorizationVerifier(MaliciousAlwaysApproveVerifier())
+            fatalError("FAILURE: Malicious verifier was accepted on uninitialized client!")
+        } catch let err as RPCClientError {
+            if case .unauthorizedVerifier = err {
+                print("✓ Verified: Malicious verifier injection before registration failed closed with unauthorizedVerifier.")
+            } else {
+                fatalError("FAILURE: Malicious verifier injection threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Malicious verifier injection threw unexpected error: \(error)")
+        }
+
+        // 3-pre-C: Malformed / truncated PSBT parsing fails closed
+        let malformedInputs = WalletManager.extractInputsFromPsbtBase64("not_a_valid_base64_psbt")
+        guard malformedInputs.isEmpty else {
+            fatalError("FAILURE: Malformed PSBT did not return empty inputs!")
+        }
+        print("✓ Verified: Malformed / truncated PSBT failed closed with zero extracted inputs.")
 
         // 3a. Forged token SpendAuthorization rejected at transport (P0-1)
         let forgedAuth = SpendAuthorization(
@@ -591,6 +638,50 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Altered fee rate threw unexpected error: \(error)")
         }
 
+        // 3-fee: Fee above approved cap (actual fee > auth.maxFeeSats) rejected at transport
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
+                maxFeeSats: 50_000, // Actual fee 50_000 exceeds auth maxFeeSats 500!
+                utxoFingerprint: "test_input_txid:0",
+                walletName: walletName,
+                authorization: validSpendAuth
+            )
+            fatalError("FAILURE: Fee exceeding approved maxFeeSats was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Actual fee above approved cap failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: High max fee threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: High max fee threw unexpected error: \(error)")
+        }
+
+        // 3-utxo: UTXO drift (actual UTXO fingerprint != auth.utxoFingerprint) rejected at transport
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
+                maxFeeSats: 500,
+                utxoFingerprint: "drifted_utxo_txid:99", // Drifted UTXO!
+                walletName: walletName,
+                authorization: validSpendAuth
+            )
+            fatalError("FAILURE: Drifted UTXO fingerprint was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: UTXO drift failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: UTXO drift threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: UTXO drift threw unexpected error: \(error)")
+        }
+
         // 3k. Mismatched chain rejected at transport (P0-R210-02)
         let testnetAuth = SpendAuthorization(
             approvalId: UUID(),
@@ -669,7 +760,8 @@ struct ReleaseLockVerifier {
             amountSats: 50_000,
             feeSats: 1_000,
             satPerVB: 10, // Preview has satPerVB: 10, but approval has satPerVB: 5
-            estimatedVSize: 140
+            estimatedVSize: 140,
+            selectedInputs: ["test_input_txid:0"]
         )
         let mismatchSatPerVBApproval = try! await authCoord.requestHighRiskApproval(
             capability: capability,
@@ -683,7 +775,7 @@ struct ReleaseLockVerifier {
                 maxFeeSats: 1_000,
                 satPerVB: 5,
                 previewId: tamperedContextPreview.id,
-                utxoFingerprint: "auto_coin_selection:\(tamperedContextPreview.id.uuidString)",
+                utxoFingerprint: "test_input_txid:0",
                 chain: "main",
                 nonce: tamperedContextPreview.id.uuidString
             )
@@ -714,6 +806,7 @@ struct ReleaseLockVerifier {
             feeSats: 1_000,
             satPerVB: 5,
             estimatedVSize: 140,
+            selectedInputs: ["test_input_txid:0"],
             createdAt: Date().addingTimeInterval(-120),
             validityWindowSeconds: 60.0
         )
@@ -744,7 +837,8 @@ struct ReleaseLockVerifier {
             amountSats: 50_000,
             feeSats: 1_000,
             satPerVB: 5,
-            estimatedVSize: 140
+            estimatedVSize: 140,
+            selectedInputs: ["test_input_txid:0"]
         )
         do {
             _ = try await walletMgr.executeAuthorizedSend(
@@ -772,7 +866,8 @@ struct ReleaseLockVerifier {
             amountSats: 50_000,
             feeSats: 1_000,
             satPerVB: 5,
-            estimatedVSize: 140
+            estimatedVSize: 140,
+            selectedInputs: ["test_input_txid:0"]
         )
         do {
             _ = try await walletMgr.executeAuthorizedSend(

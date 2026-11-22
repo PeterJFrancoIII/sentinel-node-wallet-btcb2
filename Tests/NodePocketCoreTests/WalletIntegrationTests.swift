@@ -127,7 +127,8 @@ final class WalletIntegrationTests: XCTestCase {
             amountSats: 10_000,
             feeSats: 500,
             satPerVB: 2,
-            estimatedVSize: 140
+            estimatedVSize: 140,
+            selectedInputs: ["dummy_input:0"]
         )
 
         do {
@@ -328,6 +329,86 @@ final class WalletIntegrationTests: XCTestCase {
             XCTAssertEqual(wallet, "test_vault")
             XCTAssertEqual(txid, "synthetic_txid_1234567890abcdef", "Txid must be preserved on broadcast success")
             XCTAssertTrue(underlying.contains("Wallet lock failed"), "Error must report wallet lock failure: \(underlying)")
+        }
+    }
+
+    func testExecuteAuthorizedSendEmptyInputsFailsClosedWithPreviewTampered() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_empty_inputs_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let urlSession = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(user: "test", password: "test", urlSession: urlSession, isBroadcastRestricted: false)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("test_addr_book.json"))
+        _ = try testAddressBook.addRecipient(name: "Test Recipient", address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        await authCoord.setMockDeviceOwnerSuccessForTesting(true)
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_empty")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_empty",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "test_vault"
+        )
+        try await manager.walletInventory.setOwner(for: "test_vault", owner: "operator_empty")
+
+        // Preview with EMPTY selectedInputs must fail closed with previewTampered
+        let emptyInputsPreview = FundedTxPreview(
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 10_000,
+            feeSats: 500,
+            satPerVB: 2,
+            estimatedVSize: 140,
+            selectedInputs: [] // Empty!
+        )
+
+        let dummyApproval = try await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: emptyInputsPreview.destinationAddress,
+            reason: "Empty inputs test",
+            txContext: TransactionSpendContext(
+                walletName: "test_vault",
+                destinationAddress: emptyInputsPreview.destinationAddress,
+                amountSats: 10_000,
+                maxFeeSats: 500,
+                satPerVB: 2,
+                previewId: emptyInputsPreview.id,
+                utxoFingerprint: "dummy",
+                chain: "main"
+            )
+        )
+
+        do {
+            _ = try await manager.executeAuthorizedSend(
+                preview: emptyInputsPreview,
+                explicitPassphrase: "mock_passphrase",
+                capability: capability,
+                approval: dummyApproval
+            )
+            XCTFail("Must fail closed when selectedInputs is empty")
+        } catch let err as WalletSecurityError {
+            guard case .previewTampered = err else {
+                XCTFail("Expected previewTampered, got \(err)")
+                return
+            }
         }
     }
 }

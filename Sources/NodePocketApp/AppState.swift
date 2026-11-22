@@ -996,14 +996,10 @@ public final class AppState: ObservableObject {
         guard let walletName = currentWallet, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
-        let utxoFingerprint: String
-        if !preview.selectedInputs.isEmpty {
-            utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
-        } else {
-            let digestPayload = "psbt_funding_plan:\(walletName):\(preview.destinationAddress):\(preview.amountSats):\(preview.satPerVB):\(preview.id.uuidString)"
-            let hash = SHA256.hash(data: Data(digestPayload.utf8))
-            utxoFingerprint = hash.map { String(format: "%02x", $0) }.joined()
+        guard !preview.selectedInputs.isEmpty else {
+            throw WalletSecurityError.previewTampered
         }
+        let utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,

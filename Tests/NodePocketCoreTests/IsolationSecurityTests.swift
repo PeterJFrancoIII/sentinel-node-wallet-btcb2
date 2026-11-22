@@ -195,7 +195,7 @@ final class IsolationSecurityTests: XCTestCase {
             password: "test",
             isBroadcastRestricted: false
         )
-        rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+        try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
         do {
             _ = try await rpc.sendToAddress(
                 address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
@@ -229,7 +229,7 @@ final class IsolationSecurityTests: XCTestCase {
             password: "test",
             isBroadcastRestricted: false
         )
-        rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+        try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
 
         // 1. Destination mismatch
         do {
@@ -309,6 +309,104 @@ final class IsolationSecurityTests: XCTestCase {
                 authorization: validAuth
             )
             XCTFail("Altered fee rate must fail closed")
+        } catch let error as RPCClientError {
+            guard case .transactionBroadcastDisabled = error else {
+                XCTFail("Expected transactionBroadcastDisabled, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testMaliciousVerifierRegistrationRejected() async throws {
+        struct MockAlwaysApproveVerifier: SpendAuthorizationVerifier {
+            func verify(authorization: SpendAuthorization, method: String, params: [Any], walletName: String?) -> Bool {
+                return true
+            }
+        }
+
+        let rpc = BitcoinRPCClient(user: "test", password: "test", isBroadcastRestricted: false)
+
+        // 1. Unregistered client rejects arbitrary non-coordinator verifier
+        do {
+            try rpc.registerAuthorizationVerifier(MockAlwaysApproveVerifier())
+            XCTFail("Must reject unauthenticated verifier")
+        } catch let err as RPCClientError {
+            guard case .unauthorizedVerifier = err else {
+                XCTFail("Expected unauthorizedVerifier, got \(err)")
+                return
+            }
+        }
+
+        // 2. Register genuine coordinator verifier
+        let (coord, _) = try await createCoordinatorAndSpendAuth()
+        try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+
+        // 3. Second registration must fail closed with verifierAlreadyRegistered
+        do {
+            try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+            XCTFail("Must reject secondary registration of verifier")
+        } catch let err as RPCClientError {
+            guard case .verifierAlreadyRegistered = err else {
+                XCTFail("Expected verifierAlreadyRegistered, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testSpendAuthorizationFeeCapExceededRejectedAtTransport() async throws {
+        let (coord, validAuth) = try await createCoordinatorAndSpendAuth(
+            authorizedMethod: "sendtoaddress",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 5,
+            walletName: "vault1"
+        )
+        let rpc = BitcoinRPCClient(user: "test", password: "test", isBroadcastRestricted: false)
+        try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+
+        do {
+            _ = try await rpc.sendToAddress(
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+                amount: 0.00025,
+                feeRateSatPerVB: 5,
+                maxFeeSats: 25_000, // Exceeds auth maxFeeSats of 500!
+                utxoFingerprint: "mock_utxo",
+                walletName: "vault1",
+                authorization: validAuth
+            )
+            XCTFail("Fee cap exceedance must fail closed at transport")
+        } catch let error as RPCClientError {
+            guard case .transactionBroadcastDisabled = error else {
+                XCTFail("Expected transactionBroadcastDisabled, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testSpendAuthorizationUtxoDriftRejectedAtTransport() async throws {
+        let (coord, validAuth) = try await createCoordinatorAndSpendAuth(
+            authorizedMethod: "sendtoaddress",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 5,
+            walletName: "vault1"
+        )
+        let rpc = BitcoinRPCClient(user: "test", password: "test", isBroadcastRestricted: false)
+        try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+
+        do {
+            _ = try await rpc.sendToAddress(
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+                amount: 0.00025,
+                feeRateSatPerVB: 5,
+                maxFeeSats: 500,
+                utxoFingerprint: "drifted_utxo_txid:999", // Mismatch against auth utxoFingerprint!
+                walletName: "vault1",
+                authorization: validAuth
+            )
+            XCTFail("UTXO drift must fail closed at transport")
         } catch let error as RPCClientError {
             guard case .transactionBroadcastDisabled = error else {
                 XCTFail("Expected transactionBroadcastDisabled, got \(error)")

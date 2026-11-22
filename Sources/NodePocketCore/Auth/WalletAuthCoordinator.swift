@@ -542,8 +542,8 @@ public actor WalletAuthCoordinator {
 
             // 7. Method-specific parameter checks
             if normalizedMethod == "sendtoaddress" {
-                // Strict arity requirement: must have at least 10 parameters to include explicit fee_rate
-                guard params.count >= 10 else { return false }
+                // Strict arity requirement: must have at least 12 parameters to include explicit fee_rate, maxFeeSats, and utxoFingerprint
+                guard params.count >= 12 else { return false }
 
                 // Destination address match
                 guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
@@ -572,6 +572,23 @@ public actor WalletAuthCoordinator {
                     return false
                 }
                 guard feeRateVal == auth.satPerVB, feeRateVal > 0 else { return false }
+
+                // Max fee cap verification: params[10] must not exceed auth.maxFeeSats
+                guard !(params[10] is NSNull) else { return false }
+                let actualFeeSats: Int64
+                if let feeInt64 = params[10] as? Int64 {
+                    actualFeeSats = feeInt64
+                } else if let feeInt = params[10] as? Int {
+                    actualFeeSats = Int64(feeInt)
+                } else {
+                    return false
+                }
+                guard actualFeeSats <= auth.maxFeeSats, actualFeeSats >= 0 else { return false }
+
+                // UTXO fingerprint verification: params[11] must be non-empty and strictly match auth.utxoFingerprint
+                guard let actualUtxo = params[11] as? String, !actualUtxo.isEmpty, actualUtxo == auth.utxoFingerprint else {
+                    return false
+                }
 
                 return true
             } else {

@@ -349,7 +349,7 @@ public actor WalletManager {
             allowUnauthenticatedForTesting: allowUnauthenticatedForTesting
         )
         if let coord = authCoordinator {
-            rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+            try? rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
         }
     }
 
@@ -1023,28 +1023,30 @@ public actor WalletManager {
             throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats)
         }
 
-        // 4. Determine exact or estimated fee & vsize
+        // 4. Determine exact funded PSBT fee, vsize, and UTXO inputs
         let btcAmount = SatoshiMath.toBTC(sats: amountSats)
-        var feeSats: Int64
-        var estimatedVSize: Int
-        var changeSats: Int64
-        var selectedInputs: [String] = []
-
-        if let funded = try? await rpcClient.walletCreateFundedPsbt(
-            outputs: [trimmedAddr: btcAmount],
-            feeRateSatPerVB: feeQuote.satPerVB,
-            walletName: walletName
-        ) {
-            feeSats = SatoshiMath.toSats(btc: funded.fee)
-            estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
-            changeSats = max(0, spendableSats - amountSats - feeSats)
-            selectedInputs = Self.extractInputsFromPsbtBase64(funded.psbt)
-        } else {
-            // Standard Native SegWit 1-input 2-output transaction: ~141 vB
-            estimatedVSize = 141
-            feeSats = Int64(max(1, feeQuote.satPerVB) * estimatedVSize)
-            changeSats = max(0, spendableSats - amountSats - feeSats)
+        let funded: FundedPsbtResponse
+        do {
+            funded = try await rpcClient.walletCreateFundedPsbt(
+                outputs: [trimmedAddr: btcAmount],
+                feeRateSatPerVB: feeQuote.satPerVB,
+                walletName: walletName
+            )
+        } catch {
+            throw WalletSecurityError.invalidAmount("Failed to construct exact funded PSBT for transaction preview: \(error.localizedDescription)")
         }
+
+        let selectedInputs = Self.extractInputsFromPsbtBase64(funded.psbt)
+        guard !selectedInputs.isEmpty else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        let feeSats = SatoshiMath.toSats(btc: funded.fee)
+        guard feeSats > 0 else {
+            throw WalletSecurityError.invalidAmount("Transaction fee must be strictly positive.")
+        }
+        let estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
+        let changeSats = max(0, spendableSats - amountSats - feeSats)
 
         guard spendableSats >= (amountSats + feeSats) else {
             throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
@@ -1112,15 +1114,16 @@ public actor WalletManager {
             }
         }
 
-        // 5. Construct immutable transaction spend context
-        let utxoFingerprint: String
-        if !preview.selectedInputs.isEmpty {
-            utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
-        } else {
-            let digestPayload = "psbt_funding_plan:\(walletName):\(preview.destinationAddress):\(preview.amountSats):\(preview.satPerVB):\(preview.id.uuidString)"
-            let hash = SHA256.hash(data: Data(digestPayload.utf8))
-            utxoFingerprint = hash.map { String(format: "%02x", $0) }.joined()
+        // 5. High-risk approval verification
+        guard let coord = authCoordinator, let app = approval else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
         }
+
+        // 6. Construct immutable transaction spend context and validate inputs
+        guard !preview.selectedInputs.isEmpty else {
+            throw WalletSecurityError.previewTampered
+        }
+        let utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,
@@ -1133,10 +1136,6 @@ public actor WalletManager {
             nonce: preview.id.uuidString
         )
 
-        // 6. High-risk approval consumption and SpendAuthorization derivation
-        guard let coord = authCoordinator, let app = approval else {
-            throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
-        }
         let spendAuth = try await coord.consumeHighRiskApprovalAndIssueSpendAuthorization(
             app,
             action: "send",
@@ -1155,7 +1154,7 @@ public actor WalletManager {
         // 7. Temporarily unlock wallet for 15 seconds to sign and broadcast
         try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
 
-        // 8. Broadcast via sendtoaddress with explicit sat/vB fee rate and SpendAuthorization
+        // 8. Broadcast via sendtoaddress with explicit sat/vB fee rate, max fee cap, UTXO fingerprint, and SpendAuthorization
         let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
         var txid: String = ""
         var sendError: Error?
@@ -1166,6 +1165,8 @@ public actor WalletManager {
                 comment: "Sentinel Node Wallet",
                 feeRateSatPerVB: preview.satPerVB,
                 replaceable: true,
+                maxFeeSats: preview.feeSats,
+                utxoFingerprint: utxoFingerprint,
                 walletName: walletName,
                 authorization: spendAuth
             )

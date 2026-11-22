@@ -9,6 +9,8 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     case serializationError(String)
     case unverifiedDaemon(String)
     case transactionBroadcastDisabled
+    case unauthorizedVerifier
+    case verifierAlreadyRegistered
 
     public var errorDescription: String? {
         switch self {
@@ -26,6 +28,10 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
             return "Daemon verification rejected: \(msg)"
         case .transactionBroadcastDisabled:
             return "Wallet signing, broadcasting and fee replacement are disabled pending independent BTCB2 SIGHASH_UNIFIED security approval."
+        case .unauthorizedVerifier:
+            return "Spend authorization verifier rejected: Untrusted or unauthorized verifier implementation."
+        case .verifierAlreadyRegistered:
+            return "Spend authorization verifier is immutable and cannot be replaced or re-registered."
         }
     }
 }
@@ -111,10 +117,16 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     private let verifierLock = NSLock()
     private var authorizationVerifier: (any SpendAuthorizationVerifier)?
 
-    public func registerAuthorizationVerifier(_ verifier: any SpendAuthorizationVerifier) {
+    public func registerAuthorizationVerifier(_ verifier: any SpendAuthorizationVerifier) throws {
         verifierLock.lock()
         defer { verifierLock.unlock() }
-        self.authorizationVerifier = verifier
+        guard authorizationVerifier == nil else {
+            throw RPCClientError.verifierAlreadyRegistered
+        }
+        guard let trusted = verifier as? WalletAuthCoordinator.CoordinatorSpendAuthVerifier else {
+            throw RPCClientError.unauthorizedVerifier
+        }
+        self.authorizationVerifier = trusted
     }
 
     public var isAuthorizationVerifierRegistered: Bool {
@@ -242,11 +254,18 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(basicAuthHeader, forHTTPHeaderField: "Authorization")
 
+        let wireParams: [Any]
+        if normalizedMethod == "sendtoaddress" && params.count > 10 {
+            wireParams = Array(params.prefix(10))
+        } else {
+            wireParams = params
+        }
+
         let payload: [String: Any] = [
             "jsonrpc": "1.0",
             "id": UUID().uuidString,
             "method": method,
-            "params": params
+            "params": wireParams
         ]
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
@@ -412,6 +431,8 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         comment: String = "",
         feeRateSatPerVB: Int? = nil,
         replaceable: Bool = true,
+        maxFeeSats: Int64? = nil,
+        utxoFingerprint: String? = nil,
         walletName: String? = nil,
         authorization: SpendAuthorization? = nil
     ) async throws -> String {
@@ -420,7 +441,9 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         let amountStr = SatoshiMath.toBTCString(btc: amount)
         var params: [Any] = [address, amountStr, comment, "", false, replaceable]
         if let feeRate = feeRateSatPerVB, feeRate > 0 {
-            params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
+            let effectiveMaxFee: Int64 = maxFeeSats ?? authorization?.maxFeeSats ?? 0
+            let effectiveUtxo: String = utxoFingerprint ?? authorization?.utxoFingerprint ?? ""
+            params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate, effectiveMaxFee, effectiveUtxo]
         }
         return try await call(method: "sendtoaddress", params: params, walletName: walletName, authorization: authorization)
     }

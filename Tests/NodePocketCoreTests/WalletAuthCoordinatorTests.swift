@@ -2256,7 +2256,9 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             1,
             "unset",
             false,
-            6
+            6,
+            Int64(1_500),
+            "utxo_mock_2"
         ]
         let isValid = coordinator.spendAuthorizationVerifier.verify(
             authorization: spendAuth,
@@ -2266,7 +2268,7 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         )
         XCTAssertTrue(isValid, "Issued SpendAuthorization must pass coordinator.spendAuthorizationVerifier verification")
 
-        // Negative regression 1: Missing fee rate (params < 10) fails verification
+        // Negative regression 1: Missing fee rate / params < 12 fails verification
         let shortParams: [Any] = ["bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 0.00075]
         XCTAssertFalse(
             coordinator.spendAuthorizationVerifier.verify(
@@ -2275,7 +2277,45 @@ final class WalletAuthCoordinatorTests: XCTestCase {
                 params: shortParams,
                 walletName: "vault_beta"
             ),
-            "sendtoaddress with params.count < 10 must fail verification"
+            "sendtoaddress with params.count < 12 must fail verification"
+        )
+
+        // Negative regression 1b: 10 parameters (lacks maxFeeSats and utxoFingerprint) fails verification
+        let tenParams: [Any] = Array(validParams.prefix(10))
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "sendtoaddress",
+                params: tenParams,
+                walletName: "vault_beta"
+            ),
+            "sendtoaddress with 10 params must fail verification (requires 12 params with fee cap and UTXO fingerprint)"
+        )
+
+        // Negative regression 1c: Fee cap exceeded fails verification
+        var highFeeParams = validParams
+        highFeeParams[10] = Int64(50_000)
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "sendtoaddress",
+                params: highFeeParams,
+                walletName: "vault_beta"
+            ),
+            "sendtoaddress with fee > maxFeeSats must fail verification"
+        )
+
+        // Negative regression 1d: UTXO fingerprint drift fails verification
+        var driftedUtxoParams = validParams
+        driftedUtxoParams[11] = "drifted_utxo_txid:9"
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "sendtoaddress",
+                params: driftedUtxoParams,
+                walletName: "vault_beta"
+            ),
+            "sendtoaddress with mismatched UTXO fingerprint must fail verification"
         )
 
         // Negative regression 2: Altered fee rate fails verification
