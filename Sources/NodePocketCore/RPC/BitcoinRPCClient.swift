@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum RPCClientError: Error, LocalizedError, Sendable {
     case invalidURL
@@ -33,9 +34,14 @@ public struct SpendAuthorization: Sendable, Equatable {
     public let approvalId: UUID
     public let sessionId: UUID
     public let walletName: String
+    public let authorizedMethod: String
     public let destinationAddress: String
     public let amountSats: Int64
     public let maxFeeSats: Int64
+    public let satPerVB: Int
+    public let chain: String
+    public let previewId: UUID
+    public let utxoFingerprint: String
     public let token: String
     public let issuedAt: Date
     public let expiresAt: Date
@@ -45,9 +51,14 @@ public struct SpendAuthorization: Sendable, Equatable {
         approvalId: UUID = UUID(),
         sessionId: UUID = UUID(),
         walletName: String,
+        authorizedMethod: String = "sendtoaddress",
         destinationAddress: String,
         amountSats: Int64,
         maxFeeSats: Int64,
+        satPerVB: Int = 1,
+        chain: String = "main",
+        previewId: UUID = UUID(),
+        utxoFingerprint: String = "",
         token: String,
         issuedAt: Date = Date(),
         expiresAt: Date = Date().addingTimeInterval(60),
@@ -56,9 +67,14 @@ public struct SpendAuthorization: Sendable, Equatable {
         self.approvalId = approvalId
         self.sessionId = sessionId
         self.walletName = walletName
+        self.authorizedMethod = authorizedMethod
         self.destinationAddress = destinationAddress
         self.amountSats = amountSats
         self.maxFeeSats = maxFeeSats
+        self.satPerVB = satPerVB
+        self.chain = chain
+        self.previewId = previewId
+        self.utxoFingerprint = utxoFingerprint
         self.token = token
         self.issuedAt = issuedAt
         self.expiresAt = expiresAt
@@ -67,6 +83,163 @@ public struct SpendAuthorization: Sendable, Equatable {
 
     public var isExpired: Bool {
         Date() > expiresAt
+    }
+}
+
+public enum SpendAuthorizationIssuer: Sendable {
+    private static let signingKey: SymmetricKey = SymmetricKey(size: .bits256)
+
+    public static func computeToken(
+        approvalId: UUID,
+        sessionId: UUID,
+        authorizedMethod: String,
+        walletName: String,
+        destinationAddress: String,
+        amountSats: Int64,
+        maxFeeSats: Int64,
+        satPerVB: Int,
+        chain: String,
+        previewId: UUID,
+        utxoFingerprint: String,
+        issuedAt: Date,
+        expiresAt: Date,
+        nonce: String
+    ) -> String {
+        let payload = "\(approvalId.uuidString):\(sessionId.uuidString):\(authorizedMethod.lowercased()):\(walletName):\(destinationAddress.lowercased()):\(amountSats):\(maxFeeSats):\(satPerVB):\(chain):\(previewId.uuidString):\(utxoFingerprint):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(nonce)"
+        let hmac = HMAC<SHA256>.authenticationCode(for: Data(payload.utf8), using: signingKey)
+        return hmac.map { String(format: "%02x", $0) }.joined()
+    }
+
+    public static func issue(
+        approvalId: UUID,
+        sessionId: UUID,
+        authorizedMethod: String,
+        walletName: String,
+        destinationAddress: String,
+        amountSats: Int64,
+        maxFeeSats: Int64,
+        satPerVB: Int,
+        chain: String,
+        previewId: UUID,
+        utxoFingerprint: String,
+        nonce: String
+    ) -> SpendAuthorization {
+        let issuedAt = Date()
+        let expiresAt = issuedAt.addingTimeInterval(60)
+        let token = computeToken(
+            approvalId: approvalId,
+            sessionId: sessionId,
+            authorizedMethod: authorizedMethod,
+            walletName: walletName,
+            destinationAddress: destinationAddress,
+            amountSats: amountSats,
+            maxFeeSats: maxFeeSats,
+            satPerVB: satPerVB,
+            chain: chain,
+            previewId: previewId,
+            utxoFingerprint: utxoFingerprint,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            nonce: nonce
+        )
+        return SpendAuthorization(
+            approvalId: approvalId,
+            sessionId: sessionId,
+            walletName: walletName,
+            authorizedMethod: authorizedMethod,
+            destinationAddress: destinationAddress,
+            amountSats: amountSats,
+            maxFeeSats: maxFeeSats,
+            satPerVB: satPerVB,
+            chain: chain,
+            previewId: previewId,
+            utxoFingerprint: utxoFingerprint,
+            token: token,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
+            nonce: nonce
+        )
+    }
+
+    public static func verify(
+        authorization auth: SpendAuthorization,
+        method: String,
+        params: [Any],
+        walletName: String?
+    ) -> Bool {
+        // 1. Expiry check
+        guard !auth.isExpired else { return false }
+
+        // 2. Cryptographic signature check (constant-time comparison)
+        let expectedToken = computeToken(
+            approvalId: auth.approvalId,
+            sessionId: auth.sessionId,
+            authorizedMethod: auth.authorizedMethod,
+            walletName: auth.walletName,
+            destinationAddress: auth.destinationAddress,
+            amountSats: auth.amountSats,
+            maxFeeSats: auth.maxFeeSats,
+            satPerVB: auth.satPerVB,
+            chain: auth.chain,
+            previewId: auth.previewId,
+            utxoFingerprint: auth.utxoFingerprint,
+            issuedAt: auth.issuedAt,
+            expiresAt: auth.expiresAt,
+            nonce: auth.nonce
+        )
+        guard constantTimeCompare(auth.token, expectedToken) else { return false }
+
+        // 3. Method check: exact normalized method match
+        let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard auth.authorizedMethod.lowercased() == normalizedMethod else { return false }
+
+        // 4. Wallet binding: walletName must be non-nil, non-empty, and match auth.walletName
+        guard let wName = walletName, !wName.isEmpty, wName == auth.walletName else { return false }
+
+        // 5. Method-specific parameter checks
+        if normalizedMethod == "sendtoaddress" {
+            guard params.count >= 2 else { return false }
+            // Destination address match
+            guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
+                return false
+            }
+            // Amount match
+            let paramAmountSats: Int64
+            if let amtDouble = params[1] as? Double {
+                paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
+            } else if let amtStr = params[1] as? String, let amtDouble = Double(amtStr) {
+                paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
+            } else {
+                return false
+            }
+            guard paramAmountSats == auth.amountSats else { return false }
+
+            // Fee rate verification (if present in params at index 9)
+            if params.count >= 10, !(params[9] is NSNull) {
+                let feeRateVal: Int
+                if let rateInt = params[9] as? Int {
+                    feeRateVal = rateInt
+                } else if let rateDouble = params[9] as? Double {
+                    feeRateVal = Int(rateDouble)
+                } else {
+                    feeRateVal = -1
+                }
+                guard feeRateVal == auth.satPerVB else { return false }
+            }
+            return true
+        } else {
+            // Default-deny all other 11 restricted methods unless explicitly handled
+            return false
+        }
+    }
+
+    private static func constantTimeCompare(_ a: String, _ b: String) -> Bool {
+        guard a.count == b.count else { return false }
+        var result: UInt8 = 0
+        for (byteA, byteB) in zip(a.utf8, b.utf8) {
+            result |= byteA ^ byteB
+        }
+        return result == 0
     }
 }
 
@@ -165,35 +338,16 @@ public final class BitcoinRPCClient: @unchecked Sendable {
             guard let auth = authorization else {
                 throw RPCClientError.transactionBroadcastDisabled
             }
-            guard !auth.isExpired else {
+            guard SpendAuthorizationIssuer.verify(
+                authorization: auth,
+                method: normalizedMethod,
+                params: params,
+                walletName: walletName
+            ) else {
                 throw RPCClientError.transactionBroadcastDisabled
-            }
-            guard !auth.token.isEmpty else {
-                throw RPCClientError.transactionBroadcastDisabled
-            }
-            if let wName = walletName, !wName.isEmpty {
-                guard auth.walletName == wName else {
-                    throw RPCClientError.transactionBroadcastDisabled
-                }
-            }
-            if normalizedMethod == "sendtoaddress", params.count >= 2 {
-                guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
-                    throw RPCClientError.transactionBroadcastDisabled
-                }
-                let paramAmountSats: Int64
-                if let amtDouble = params[1] as? Double {
-                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
-                } else if let amtStr = params[1] as? String, let amtDouble = Double(amtStr) {
-                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
-                } else {
-                    paramAmountSats = -1
-                }
-                guard paramAmountSats == auth.amountSats else {
-                    throw RPCClientError.transactionBroadcastDisabled
-                }
             }
 
-            let tokenKey = "\(auth.approvalId.uuidString):\(auth.token):\(auth.nonce)"
+            let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
             guard recordAndVerifyToken(tokenKey: tokenKey) else {
                 throw RPCClientError.transactionBroadcastDisabled
             }

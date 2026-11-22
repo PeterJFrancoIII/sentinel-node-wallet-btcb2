@@ -223,9 +223,12 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case restoreSourceEmpty(String)
     case restoreTargetWalletAlreadyExists(String)
     case invalidAmount(String)
+    case walletRelockFailed(wallet: String, underlyingError: String, txid: String)
 
     public var errorDescription: String? {
         switch self {
+        case .walletRelockFailed(let wallet, let underlying, let txid):
+            return "Transaction was broadcast (txid: \(txid)), but wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
         case .noWalletLoaded:
             return "No wallet is currently loaded in memory. Load or create an encrypted wallet first."
         case .backupDestinationAlreadyExists(let path):
@@ -1106,6 +1109,9 @@ public actor WalletManager {
         }
 
         // 5. Construct immutable transaction spend context
+        let utxoFingerprint = preview.selectedInputs.isEmpty
+            ? "auto_coin_selection:\(preview.id.uuidString)"
+            : preview.selectedInputs.sorted().joined(separator: ",")
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,
@@ -1113,41 +1119,21 @@ public actor WalletManager {
             maxFeeSats: preview.feeSats,
             satPerVB: preview.satPerVB,
             previewId: preview.id,
-            utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ",")
+            utxoFingerprint: utxoFingerprint,
+            chain: "main",
+            nonce: preview.id.uuidString
         )
 
-        // 6. High-risk approval consumption
-        let approvalToken: String
-        let approvalId: UUID
-        let issuedAt: Date
-        let expiresAt: Date
-        if !allowUnauthenticatedForTesting {
-            guard let coord = authCoordinator, let app = approval else {
-                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
-            }
-            try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress, expectedTxContext: txContext)
-            approvalToken = app.token
-            approvalId = app.id
-            issuedAt = app.issuedAt
-            expiresAt = app.expiresAt
-        } else {
-            approvalToken = approval?.token ?? "test_synthetic_token"
-            approvalId = approval?.id ?? UUID()
-            issuedAt = approval?.issuedAt ?? Date()
-            expiresAt = approval?.expiresAt ?? Date().addingTimeInterval(60)
+        // 6. High-risk approval consumption and SpendAuthorization derivation
+        guard let coord = authCoordinator, let app = approval else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
         }
-
-        // 7. Create single-use SpendAuthorization bound to this specific transaction
-        let spendAuth = SpendAuthorization(
-            approvalId: approvalId,
-            sessionId: capability?.id ?? UUID(),
-            walletName: walletName,
-            destinationAddress: preview.destinationAddress,
-            amountSats: preview.amountSats,
-            maxFeeSats: preview.feeSats,
-            token: approvalToken,
-            issuedAt: issuedAt,
-            expiresAt: expiresAt
+        let spendAuth = try await coord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            app,
+            action: "send",
+            target: preview.destinationAddress,
+            authorizedMethod: "sendtoaddress",
+            expectedTxContext: txContext
         )
 
         let passphrase: String
@@ -1157,19 +1143,13 @@ public actor WalletManager {
             passphrase = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
         }
 
-        // 8. Temporarily unlock wallet for 15 seconds to sign and broadcast
+        // 7. Temporarily unlock wallet for 15 seconds to sign and broadcast
         try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
 
-        // Defensively ensure wallet is relocked if task unwinds or cancels
-        defer {
-            Task { [rpcClient, walletName] in
-                try? await rpcClient.walletLock(walletName: walletName)
-            }
-        }
-
-        // 9. Broadcast via sendtoaddress with explicit sat/vB fee rate and SpendAuthorization
+        // 8. Broadcast via sendtoaddress with explicit sat/vB fee rate and SpendAuthorization
         let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
-        let txid: String
+        var txid: String = ""
+        var sendError: Error?
         do {
             txid = try await rpcClient.sendToAddress(
                 address: preview.destinationAddress,
@@ -1180,11 +1160,30 @@ public actor WalletManager {
                 walletName: walletName,
                 authorization: spendAuth
             )
-            // Synchronously await immediate wallet lock
-            _ = try? await rpcClient.walletLock(walletName: walletName)
         } catch {
-            _ = try? await rpcClient.walletLock(walletName: walletName)
-            throw error
+            sendError = error
+        }
+
+        // 9. Awaited wallet relock cleanup
+        var relockError: Error?
+        do {
+            try await rpcClient.walletLock(walletName: walletName)
+        } catch {
+            relockError = error
+        }
+
+        // If send failed, rethrow original send error (relock was attempted)
+        if let err = sendError {
+            throw err
+        }
+
+        // If send succeeded, but immediate relock failed, report recoverable error with confirmed txid
+        if let rErr = relockError {
+            throw WalletSecurityError.walletRelockFailed(
+                wallet: walletName,
+                underlyingError: rErr.localizedDescription,
+                txid: txid
+            )
         }
 
         return txid

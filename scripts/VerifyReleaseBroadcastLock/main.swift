@@ -85,6 +85,12 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+struct VerifierDeviceOwnerChallenger: DeviceOwnerChallenger {
+    func challenge(reason: String) async throws -> Bool {
+        return true
+    }
+}
+
 @main
 struct ReleaseLockVerifier {
     static func main() async {
@@ -189,21 +195,47 @@ struct ReleaseLockVerifier {
         // -------------------------------------------------------------
         print("\n--- Section 2: Positive Authorized Synthetic Send (Release Send-Capable Path) ---")
 
+        let previousEnrollmentFlag = UserDefaults.standard.object(forKey: "hasCompletedInitialEnrollment")
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        defer {
+            if let prev = previousEnrollmentFlag {
+                UserDefaults.standard.set(prev, forKey: "hasCompletedInitialEnrollment")
+            } else {
+                UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+            }
+        }
+
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("nodepocket_release_safety_test_\(UUID().uuidString)")
         try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let walletName = "release_test_wallet"
+        let authCoord = WalletAuthCoordinator(
+            dataDirectory: tempDir,
+            deviceOwnerChallenger: VerifierDeviceOwnerChallenger()
+        )
+
+        let (secret, _, codes) = try! await authCoord.generateEnrollmentSecret(username: "operator_ci")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try! await authCoord.enroll(
+            username: "operator_ci",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("test_address_book.json"))
         let walletMgr = WalletManager(
             rpcClient: client,
             dataDirectory: tempDir,
-            authCoordinator: nil,
-            allowUnauthenticatedForTesting: true
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false
         )
 
         let testInv = await walletMgr.walletInventory
         try! await testInv.setOwner(for: walletName, owner: "operator_ci")
-        let capability = WalletAuthCapability(username: "operator_ci", expiresAt: Date().addingTimeInterval(3600))
         try! await walletMgr.selectWallet(name: walletName, capability: capability)
 
         let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
@@ -223,6 +255,26 @@ struct ReleaseLockVerifier {
             validityWindowSeconds: 60.0
         )
 
+        let txContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ","),
+            chain: "main",
+            nonce: preview.id.uuidString
+        )
+
+        let approval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Release safety verifier send",
+            txContext: txContext
+        )
+
         let sendCountBefore = BroadcastLockSpyURLProtocol.sendToAddressCount
         let txid: String
         do {
@@ -230,7 +282,7 @@ struct ReleaseLockVerifier {
                 preview: preview,
                 explicitPassphrase: "WalletPassword123!",
                 capability: capability,
-                approval: nil
+                approval: approval
             )
         } catch {
             fatalError("FAILURE: executeAuthorizedSend failed on valid authorized send: \(error)")
@@ -250,13 +302,82 @@ struct ReleaseLockVerifier {
         // -------------------------------------------------------------
         print("\n--- Section 3: Negative Security Validations (Tampering, Replay, Expiry, Allowlist) ---")
 
-        // 3a. Direct RPC SpendAuthorization Enforcement: Positive and Replay
-        let validSpendAuth = SpendAuthorization(
+        // 3a. Forged token SpendAuthorization rejected at transport (P0-1)
+        let forgedAuth = SpendAuthorization(
+            walletName: walletName,
+            authorizedMethod: "sendtoaddress",
+            destinationAddress: validDestination,
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 1,
+            token: "forged_untrusted_token"
+        )
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                walletName: walletName,
+                authorization: forgedAuth
+            )
+            fatalError("FAILURE: Forged SpendAuthorization was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Forged SpendAuthorization failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Forged SpendAuthorization threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Forged SpendAuthorization threw unexpected error: \(error)")
+        }
+
+        // 3b. Method binding mismatch rejected at transport (P0-2)
+        let bumpFeeAuth = SpendAuthorizationIssuer.issue(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            authorizedMethod: "bumpfee",
             walletName: walletName,
             destinationAddress: validDestination,
             amountSats: 25_000,
             maxFeeSats: 500,
-            token: "valid_ci_test_token"
+            satPerVB: 1,
+            chain: "main",
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
+            nonce: "test_nonce_bumpfee"
+        )
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                walletName: walletName,
+                authorization: bumpFeeAuth
+            )
+            fatalError("FAILURE: SpendAuthorization with mismatched authorizedMethod was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: SpendAuthorization method mismatch (bumpfee -> sendtoaddress) failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: SpendAuthorization method mismatch threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: SpendAuthorization method mismatch threw unexpected error: \(error)")
+        }
+
+        // 3c. Direct RPC SpendAuthorization Enforcement: Positive and Single-Use Replay (P0-1 & P0-2)
+        let validDirectNonce = "valid_direct_nonce_\(UUID().uuidString)"
+        let validSpendAuth = SpendAuthorizationIssuer.issue(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            authorizedMethod: "sendtoaddress",
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 1,
+            chain: "main",
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
+            nonce: validDirectNonce
         )
         do {
             let res: String = try await client.sendToAddress(
@@ -289,13 +410,20 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Replayed SpendAuthorization threw unexpected error: \(error)")
         }
 
-        // 3b. Destination Address Substitution / Tampering on RPC Client
-        let tamperedDestAuth = SpendAuthorization(
+        // 3d. Destination Address Substitution / Tampering on RPC Client
+        let tamperedDestAuth = SpendAuthorizationIssuer.issue(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            authorizedMethod: "sendtoaddress",
             walletName: walletName,
             destinationAddress: "bc1q9xxxxxx7xfkvy5l643lydnw9re59gtzzwf5mdq",
             amountSats: 25_000,
             maxFeeSats: 500,
-            token: "tampered_dest_token"
+            satPerVB: 1,
+            chain: "main",
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
+            nonce: "tampered_dest_nonce"
         )
         do {
             let _: String = try await client.sendToAddress(
@@ -315,13 +443,20 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Mismatched destination threw unexpected error: \(error)")
         }
 
-        // 3c. Amount Tampering / Substitution on RPC Client
-        let tamperedAmtAuth = SpendAuthorization(
+        // 3e. Amount Tampering / Substitution on RPC Client
+        let tamperedAmtAuth = SpendAuthorizationIssuer.issue(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            authorizedMethod: "sendtoaddress",
             walletName: walletName,
             destinationAddress: validDestination,
             amountSats: 100_000,
             maxFeeSats: 500,
-            token: "tampered_amt_token"
+            satPerVB: 1,
+            chain: "main",
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
+            nonce: "tampered_amt_nonce"
         )
         do {
             let _: String = try await client.sendToAddress(
@@ -341,14 +476,56 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Mismatched amount threw unexpected error: \(error)")
         }
 
-        // 3d. Expired SpendAuthorization Rejection
-        let expiredAuth = SpendAuthorization(
-            walletName: walletName,
+        // 3f. Wallet Name Tampering on RPC Client
+        let tamperedWalletAuth = SpendAuthorizationIssuer.issue(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            authorizedMethod: "sendtoaddress",
+            walletName: "unauthorized_other_wallet",
             destinationAddress: validDestination,
             amountSats: 25_000,
             maxFeeSats: 500,
+            satPerVB: 1,
+            chain: "main",
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
+            nonce: "tampered_wallet_nonce"
+        )
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                walletName: walletName, // Mismatch against auth walletName!
+                authorization: tamperedWalletAuth
+            )
+            fatalError("FAILURE: Mismatched wallet name was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Wallet name mismatch failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Mismatched wallet name threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Mismatched wallet name threw unexpected error: \(error)")
+        }
+
+        // 3g. Expired SpendAuthorization Rejection
+        let expiredAuth = SpendAuthorization(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            walletName: walletName,
+            authorizedMethod: "sendtoaddress",
+            destinationAddress: validDestination,
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 1,
+            chain: "main",
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
             token: "expired_token",
-            expiresAt: Date().addingTimeInterval(-60)
+            issuedAt: Date().addingTimeInterval(-120),
+            expiresAt: Date().addingTimeInterval(-60),
+            nonce: "expired_nonce"
         )
         do {
             let _: String = try await client.sendToAddress(
@@ -368,7 +545,51 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Expired SpendAuthorization threw unexpected error: \(error)")
         }
 
-        // 3e. Expired Preview Rejection on WalletManager
+        // 3h. Context Tampering (satPerVB mismatch) Rejection at WalletAuthCoordinator (P0-3)
+        let tamperedContextPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 10, // Preview has satPerVB: 10, but approval has satPerVB: 5
+            estimatedVSize: 140
+        )
+        let mismatchSatPerVBApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Approval with satPerVB 5",
+            txContext: TransactionSpendContext(
+                walletName: walletName,
+                destinationAddress: validDestination,
+                amountSats: 50_000,
+                maxFeeSats: 1_000,
+                satPerVB: 5,
+                previewId: tamperedContextPreview.id,
+                utxoFingerprint: "auto_coin_selection:\(tamperedContextPreview.id.uuidString)",
+                chain: "main",
+                nonce: tamperedContextPreview.id.uuidString
+            )
+        )
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: tamperedContextPreview,
+                explicitPassphrase: "WalletPassword123!",
+                capability: capability,
+                approval: mismatchSatPerVBApproval
+            )
+            fatalError("FAILURE: SatPerVB mismatch was accepted!")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                print("✓ Verified: Approval context satPerVB mismatch failed closed with unauthorizedHighRiskAction.")
+            } else {
+                fatalError("FAILURE: SatPerVB mismatch threw unexpected WalletAuthError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: SatPerVB mismatch threw unexpected error: \(error)")
+        }
+
+        // 3i. Expired Preview Rejection on WalletManager
         let expiredPreview = FundedTxPreview(
             id: UUID(),
             destinationAddress: validDestination,
@@ -384,7 +605,7 @@ struct ReleaseLockVerifier {
                 preview: expiredPreview,
                 explicitPassphrase: "WalletPassword123!",
                 capability: capability,
-                approval: nil
+                approval: approval
             )
             fatalError("FAILURE: Expired preview was accepted!")
         } catch let err as WalletSecurityError {
@@ -397,7 +618,7 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Expired preview threw unexpected error: \(error)")
         }
 
-        // 3f. Allowlist Enforcement on WalletManager
+        // 3j. Allowlist Enforcement on WalletManager
         addressBook.setAllowlistEnabled(true)
         let unallowlistedDestination = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
         let blockedPreview = FundedTxPreview(
@@ -413,7 +634,7 @@ struct ReleaseLockVerifier {
                 preview: blockedPreview,
                 explicitPassphrase: "WalletPassword123!",
                 capability: capability,
-                approval: nil
+                approval: approval
             )
             fatalError("FAILURE: Unallowlisted destination was accepted when allowlist enabled!")
         } catch let err as WalletSecurityError {
@@ -427,7 +648,7 @@ struct ReleaseLockVerifier {
         }
         addressBook.setAllowlistEnabled(false)
 
-        // 3g. Invalid Bech32 Address Rejection
+        // 3k. Invalid Bech32 Address Rejection
         let invalidAddrPreview = FundedTxPreview(
             id: UUID(),
             destinationAddress: "invalid_not_a_bech32_address",
@@ -441,7 +662,7 @@ struct ReleaseLockVerifier {
                 preview: invalidAddrPreview,
                 explicitPassphrase: "WalletPassword123!",
                 capability: capability,
-                approval: nil
+                approval: approval
             )
             fatalError("FAILURE: Invalid Bech32 address was accepted!")
         } catch let err as WalletSecurityError {
@@ -454,7 +675,7 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Invalid address threw unexpected error: \(error)")
         }
 
-        // 3h. Legacy send() Method Hardening / Bypass Prevention
+        // 3l. Legacy send() Method Hardening / Bypass Prevention
         do {
             _ = try await walletMgr.send(to: validDestination, amount: 0.0005, passphrase: "WalletPassword123!", capability: capability)
             fatalError("FAILURE: Legacy send() succeeded without high-risk approval!")

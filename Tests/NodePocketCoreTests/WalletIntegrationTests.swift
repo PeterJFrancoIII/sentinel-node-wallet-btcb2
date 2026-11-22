@@ -82,4 +82,44 @@ final class WalletIntegrationTests: XCTestCase {
             }
         }
     }
+
+    func testExecuteAuthorizedSendRequiresApprovalEvenInTestMode() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("sentinel_send_auth_guard_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1",
+            port: 59999,
+            user: "test",
+            password: "test",
+            isBroadcastRestricted: false
+        )
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "test_vault"
+        )
+        let preview = FundedTxPreview(
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 10_000,
+            feeSats: 500,
+            satPerVB: 2,
+            estimatedVSize: 140
+        )
+
+        do {
+            _ = try await manager.executeAuthorizedSend(preview: preview, capability: nil, approval: nil)
+            XCTFail("executeAuthorizedSend must fail without verified high-risk approval")
+        } catch let err as WalletAuthError {
+            guard case .unauthorizedHighRiskAction = err else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+                return
+            }
+        }
+    }
 }

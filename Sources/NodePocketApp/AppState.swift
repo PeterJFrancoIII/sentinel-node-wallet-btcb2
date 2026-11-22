@@ -995,6 +995,9 @@ public final class AppState: ObservableObject {
         guard let walletName = currentWallet, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
+        let utxoFingerprint = preview.selectedInputs.isEmpty
+            ? "auto_coin_selection:\(preview.id.uuidString)"
+            : preview.selectedInputs.sorted().joined(separator: ",")
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,
@@ -1002,7 +1005,9 @@ public final class AppState: ObservableObject {
             maxFeeSats: preview.feeSats,
             satPerVB: preview.satPerVB,
             previewId: preview.id,
-            utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ",")
+            utxoFingerprint: utxoFingerprint,
+            chain: "main",
+            nonce: preview.id.uuidString
         )
         let approval = try await authCoordinator.requestHighRiskApproval(
             capability: session,
@@ -1011,12 +1016,22 @@ public final class AppState: ObservableObject {
             reason: "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)",
             txContext: txContext
         )
-        let txid = try await walletManager.executeAuthorizedSend(
-            preview: preview,
-            explicitPassphrase: explicitPassphrase,
-            capability: session,
-            approval: approval
-        )
+        let txid: String
+        do {
+            txid = try await walletManager.executeAuthorizedSend(
+                preview: preview,
+                explicitPassphrase: explicitPassphrase,
+                capability: session,
+                approval: approval
+            )
+        } catch let error as WalletSecurityError {
+            if case .walletRelockFailed(_, let underlying, let confirmedTxid) = error {
+                appendLog("[SECURITY WARNING] Transaction broadcasted (\(confirmedTxid)), but immediate wallet relock failed: \(underlying). Passphrase timeout active.")
+                refreshWallet()
+                return confirmedTxid
+            }
+            throw error
+        }
         refreshWallet()
         return txid
     }

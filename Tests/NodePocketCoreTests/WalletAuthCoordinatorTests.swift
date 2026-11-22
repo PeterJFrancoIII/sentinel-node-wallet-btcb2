@@ -2081,6 +2081,179 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             }
         }
     }
+
+    func testHighRiskApprovalRejectsContextMismatches() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth_coord_context_mismatch_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator_mismatch")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coordinator.enroll(
+            username: "operator_mismatch",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let previewId = UUID()
+        let txContext = TransactionSpendContext(
+            walletName: "vault_alpha",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: previewId,
+            utxoFingerprint: "utxo_mock",
+            chain: "main",
+            nonce: "test_nonce_val"
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: txContext.destinationAddress,
+            reason: "Approve 50000 sats spend",
+            txContext: txContext
+        )
+
+        // 1. satPerVB mismatch
+        let tamperedSatPerVB = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: 10,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint,
+            chain: txContext.chain,
+            nonce: txContext.nonce
+        )
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: tamperedSatPerVB)
+            XCTFail("satPerVB mismatch must fail")
+        } catch let err as WalletAuthError {
+            guard case .unauthorizedHighRiskAction = err else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+                return
+            }
+        }
+
+        // 2. chain mismatch
+        let tamperedChain = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint,
+            chain: "testnet",
+            nonce: txContext.nonce
+        )
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: tamperedChain)
+            XCTFail("Chain mismatch must fail")
+        } catch let err as WalletAuthError {
+            guard case .unauthorizedHighRiskAction = err else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+                return
+            }
+        }
+
+        // 3. nonce mismatch
+        let tamperedNonce = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint,
+            chain: txContext.chain,
+            nonce: "different_nonce"
+        )
+        do {
+            try await coordinator.consumeHighRiskApproval(approval, action: "send", target: txContext.destinationAddress, expectedTxContext: tamperedNonce)
+            XCTFail("Nonce mismatch must fail")
+        } catch let err as WalletAuthError {
+            guard case .unauthorizedHighRiskAction = err else {
+                XCTFail("Expected unauthorizedHighRiskAction, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testConsumeHighRiskApprovalAndIssueSpendAuthorization() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth_coord_issue_spend_auth_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator_issuer")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coordinator.enroll(
+            username: "operator_issuer",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let previewId = UUID()
+        let txContext = TransactionSpendContext(
+            walletName: "vault_beta",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 75_000,
+            maxFeeSats: 1_500,
+            satPerVB: 6,
+            previewId: previewId,
+            utxoFingerprint: "utxo_mock_2",
+            chain: "main",
+            nonce: "nonce_issuer_test"
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: txContext.destinationAddress,
+            reason: "Approve 75000 sats spend",
+            txContext: txContext
+        )
+
+        let spendAuth = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            approval,
+            action: "send",
+            target: txContext.destinationAddress,
+            authorizedMethod: "sendtoaddress",
+            expectedTxContext: txContext
+        )
+
+        XCTAssertEqual(spendAuth.walletName, "vault_beta")
+        XCTAssertEqual(spendAuth.authorizedMethod, "sendtoaddress")
+        XCTAssertEqual(spendAuth.destinationAddress, "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+        XCTAssertEqual(spendAuth.amountSats, 75_000)
+        XCTAssertEqual(spendAuth.maxFeeSats, 1_500)
+        XCTAssertEqual(spendAuth.satPerVB, 6)
+        XCTAssertFalse(spendAuth.token.isEmpty)
+
+        // Verify spendAuth validates in SpendAuthorizationIssuer
+        let isValid = SpendAuthorizationIssuer.verify(
+            authorization: spendAuth,
+            method: "sendtoaddress",
+            params: ["bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 0.00075],
+            walletName: "vault_beta"
+        )
+        XCTAssertTrue(isValid, "Issued SpendAuthorization must pass SpendAuthorizationIssuer verification")
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

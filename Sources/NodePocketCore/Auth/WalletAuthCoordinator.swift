@@ -183,6 +183,37 @@ public struct HighRiskApproval: Sendable, Equatable, Identifiable {
     }
 }
 
+public protocol DeviceOwnerChallenger: Sendable {
+    func challenge(reason: String) async throws -> Bool
+}
+
+public struct LocalAuthenticationChallenger: DeviceOwnerChallenger {
+    public init() {}
+    public func challenge(reason: String) async throws -> Bool {
+        let context = LAContext()
+        var authError: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
+            throw WalletAuthError.deviceOwnerAuthFailed(
+                authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
+            )
+        }
+        do {
+            let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
+            guard success else {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+            return true
+        } catch let laError as LAError {
+            if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
+                throw WalletAuthError.deviceOwnerAuthCanceled
+            }
+            throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
+        } catch {
+            throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+        }
+    }
+}
+
 public struct RecoveryCodeRecord: Codable, Sendable, Equatable {
     public let saltHex: String
     public let verifierHex: String
@@ -470,10 +501,16 @@ public actor WalletAuthCoordinator {
     }
 
     private let customAuthKeychainHelper: KeychainHelper?
+    private let deviceOwnerChallenger: DeviceOwnerChallenger
 
-    public init(dataDirectory: URL, customKeychainHelper: KeychainHelper? = nil) {
+    public init(
+        dataDirectory: URL,
+        customKeychainHelper: KeychainHelper? = nil,
+        deviceOwnerChallenger: DeviceOwnerChallenger = LocalAuthenticationChallenger()
+    ) {
         self.dataDirectory = dataDirectory
         self.customAuthKeychainHelper = customKeychainHelper
+        self.deviceOwnerChallenger = deviceOwnerChallenger
         self.registryURL = dataDirectory.appendingPathComponent("auth_registry.json")
         do {
             self.records = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
@@ -1218,52 +1255,14 @@ public actor WalletAuthCoordinator {
                 throw WalletAuthError.deviceOwnerAuthCanceled
             }
             return
-        } else if !mockDeviceOwnerSuccessForTesting {
-            let context = LAContext()
-            var authError: NSError?
-            guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
-                throw WalletAuthError.deviceOwnerAuthFailed(
-                    authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
-                )
-            }
-
-            do {
-                let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
-                guard success else {
-                    throw WalletAuthError.deviceOwnerAuthCanceled
-                }
-            } catch let laError as LAError {
-                if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
-                    throw WalletAuthError.deviceOwnerAuthCanceled
-                }
-                throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
-            } catch {
-                throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
-            }
-        }
-        #else
-        let context = LAContext()
-        var authError: NSError?
-        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError) else {
-            throw WalletAuthError.deviceOwnerAuthFailed(
-                authError?.localizedDescription ?? "Device-owner authentication policy evaluation unavailable."
-            )
-        }
-
-        do {
-            let success = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)
-            guard success else {
-                throw WalletAuthError.deviceOwnerAuthCanceled
-            }
-        } catch let laError as LAError {
-            if laError.code == .userCancel || laError.code == .appCancel || laError.code == .systemCancel {
-                throw WalletAuthError.deviceOwnerAuthCanceled
-            }
-            throw WalletAuthError.deviceOwnerAuthFailed(laError.localizedDescription)
-        } catch {
-            throw WalletAuthError.deviceOwnerAuthFailed(error.localizedDescription)
+        } else if mockDeviceOwnerSuccessForTesting {
+            return
         }
         #endif
+        let success = try await deviceOwnerChallenger.challenge(reason: reason)
+        guard success else {
+            throw WalletAuthError.deviceOwnerAuthCanceled
+        }
     }
 
     /// Prompts the user with Touch ID / Mac password, and only upon verified authentication,
@@ -1301,7 +1300,7 @@ public actor WalletAuthCoordinator {
         let expiresAt = issuedAt.addingTimeInterval(60) // 60-second validity window
 
         let contextDigest = txContext.map {
-            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
+            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.satPerVB):\($0.chain):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
         } ?? "none"
 
         let tokenPayload = "\(approvalId.uuidString):\(action):\(target.lowercased()):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(capability.id.uuidString):\(contextDigest)"
@@ -1365,17 +1364,26 @@ public actor WalletAuthCoordinator {
             guard actual.maxFeeSats == expected.maxFeeSats else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Approval max fee mismatch: expected \(expected.maxFeeSats) sats, got \(actual.maxFeeSats) sats.")
             }
-            guard actual.utxoFingerprint == expected.utxoFingerprint else {
-                throw WalletAuthError.unauthorizedHighRiskAction("Approval UTXO fingerprint mismatch.")
+            guard actual.satPerVB == expected.satPerVB else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval satPerVB mismatch: expected \(expected.satPerVB), got \(actual.satPerVB).")
+            }
+            guard actual.chain == expected.chain else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval chain mismatch: expected '\(expected.chain)', got '\(actual.chain)'.")
             }
             guard actual.previewId == expected.previewId else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Approval preview ID mismatch: expected '\(expected.previewId)', got '\(actual.previewId)'.")
+            }
+            guard actual.utxoFingerprint == expected.utxoFingerprint else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval UTXO fingerprint mismatch.")
+            }
+            guard actual.nonce == expected.nonce else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval nonce mismatch.")
             }
         }
 
         // 6. Verify cryptographic HMAC signature
         let contextDigest = approval.txContext.map {
-            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
+            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.satPerVB):\($0.chain):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
         } ?? "none"
         let expectedPayload = "\(approval.id.uuidString):\(approval.action):\(approval.target.lowercased()):\(approval.issuedAt.timeIntervalSince1970):\(approval.expiresAt.timeIntervalSince1970):\(record.boundSessionId.uuidString):\(contextDigest)"
         let expectedToken = Self.hmacSHA256(data: Data(expectedPayload.utf8), key: hmacSecret)
@@ -1392,6 +1400,35 @@ public actor WalletAuthCoordinator {
         self.activeApprovals.removeValue(forKey: approval.id)
 
         touchSession()
+    }
+
+    public func consumeHighRiskApprovalAndIssueSpendAuthorization(
+        _ approval: HighRiskApproval,
+        action: String,
+        target: String,
+        authorizedMethod: String = "sendtoaddress",
+        expectedTxContext: TransactionSpendContext
+    ) throws -> SpendAuthorization {
+        try consumeHighRiskApproval(approval, action: action, target: target, expectedTxContext: expectedTxContext)
+
+        guard let session = activeSession else {
+            throw WalletAuthError.sessionExpired
+        }
+
+        return SpendAuthorizationIssuer.issue(
+            approvalId: approval.id,
+            sessionId: session.id,
+            authorizedMethod: authorizedMethod,
+            walletName: expectedTxContext.walletName,
+            destinationAddress: expectedTxContext.destinationAddress,
+            amountSats: expectedTxContext.amountSats,
+            maxFeeSats: expectedTxContext.maxFeeSats,
+            satPerVB: expectedTxContext.satPerVB,
+            chain: expectedTxContext.chain,
+            previewId: expectedTxContext.previewId,
+            utxoFingerprint: expectedTxContext.utxoFingerprint,
+            nonce: expectedTxContext.nonce
+        )
     }
 
     // MARK: - WO-37 Operator Account Purge & Fresh Factor Verification
