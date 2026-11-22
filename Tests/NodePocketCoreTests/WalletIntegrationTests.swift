@@ -96,10 +96,14 @@ final class WalletIntegrationTests: XCTestCase {
             password: "test",
             isBroadcastRestricted: false
         )
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("test_addr_book.json"))
+        _ = try testAddressBook.addRecipient(name: "Test Recipient", address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+
         let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
         let manager = WalletManager(
             rpcClient: rpc,
             dataDirectory: tempDir,
+            addressBook: testAddressBook,
             authCoordinator: authCoord,
             allowUnauthenticatedForTesting: true,
             initialWalletName: "test_vault"
