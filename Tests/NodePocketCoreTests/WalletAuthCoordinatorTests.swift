@@ -2681,6 +2681,124 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertNotNil(computedTxid)
         XCTAssertEqual(computedTxid?.count, 64)
     }
+
+    func testPsbtWitnessUtxoHardeningAndSegwitClass() {
+        let unsignedTx = Data([0x02, 0x00, 0x00, 0x00, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0x50, 0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x14] + [UInt8](repeating: 0x11, count: 20) + [0x00, 0x00, 0x00, 0x00])
+
+        func makePsbt(unsigned: Data, inputEntry: Data) -> String {
+            var d = Data([0x70, 0x73, 0x62, 0x74, 0xff])
+            d.append(contentsOf: [0x01, 0x00])
+            let uLen = unsigned.count
+            if uLen < 0xfd {
+                d.append(UInt8(uLen))
+            } else {
+                d.append(contentsOf: [0xfd, UInt8(uLen & 0xff), UInt8((uLen >> 8) & 0xff)])
+            }
+            d.append(unsigned)
+            d.append(0x00) // global map end
+            d.append(inputEntry)
+            d.append(0x00) // input map 0 end
+            d.append(0x00) // output map 0 end
+            return d.base64EncodedString()
+        }
+
+        // 1. Valid Native SegWit (v0 P2WPKH 22 bytes) with witness UTXO succeeds
+        let segwitSpk = Data([0x00, 0x14] + [UInt8](repeating: 0x22, count: 20))
+        let val1 = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]) + segwitSpk
+        let psbt1 = makePsbt(unsigned: unsignedTx, inputEntry: Data([0x01, 0x01, UInt8(val1.count)]) + val1)
+        let parsed1 = WalletManager.parsePsbtDetails(psbt1)
+        XCTAssertNotNil(parsed1)
+        XCTAssertEqual(parsed1?.totalInputSats, 60_000)
+        XCTAssertEqual(parsed1?.calculatedFeeSats, 10_000)
+
+        // 2. Extremely large canonical CompactSize (UInt64.max: 0xff + 8 0xff bytes) fails closed without trap/crash (R217-P0-01)
+        var valHuge = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
+        valHuge.append(contentsOf: [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff])
+        valHuge.append(contentsOf: [0x00, 0x14])
+        let psbtHuge = makePsbt(unsigned: unsignedTx, inputEntry: Data([0x01, 0x01, UInt8(valHuge.count)]) + valHuge)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtHuge), "Extremely large CompactSize must fail closed without runtime trap")
+
+        // 3. Truncated script in witness UTXO fails closed without crash
+        let valTrunc = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x14]) // declared 22 bytes, provided 2
+        let psbtTrunc = makePsbt(unsigned: unsignedTx, inputEntry: Data([0x01, 0x01, UInt8(valTrunc.count)]) + valTrunc)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtTrunc), "Truncated script must fail closed")
+
+        // 4. Off-by-one script length in witness UTXO fails closed
+        let valOff = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x15]) + segwitSpk // declared 21, provided 22
+        let psbtOff = makePsbt(unsigned: unsignedTx, inputEntry: Data([0x01, 0x01, UInt8(valOff.count)]) + valOff)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtOff), "Off-by-one script length must fail closed")
+
+        // 5. Non-SegWit legacy script (P2PKH) with witness-only UTXO rejected (R217-P0-01)
+        let legacyP2PKHSpk = Data([0x76, 0xa9, 0x14] + [UInt8](repeating: 0x33, count: 20) + [0x88, 0xac])
+        let valLegacy = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, UInt8(legacyP2PKHSpk.count)]) + legacyP2PKHSpk
+        let psbtLegacy = makePsbt(unsigned: unsignedTx, inputEntry: Data([0x01, 0x01, UInt8(valLegacy.count)]) + valLegacy)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtLegacy), "Witness-only UTXO for legacy P2PKH input must be rejected per BIP-174")
+
+        // 6. P2SH-wrapped SegWit:
+        // Redeem script: v0 P2WPKH (22 bytes)
+        let redeemScript = Data([0x00, 0x14] + [UInt8](repeating: 0x44, count: 20))
+        let redeemHash = RawTransactionDecoder.hash160(redeemScript)
+        let p2shSpk = Data([0xa9, 0x14]) + redeemHash + Data([0x87])
+
+        let valP2SH = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, UInt8(p2shSpk.count)]) + p2shSpk
+        let witnessEntry = Data([0x01, 0x01, UInt8(valP2SH.count)]) + valP2SH
+        let redeemEntry = Data([0x01, 0x04, UInt8(redeemScript.count)]) + redeemScript
+
+        // 6a. P2SH without redeemScript -> rejected
+        let psbtP2SHNoRedeem = makePsbt(unsigned: unsignedTx, inputEntry: witnessEntry)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtP2SHNoRedeem), "P2SH witness-only UTXO without redeem script must be rejected")
+
+        // 6b. P2SH with valid SegWit redeemScript -> accepted
+        let psbtP2SHValid = makePsbt(unsigned: unsignedTx, inputEntry: witnessEntry + redeemEntry)
+        let parsedP2SH = WalletManager.parsePsbtDetails(psbtP2SHValid)
+        XCTAssertNotNil(parsedP2SH, "P2SH-wrapped SegWit with valid redeem script commitment must be accepted")
+        XCTAssertEqual(parsedP2SH?.totalInputSats, 60_000)
+
+        // 6c. P2SH with mismatched redeemScript hash -> rejected
+        let badRedeemScript = Data([0x00, 0x14] + [UInt8](repeating: 0x99, count: 20))
+        let badRedeemEntry = Data([0x01, 0x04, UInt8(badRedeemScript.count)]) + badRedeemScript
+        let psbtP2SHBadHash = makePsbt(unsigned: unsignedTx, inputEntry: witnessEntry + badRedeemEntry)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtP2SHBadHash), "P2SH with mismatched redeem script hash must be rejected")
+
+        // 6d. P2SH with non-SegWit redeemScript (e.g. legacy bare script) -> rejected
+        let legacyRedeem = Data([0x52, 0x21] + [UInt8](repeating: 0x02, count: 33) + [0x51, 0xae]) // non-witness program
+        let legacyRedeemHash = RawTransactionDecoder.hash160(legacyRedeem)
+        let legacyP2shSpk = Data([0xa9, 0x14]) + legacyRedeemHash + Data([0x87])
+        let valLegacyP2SH = Data([0x60, 0xea, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, UInt8(legacyP2shSpk.count)]) + legacyP2shSpk
+        let legWitnessEntry = Data([0x01, 0x01, UInt8(valLegacyP2SH.count)]) + valLegacyP2SH
+        let legRedeemEntry = Data([0x01, 0x04, UInt8(legacyRedeem.count)]) + legacyRedeem
+        let psbtLegacyP2SH = makePsbt(unsigned: unsignedTx, inputEntry: legWitnessEntry + legRedeemEntry)
+        XCTAssertNil(WalletManager.parsePsbtDetails(psbtLegacyP2SH), "P2SH with non-SegWit redeem script must be rejected")
+    }
+
+    func testBech32AddressEncodingAndDecodingRoundtrip() {
+        let v0P2WPKH = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        guard let spk0 = RawTransactionDecoder.decodeScriptPubKey(for: v0P2WPKH) else {
+            XCTFail("decodeScriptPubKey failed for v0 P2WPKH")
+            return
+        }
+        XCTAssertEqual(RawTransactionDecoder.encodeAddress(for: spk0), v0P2WPKH)
+
+        let v1P2TR = "bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0"
+        guard let spk1 = RawTransactionDecoder.decodeScriptPubKey(for: v1P2TR) else {
+            XCTFail("decodeScriptPubKey failed for v1 P2TR")
+            return
+        }
+        XCTAssertEqual(RawTransactionDecoder.encodeAddress(for: spk1), v1P2TR)
+
+        // Non-segwit scripts cannot be encoded as bech32
+        let legacyP2PKH = Data([0x76, 0xa9, 0x14] + [UInt8](repeating: 0x11, count: 20) + [0x88, 0xac])
+        XCTAssertNil(RawTransactionDecoder.encodeAddress(for: legacyP2PKH))
+    }
+
+    func testContinuityStateTrackerLifecycleAndPruning() {
+        let tracker = WalletAuthCoordinator.ContinuityStateTracker()
+        tracker.recordSkeleton("skeleton_12345", for: "token_abc")
+        XCTAssertEqual(tracker.getSkeleton(for: "token_abc"), "skeleton_12345")
+
+        tracker.removeSkeleton(for: "token_abc")
+        XCTAssertNil(tracker.getSkeleton(for: "token_abc"))
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

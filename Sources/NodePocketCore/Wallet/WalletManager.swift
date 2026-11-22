@@ -1131,8 +1131,59 @@ public actor WalletManager {
             throw WalletSecurityError.previewTampered
         }
 
+        guard let destScript = RawTransactionDecoder.decodeScriptPubKey(for: trimmedAddr) else {
+            throw WalletSecurityError.invalidMainnetAddress(trimmedAddr)
+        }
+
+        // Validate changepos and change output ownership (R217-P0-02)
+        let changeSats: Int64
+        if funded.changepos == -1 {
+            // No change: exactly 1 output matching destination
+            guard psbtDetails.outputs.count == 1 else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.outputs[0].scriptPubKey == destScript && psbtDetails.outputs[0].valueSats == amountSats else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.totalInputSats == amountSats + feeSats else {
+                throw WalletSecurityError.previewTampered
+            }
+            changeSats = 0
+        } else if funded.changepos >= 0 && funded.changepos < psbtDetails.outputs.count {
+            // Send with change: exactly 2 outputs
+            guard psbtDetails.outputs.count == 2 else {
+                throw WalletSecurityError.previewTampered
+            }
+            let changeOutput = psbtDetails.outputs[funded.changepos]
+            let recipientIndex = (funded.changepos == 0) ? 1 : 0
+            let recipientOutput = psbtDetails.outputs[recipientIndex]
+
+            guard recipientOutput.scriptPubKey == destScript && recipientOutput.valueSats == amountSats else {
+                throw WalletSecurityError.previewTampered
+            }
+
+            changeSats = changeOutput.valueSats
+            guard changeSats > 0 else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.totalInputSats == amountSats + feeSats + changeSats else {
+                throw WalletSecurityError.previewTampered
+            }
+
+            // Verify change script ownership via getaddressinfo
+            guard let changeAddr = RawTransactionDecoder.encodeAddress(for: changeOutput.scriptPubKey) else {
+                throw WalletSecurityError.previewTampered
+            }
+            let addressInfo = try await rpcClient.getAddressInfo(address: changeAddr, walletName: walletName)
+            guard addressInfo.ismine == true && addressInfo.ischange == true else {
+                throw WalletSecurityError.previewTampered
+            }
+        } else {
+            // Invalid changepos (out of bounds or negative other than -1)
+            throw WalletSecurityError.previewTampered
+        }
+
         let estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
-        let changeSats = max(0, spendableSats - amountSats - feeSats)
 
         guard spendableSats >= (amountSats + feeSats) else {
             throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
@@ -1455,6 +1506,7 @@ public actor WalletManager {
             var seenInputKeys = Set<Data>()
             var witnessUtxo: (amount: Int64, script: Data)?
             var nonWitnessUtxo: (amount: Int64, script: Data)?
+            var redeemScript: Data?
             var inputMapTerminated = false
 
             while offset < data.count {
@@ -1483,8 +1535,11 @@ public actor WalletManager {
                     }
                     guard satVal <= UInt64(Int64.max) && satVal > 0 else { return nil }
                     guard let (spkLen, spkVarLen) = parseVarInt(valData, at: 8) else { return nil }
-                    // Strict length verification: 8 + varIntLen + scriptLen == valData.count (R216-P0-02)
-                    guard 8 + spkVarLen + Int(spkLen) == valData.count else { return nil }
+                    // Safe remaining byte bounds and checked conversion/arithmetic BEFORE Int(spkLen) (R217-P0-01)
+                    guard valData.count >= 8 + spkVarLen else { return nil }
+                    let remainingBytes = valData.count - 8 - spkVarLen
+                    guard spkLen <= UInt64(remainingBytes) else { return nil }
+                    guard Int(spkLen) == remainingBytes else { return nil }
                     let spk = valData.subdata(in: (8 + spkVarLen)..<valData.count)
                     witnessUtxo = (Int64(satVal), spk)
                 } else if keyType == 0x00 && keyLen == 1 { // PSBT_IN_NON_WITNESS_UTXO
@@ -1496,6 +1551,8 @@ public actor WalletManager {
                     let satVal = prevTx.outputs[vout].valueSats
                     guard satVal > 0 else { return nil }
                     nonWitnessUtxo = (satVal, prevTx.outputs[vout].scriptPubKey)
+                } else if keyType == 0x04 && keyLen == 1 { // PSBT_IN_REDEEM_SCRIPT
+                    redeemScript = valData
                 }
             }
 
@@ -1506,8 +1563,15 @@ public actor WalletManager {
                 // Both are present: verify consistent value and script, do not double-count (R216-P0-02)
                 guard w.amount == nw.amount else { return nil }
                 guard w.script == nw.script else { return nil }
+                if RawTransactionDecoder.isP2SH(w.script) && redeemScript != nil {
+                    guard RawTransactionDecoder.hash160(redeemScript!) == w.script.subdata(in: 2..<22) else { return nil }
+                }
                 inputPrevoutSats[i] = w.amount
             } else if let w = witnessUtxo {
+                // Witness-only UTXO: MUST be SegWit! (native SegWit or P2SH-wrapped SegWit with valid redeemScript) (R217-P0-01)
+                guard RawTransactionDecoder.isValidSegWit(scriptPubKey: w.script, redeemScript: redeemScript) else {
+                    return nil
+                }
                 inputPrevoutSats[i] = w.amount
             } else if let nw = nonWitnessUtxo {
                 inputPrevoutSats[i] = nw.amount

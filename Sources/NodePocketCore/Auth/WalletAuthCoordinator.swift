@@ -517,24 +517,31 @@ public actor WalletAuthCoordinator {
 
     final class ContinuityStateTracker: @unchecked Sendable {
         private let lock = NSLock()
-        private var skeletons: [String: String] = [:]
+        private var skeletons: [String: (skeleton: String, recordedAt: Date)] = [:]
 
         func recordSkeleton(_ skeleton: String, for tokenKey: String) {
             lock.lock()
             defer { lock.unlock() }
-            skeletons[tokenKey] = skeleton
+            pruneExpiredLocked()
+            skeletons[tokenKey] = (skeleton, Date())
         }
 
         func getSkeleton(for tokenKey: String) -> String? {
             lock.lock()
             defer { lock.unlock() }
-            return skeletons[tokenKey]
+            pruneExpiredLocked()
+            return skeletons[tokenKey]?.skeleton
         }
 
         func removeSkeleton(for tokenKey: String) {
             lock.lock()
             defer { lock.unlock() }
             skeletons.removeValue(forKey: tokenKey)
+        }
+
+        private func pruneExpiredLocked() {
+            let cutoff = Date().addingTimeInterval(-120.0) // 120s TTL (exceeds 60s preview TTL)
+            skeletons = skeletons.filter { $0.value.recordedAt >= cutoff }
         }
     }
 
@@ -662,6 +669,9 @@ public actor WalletAuthCoordinator {
                 // Assert transaction skeleton continuity against signing stage (R216-P0-04)
                 guard let expectedSkeleton = continuityTracker.getSkeleton(for: tokenKey) else { return false }
                 guard decoded.skeletonFingerprint == expectedSkeleton else { return false }
+
+                // Prune skeleton upon final broadcast stage verification to prevent unbounded memory growth (R217-P0-03)
+                continuityTracker.removeSkeleton(for: tokenKey)
 
                 return true
             } else {
@@ -3013,6 +3023,228 @@ public enum RawTransactionDecoder {
             guard val >= 0x100000000 else { return nil }
             return (val, 9)
         }
+    }
+
+    public static func encodeAddress(for scriptPubKey: Data) -> String? {
+        guard scriptPubKey.count >= 4 && scriptPubKey.count <= 42 else { return nil }
+        let first = scriptPubKey[0]
+        let pushLen = scriptPubKey[1]
+        let witnessVersion: UInt8
+        let isBech32m: Bool
+        if first == 0x00 {
+            witnessVersion = 0
+            isBech32m = false
+            guard (pushLen == 0x14 && scriptPubKey.count == 22) || (pushLen == 0x20 && scriptPubKey.count == 34) else { return nil }
+        } else if first >= 0x51 && first <= 0x60 {
+            witnessVersion = first - 0x50
+            isBech32m = true
+            guard pushLen >= 0x02 && pushLen <= 0x28 && scriptPubKey.count == 2 + Int(pushLen) else { return nil }
+        } else {
+            return nil
+        }
+
+        let program = [UInt8](scriptPubKey.subdata(in: 2..<scriptPubKey.count))
+        var acc = 0
+        var bits = 0
+        var payload5Bit: [UInt8] = [witnessVersion]
+        for b in program {
+            acc = (acc << 8) | Int(b)
+            bits += 8
+            while bits >= 5 {
+                bits -= 5
+                payload5Bit.append(UInt8((acc >> bits) & 31))
+            }
+        }
+        if bits > 0 {
+            payload5Bit.append(UInt8((acc << (5 - bits)) & 31))
+        }
+
+        let hrpValues: [UInt8] = [3, 3, 0, 2, 3] // hrpExpand("bc")
+        let encConst: UInt32 = isBech32m ? 0x2bc830a3 : 1
+        let generator: [UInt32] = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+
+        var ch: UInt32 = 1
+        for v in (hrpValues + payload5Bit + [0, 0, 0, 0, 0, 0]) {
+            let b = ch >> 25
+            ch = ((ch & 0x1ffffff) << 5) ^ UInt32(v)
+            for i in 0..<5 {
+                if ((b >> i) & 1) != 0 { ch ^= generator[i] }
+            }
+        }
+        let mod = ch ^ encConst
+        var checksum: [UInt8] = []
+        for i in 0..<6 {
+            checksum.append(UInt8((mod >> (5 * (5 - i))) & 31))
+        }
+
+        let charset = Array("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+        return "bc1" + String((payload5Bit + checksum).map { charset[Int($0)] })
+    }
+
+    public static func hash160(_ data: Data) -> Data {
+        let sha = CryptoKit.SHA256.hash(data: data)
+        return RIPEMD160.hash(data: Data(sha))
+    }
+
+    public static func isWitnessProgram(_ script: Data) -> Bool {
+        guard script.count >= 4 && script.count <= 42 else { return false }
+        let version = script[0]
+        let pushLen = script[1]
+        if version == 0x00 {
+            return (pushLen == 0x14 && script.count == 22) || (pushLen == 0x20 && script.count == 34)
+        } else if version >= 0x51 && version <= 0x60 {
+            return pushLen >= 0x02 && pushLen <= 0x28 && script.count == 2 + Int(pushLen)
+        }
+        return false
+    }
+
+    public static func isP2SH(_ script: Data) -> Bool {
+        return script.count == 23 && script[0] == 0xa9 && script[1] == 0x14 && script[22] == 0x87
+    }
+
+    public static func isValidSegWit(scriptPubKey: Data, redeemScript: Data?) -> Bool {
+        if isWitnessProgram(scriptPubKey) {
+            return true
+        }
+        if isP2SH(scriptPubKey) {
+            guard let redeem = redeemScript else { return false }
+            guard hash160(redeem) == scriptPubKey.subdata(in: 2..<22) else { return false }
+            return isWitnessProgram(redeem)
+        }
+        return false
+    }
+}
+
+public enum RIPEMD160 {
+    public static func hash(data: Data) -> Data {
+        var h0: UInt32 = 0x67452301
+        var h1: UInt32 = 0xEFCDAB89
+        var h2: UInt32 = 0x98BADCFE
+        var h3: UInt32 = 0x10325476
+        var h4: UInt32 = 0xC3D2E1F0
+
+        let msgLen = data.count
+        var padded = [UInt8](data)
+        padded.append(0x80)
+        while (padded.count % 64) != 56 {
+            padded.append(0)
+        }
+        let bitLen = UInt64(msgLen) * 8
+        for i in 0..<8 {
+            padded.append(UInt8((bitLen >> (i * 8)) & 0xff))
+        }
+
+        func rol(_ value: UInt32, _ shift: UInt32) -> UInt32 {
+            return (value << shift) | (value >> (32 - shift))
+        }
+
+        func f(_ j: Int, _ x: UInt32, _ y: UInt32, _ z: UInt32) -> UInt32 {
+            if j < 16 { return x ^ y ^ z }
+            if j < 32 { return (x & y) | (~x & z) }
+            if j < 48 { return (x | ~y) ^ z }
+            if j < 64 { return (x & z) | (y & ~z) }
+            return x ^ (y | ~z)
+        }
+
+        let kl: [UInt32] = [
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999,
+            0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999, 0x5A827999,
+            0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1,
+            0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1, 0x6ED9EBA1,
+            0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC,
+            0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC, 0x8F1BBCDC,
+            0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E,
+            0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E, 0xA953FD4E
+        ]
+
+        let kr: [UInt32] = [
+            0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6,
+            0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6, 0x50A28BE6,
+            0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124,
+            0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124, 0x5C4DD124,
+            0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3,
+            0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3, 0x6D703EF3,
+            0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9,
+            0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9, 0x7A6D76E9,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+            0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000
+        ]
+
+        let rl: [Int] = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            7, 4, 13, 1, 10, 6, 15, 3, 12, 0, 9, 5, 2, 14, 11, 8,
+            3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12,
+            1, 9, 11, 10, 0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
+            4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6, 15, 13
+        ]
+
+        let rr: [Int] = [
+            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12,
+            6, 11, 3, 7, 0, 13, 5, 10, 14, 15, 8, 12, 4, 9, 1, 2,
+            15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13,
+            8, 6, 4, 1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
+            12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14, 0, 3, 9, 11
+        ]
+
+        let sl: [UInt32] = [
+            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8,
+            7, 6, 8, 13, 11, 9, 7, 15, 7, 12, 15, 9, 11, 7, 13, 12,
+            11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5,
+            11, 12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
+            9, 15, 5, 11, 6, 8, 13, 12, 5, 12, 13, 14, 11, 8, 5, 6
+        ]
+
+        let sr: [UInt32] = [
+            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6,
+            9, 13, 15, 7, 12, 8, 9, 11, 7, 7, 12, 7, 6, 15, 13, 11,
+            9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5,
+            15, 5, 8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
+            8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6, 5, 15, 13, 11, 11
+        ]
+
+        let numBlocks = padded.count / 64
+        for b in 0..<numBlocks {
+            var x = [UInt32](repeating: 0, count: 16)
+            for i in 0..<16 {
+                let off = b * 64 + i * 4
+                x[i] = UInt32(padded[off]) |
+                       (UInt32(padded[off + 1]) << 8) |
+                       (UInt32(padded[off + 2]) << 16) |
+                       (UInt32(padded[off + 3]) << 24)
+            }
+
+            var al = h0, bl = h1, cl = h2, dl = h3, el = h4
+            var ar = h0, br = h1, cr = h2, dr = h3, er = h4
+
+            for j in 0..<80 {
+                let tl = al &+ f(j, bl, cl, dl) &+ x[rl[j]] &+ kl[j]
+                let tlRol = rol(tl, sl[j]) &+ el
+                al = el; el = dl; dl = rol(cl, 10); cl = bl; bl = tlRol
+
+                let tr = ar &+ f(79 - j, br, cr, dr) &+ x[rr[j]] &+ kr[j]
+                let trRol = rol(tr, sr[j]) &+ er
+                ar = er; er = dr; dr = rol(cr, 10); cr = br; br = trRol
+            }
+
+            let t = h0 &+ bl &+ cr
+            h0 = h1 &+ cl &+ dr
+            h1 = h2 &+ dl &+ er
+            h2 = h3 &+ el &+ ar
+            h3 = h4 &+ al &+ br
+            h4 = t
+        }
+
+        var result = Data()
+        for h in [h0, h1, h2, h3, h4] {
+            var val = h
+            for _ in 0..<4 {
+                result.append(UInt8(val & 0xff))
+                val >>= 8
+            }
+        }
+        return result
     }
 }
 

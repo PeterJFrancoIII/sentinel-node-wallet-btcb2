@@ -454,12 +454,263 @@ final class WalletIntegrationTests: XCTestCase {
             }
         }
     }
+
+    func testPrepareSendPreviewCalculatesExactChangeFromPsbtOutputs() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("change_calc_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1", port: 18443, user: "u", password: "p",
+            urlSession: session, isBroadcastRestricted: false
+        )
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("addr.json"))
+        let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        _ = try testAddressBook.addRecipient(name: "Recip", address: validDestination)
+
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_change")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_change",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "change_vault"
+        )
+        try await manager.walletInventory.setOwner(for: "change_vault", owner: "operator_change")
+        try await manager.selectWallet(name: "change_vault", capability: capability)
+
+        // Wallet has 1,000,000 sats spendable balance.
+        // Selected PSBT input is 100,000 sats. Send 50,000 sats, fee 1,000 sats.
+        // Change in PSBT output 1 is 49,000 sats.
+        let preview = try await manager.prepareSendPreview(
+            to: validDestination,
+            amountSats: 50_000,
+            feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+            capability: capability
+        )
+
+        // Verify R217-P0-02: changeSats MUST be exact 49,000 sats, NOT wallet balance remainder (949,000 sats)!
+        XCTAssertEqual(preview.changeSats, 49_000, "changeSats must be derived directly from selected PSBT change output")
+        XCTAssertEqual(preview.amountSats, 50_000)
+        XCTAssertEqual(preview.feeSats, 1_000)
+    }
+
+    func testPrepareSendPreviewNoChangeOutputWhenChangeposMinusOne() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("no_change_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1", port: 18443, user: "u", password: "p",
+            urlSession: session, isBroadcastRestricted: false
+        )
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("addr.json"))
+        let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        _ = try testAddressBook.addRecipient(name: "Recip", address: validDestination)
+
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_nochange")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_nochange",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "nochange_vault"
+        )
+        try await manager.walletInventory.setOwner(for: "nochange_vault", owner: "operator_nochange")
+        try await manager.selectWallet(name: "nochange_vault", capability: capability)
+
+        // Single output PSBT (50,000 sats recipient, 1,000 fee, 51,000 input, changepos == -1)
+        let destSpk = Data([0x00, 0x14, 0xe8, 0xdf, 0x01, 0x8c, 0x7e, 0x32, 0x6c, 0xc2, 0x53, 0xfa, 0xac, 0x7e, 0x46, 0xcd, 0xc5, 0x1e, 0x68, 0x54, 0x2c, 0x42])
+        let unsignedTx = Data([0x02, 0x00, 0x00, 0x00, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0x50, 0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16] + destSpk + [0x00, 0x00, 0x00, 0x00])
+
+        var psbt = Data([0x70, 0x73, 0x62, 0x74, 0xff, 0x01, 0x00, UInt8(unsignedTx.count)]) + unsignedTx + Data([0x00])
+        let prevSpk = Data([0x00, 0x14] + [UInt8](repeating: 0x55, count: 20))
+        let witnessVal = Data([0x38, 0xc7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16]) + prevSpk // 51,000 sats (50,000 amount + 1,000 fee)
+        psbt.append(contentsOf: [0x01, 0x01, UInt8(witnessVal.count)])
+        psbt.append(witnessVal)
+        psbt.append(0x00) // input 0 end
+        psbt.append(0x00) // output 0 end
+
+        DualFailureRPCURLProtocol.walletCreateFundedPsbtResult = [
+            "psbt": psbt.base64EncodedString(),
+            "fee": 0.00001,
+            "changepos": -1
+        ]
+
+        let preview = try await manager.prepareSendPreview(
+            to: validDestination,
+            amountSats: 50_000,
+            feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+            capability: capability
+        )
+
+        XCTAssertEqual(preview.changeSats, 0, "No change output must result in changeSats == 0")
+        XCTAssertEqual(preview.amountSats, 50_000)
+        XCTAssertEqual(preview.feeSats, 1_000)
+    }
+
+    func testPrepareSendPreviewAttackerControlledChangeScriptFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("attacker_change_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1", port: 18443, user: "u", password: "p",
+            urlSession: session, isBroadcastRestricted: false
+        )
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("addr.json"))
+        let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        _ = try testAddressBook.addRecipient(name: "Recip", address: validDestination)
+
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_foreign")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_foreign",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "foreign_vault"
+        )
+        try await manager.walletInventory.setOwner(for: "foreign_vault", owner: "operator_foreign")
+        try await manager.selectWallet(name: "foreign_vault", capability: capability)
+
+        // Mock getaddressinfo returning ismine: false (attacker-controlled change address)
+        DualFailureRPCURLProtocol.getAddressInfoResult = [
+            "address": "bc1q8g43cn27daagh8qdrchn5j6ud4lglxsttfqdvn",
+            "ismine": false,
+            "ischange": false
+        ]
+
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: validDestination,
+                amountSats: 50_000,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            XCTFail("Must fail closed when change address is not owned by the wallet")
+        } catch let err as WalletSecurityError {
+            guard case .previewTampered = err else {
+                XCTFail("Expected previewTampered, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testPrepareSendPreviewMisleadingChangeposFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("misleading_change_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(
+            host: "127.0.0.1", port: 18443, user: "u", password: "p",
+            urlSession: session, isBroadcastRestricted: false
+        )
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("addr.json"))
+        let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        _ = try testAddressBook.addRecipient(name: "Recip", address: validDestination)
+
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_misleading")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_misleading",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "misleading_vault"
+        )
+        try await manager.walletInventory.setOwner(for: "misleading_vault", owner: "operator_misleading")
+        try await manager.selectWallet(name: "misleading_vault", capability: capability)
+
+        // Misleading changepos: index 5 (out of bounds for 2-output PSBT)
+        DualFailureRPCURLProtocol.walletCreateFundedPsbtResult = [
+            "psbt": "cHNidP8BAHECAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULELovwAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR+ghgEAAAAAABYAFFVVVVVVVVVVVVVVVVVVVVVVVVVVAAAA",
+            "fee": 0.00001,
+            "changepos": 5
+        ]
+
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: validDestination,
+                amountSats: 50_000,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            XCTFail("Must fail closed on out-of-bounds changepos")
+        } catch let err as WalletSecurityError {
+            guard case .previewTampered = err else {
+                XCTFail("Expected previewTampered, got \(err)")
+                return
+            }
+        }
+    }
 }
 
 private final class DualFailureRPCURLProtocol: URLProtocol {
     static var sendToAddressShouldFail = false
     static var walletLockShouldFail = false
     static var walletPassphraseShouldFail = false
+    static var getAddressInfoResult: [String: Any]?
+    static var walletCreateFundedPsbtResult: [String: Any]?
+    static var getBalancesResult: [String: Any]?
     static var requestsReceived: [String] = []
     static let lock = NSLock()
 
@@ -469,6 +720,9 @@ private final class DualFailureRPCURLProtocol: URLProtocol {
         sendToAddressShouldFail = false
         walletLockShouldFail = false
         walletPassphraseShouldFail = false
+        getAddressInfoResult = nil
+        walletCreateFundedPsbtResult = nil
+        getBalancesResult = nil
         requestsReceived = []
     }
 
@@ -513,6 +767,37 @@ private final class DualFailureRPCURLProtocol: URLProtocol {
         var responsePayload: [String: Any] = ["id": "1", "error": NSNull()]
 
         switch method {
+        case "listwallets":
+            responsePayload = ["id": "1", "result": ["change_vault", "nochange_vault", "foreign_vault", "misleading_vault", "test_vault", "release_test_wallet"], "error": NSNull()]
+        case "getwalletinfo":
+            responsePayload = ["id": "1", "result": ["walletname": "vault", "walletversion": 169900, "balance": 0.01, "unconfirmed_balance": 0.0, "immature_balance": 0.0, "txcount": 5], "error": NSNull()]
+        case "loadwallet":
+            responsePayload = ["id": "1", "result": ["name": "vault", "warning": ""], "error": NSNull()]
+        case "getbalances":
+            let bal = DualFailureRPCURLProtocol.getBalancesResult ?? [
+                "mine": ["trusted": 0.01, "untrusted_pending": 0.0, "immature": 0.0]
+            ]
+            responsePayload = ["id": "1", "result": bal, "error": NSNull()]
+        case "walletcreatefundedpsbt":
+            if let custom = DualFailureRPCURLProtocol.walletCreateFundedPsbtResult {
+                responsePayload = ["id": "1", "result": custom, "error": NSNull()]
+            } else {
+                responsePayload = ["id": "1", "result": [
+                    "psbt": "cHNidP8BAHECAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEJovwAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR+ghgEAAAAAABYAFFVVVVVVVVVVVVVVVVVVVVVVVVVVAAAA",
+                    "fee": 0.00001,
+                    "changepos": 1
+                ], "error": NSNull()]
+            }
+        case "getaddressinfo":
+            if let custom = DualFailureRPCURLProtocol.getAddressInfoResult {
+                responsePayload = ["id": "1", "result": custom, "error": NSNull()]
+            } else {
+                responsePayload = ["id": "1", "result": [
+                    "address": "bc1q8g43cn27daagh8qdrchn5j6ud4lglxsttfqdvn",
+                    "ismine": true,
+                    "ischange": true
+                ], "error": NSNull()]
+            }
         case "walletpassphrase":
             if DualFailureRPCURLProtocol.walletPassphraseShouldFail {
                 responsePayload = ["id": "1", "result": NSNull(), "error": ["code": -14, "message": "Incorrect passphrase"]]

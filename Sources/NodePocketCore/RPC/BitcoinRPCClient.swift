@@ -58,6 +58,22 @@ public struct FinalizedPsbtResponse: Codable, Sendable {
     }
 }
 
+public struct AddressInfo: Codable, Sendable {
+    public let address: String?
+    public let ismine: Bool
+    public let ischange: Bool?
+    public let solvable: Bool?
+    public let desc: String?
+
+    public init(address: String? = nil, ismine: Bool = false, ischange: Bool? = nil, solvable: Bool? = nil, desc: String? = nil) {
+        self.address = address
+        self.ismine = ismine
+        self.ischange = ischange
+        self.solvable = solvable
+        self.desc = desc
+    }
+}
+
 public protocol SpendAuthorizationVerifier: Sendable {
     func verify(
         authorization: SpendAuthorization,
@@ -458,6 +474,10 @@ public final class BitcoinRPCClient: @unchecked Sendable {
 
     public func restoreWallet(name: String, backupFile: String) async throws -> LoadWalletResponse {
         try await call(method: "restorewallet", params: [name, backupFile])
+    }
+
+    public func getAddressInfo(address: String, walletName: String? = nil) async throws -> AddressInfo {
+        try await call(method: "getaddressinfo", params: [address], walletName: walletName)
     }
 
     public func createWallet(name: String, passphrase: String, descriptors: Bool = true, loadOnStartup: Bool = true) async throws -> CreateWalletResponse {

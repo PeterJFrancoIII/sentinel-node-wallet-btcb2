@@ -9,6 +9,15 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
     static var sendRawTransactionCount: Int = 0
     static var walletProcessPsbtCount: Int = 0
     static var finalizePsbtCount: Int = 0
+    static var walletPassphraseCount: Int = 0
+    static var walletLockCount: Int = 0
+    static var getAddressInfoCount: Int = 0
+    static var walletCreateFundedPsbtCount: Int = 0
+    static var simulateUnlockFailure: Bool = false
+    static var simulateRelockFailure: Bool = false
+    static var simulateForeignChangeAddress: Bool = false
+    static var customFundedPsbtResult: [String: Any]? = nil
+    static var customAddressInfoResult: [String: Any]? = nil
 
     static func reset() {
         outboundRequestCount = 0
@@ -17,6 +26,15 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
         sendRawTransactionCount = 0
         walletProcessPsbtCount = 0
         finalizePsbtCount = 0
+        walletPassphraseCount = 0
+        walletLockCount = 0
+        getAddressInfoCount = 0
+        walletCreateFundedPsbtCount = 0
+        simulateUnlockFailure = false
+        simulateRelockFailure = false
+        simulateForeignChangeAddress = false
+        customFundedPsbtResult = nil
+        customAddressInfoResult = nil
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -68,9 +86,29 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
             {"result":{"hex":"02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000","complete":true},"error":null,"id":"1"}
             """.data(using: .utf8)!
         } else if bodyString.contains("\"walletcreatefundedpsbt\"") {
-            responseData = """
-            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA","fee":0.00001,"changepos":1},"error":null,"id":"1"}
-            """.data(using: .utf8)!
+            Self.walletCreateFundedPsbtCount += 1
+            if let custom = Self.customFundedPsbtResult,
+               let data = try? JSONSerialization.data(withJSONObject: ["result": custom, "error": NSNull(), "id": "1"]) {
+                responseData = data
+            } else {
+                responseData = """
+                {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA","fee":0.00001,"changepos":1},"error":null,"id":"1"}
+                """.data(using: .utf8)!
+            }
+        } else if bodyString.contains("\"getaddressinfo\"") {
+            Self.getAddressInfoCount += 1
+            if let custom = Self.customAddressInfoResult,
+               let data = try? JSONSerialization.data(withJSONObject: ["result": custom, "error": NSNull(), "id": "1"]) {
+                responseData = data
+            } else if Self.simulateForeignChangeAddress {
+                responseData = """
+                {"result":{"address":"bc1q8g43cn27daagh8qdrchn5j6ud4lglxsttfqdvn","ismine":false,"ischange":false,"solvable":false},"error":null,"id":"1"}
+                """.data(using: .utf8)!
+            } else {
+                responseData = """
+                {"result":{"address":"bc1q8g43cn27daagh8qdrchn5j6ud4lglxsttfqdvn","ismine":true,"ischange":true,"solvable":true},"error":null,"id":"1"}
+                """.data(using: .utf8)!
+            }
         } else if bodyString.contains("\"sendtoaddress\"") {
             Self.sendToAddressCount += 1
             responseData = """
@@ -84,10 +122,28 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
             responseData = """
             {"result":{"name":"release_test_wallet","warning":""},"error":null,"id":"1"}
             """.data(using: .utf8)!
-        } else if bodyString.contains("\"walletpassphrase\"") || bodyString.contains("\"walletlock\"") {
-            responseData = """
-            {"result":null,"error":null,"id":"1"}
-            """.data(using: .utf8)!
+        } else if bodyString.contains("\"walletpassphrase\"") {
+            Self.walletPassphraseCount += 1
+            if Self.simulateUnlockFailure {
+                responseData = """
+                {"result":null,"error":{"code":-14,"message":"Incorrect passphrase"},"id":"1"}
+                """.data(using: .utf8)!
+            } else {
+                responseData = """
+                {"result":null,"error":null,"id":"1"}
+                """.data(using: .utf8)!
+            }
+        } else if bodyString.contains("\"walletlock\"") {
+            Self.walletLockCount += 1
+            if Self.simulateRelockFailure {
+                responseData = """
+                {"result":null,"error":{"code":-1,"message":"Wallet lock failed I/O"},"id":"1"}
+                """.data(using: .utf8)!
+            } else {
+                responseData = """
+                {"result":null,"error":null,"id":"1"}
+                """.data(using: .utf8)!
+            }
         } else if bodyString.contains("\"getwalletinfo\"") {
             responseData = """
             {"result":{"walletname":"release_test_wallet","walletversion":169900,"format":"sqlite","balance":10.0,"unconfirmed_balance":0.0,"immature_balance":0.0,"txcount":1,"keypoololdest":1600000000,"keypoolsize":1000,"unlocked_until":0,"paytxfee":0.0,"hdseedid":"","private_keys_enabled":true,"avoid_reuse":false,"scanning":false,"descriptors":true},"error":null,"id":"1"}
@@ -280,35 +336,41 @@ struct ReleaseLockVerifier {
         let addressBook = await walletMgr.addressBook
         _ = try! addressBook.addRecipient(name: "Test Recipient", address: validDestination)
 
-        let preview = FundedTxPreview(
-            id: UUID(),
-            destinationAddress: validDestination,
-            amountSats: 50_000,
-            feeSats: 1_000,
-            satPerVB: 5,
-            estimatedVSize: 140,
-            changeSats: 0,
-            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"],
-            createdAt: Date(),
-            validityWindowSeconds: 60.0
-        )
-
         let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
         let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
         let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
-        let totalInputSats: Int64 = 1_000_000
 
-        await walletMgr.recordPendingFundedPsbt(
-            id: preview.id,
-            psbt: validPsbtBase64,
-            destination: preview.destinationAddress,
-            amountSats: preview.amountSats,
-            feeSats: preview.feeSats,
-            inputs: preview.selectedInputs,
-            psbtDigest: psbtDigest,
-            totalInputSats: totalInputSats,
-            expectedOutputFingerprint: expectedOutputFingerprint
-        )
+        // 1. Prepare Send Preview via WalletManager (R217-P0-03 end-to-end journey starting from walletcreatefundedpsbt)
+        let preview: FundedTxPreview
+        do {
+            preview = try await walletMgr.prepareSendPreview(
+                to: validDestination,
+                amountSats: 50_000,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+        } catch {
+            fatalError("FAILURE: prepareSendPreview failed in Section 2: \(error)")
+        }
+
+        // 2. Verify accurate preview amounts and change derivation from PSBT (R217-P0-02)
+        guard preview.amountSats == 50_000 else {
+            fatalError("FAILURE: preview amountSats != 50,000 (got \(preview.amountSats))")
+        }
+        guard preview.feeSats == 1_000 else {
+            fatalError("FAILURE: preview feeSats != 1,000 (got \(preview.feeSats))")
+        }
+        guard preview.changeSats == 949_000 else {
+            fatalError("FAILURE: preview changeSats != 949,000 from PSBT change output (got \(preview.changeSats))")
+        }
+        guard preview.destinationAddress == validDestination else {
+            fatalError("FAILURE: preview destination != validDestination")
+        }
+
+        // 3. Retrieve immutable pending funded PSBT record to construct context
+        guard let pendingRecord = await walletMgr.getPendingFundedPsbt(id: preview.id) else {
+            fatalError("FAILURE: pending funded PSBT record was not recorded by prepareSendPreview!")
+        }
 
         let txContext = TransactionSpendContext(
             walletName: walletName,
@@ -320,11 +382,12 @@ struct ReleaseLockVerifier {
             utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ","),
             chain: "main",
             nonce: preview.id.uuidString,
-            fundedPsbtDigest: psbtDigest,
-            totalInputSats: totalInputSats,
-            expectedOutputFingerprint: expectedOutputFingerprint
+            fundedPsbtDigest: pendingRecord.psbtDigest,
+            totalInputSats: pendingRecord.totalInputSats,
+            expectedOutputFingerprint: pendingRecord.expectedOutputFingerprint
         )
 
+        // 4. Device-owner approval
         let approval = try! await authCoord.requestHighRiskApproval(
             capability: capability,
             action: "send",
@@ -333,6 +396,7 @@ struct ReleaseLockVerifier {
             txContext: txContext
         )
 
+        // 5. Execute authorized send (unlock -> walletprocesspsbt -> finalizepsbt -> walletlock -> sendrawtransaction)
         let txid: String
         do {
             txid = try await walletMgr.executeAuthorizedSend(
@@ -348,14 +412,32 @@ struct ReleaseLockVerifier {
         guard !txid.isEmpty else {
             fatalError("FAILURE: executeAuthorizedSend returned empty txid!")
         }
+        guard BroadcastLockSpyURLProtocol.walletCreateFundedPsbtCount >= 1 else {
+            fatalError("FAILURE: walletcreatefundedpsbt was not executed!")
+        }
+        guard BroadcastLockSpyURLProtocol.getAddressInfoCount >= 1 else {
+            fatalError("FAILURE: getaddressinfo was not executed for change address ownership verification!")
+        }
+        guard BroadcastLockSpyURLProtocol.walletProcessPsbtCount == 1 else {
+            fatalError("FAILURE: walletprocesspsbt was not executed exactly once! Expected 1, got \(BroadcastLockSpyURLProtocol.walletProcessPsbtCount)")
+        }
+        guard BroadcastLockSpyURLProtocol.finalizePsbtCount == 1 else {
+            fatalError("FAILURE: finalizepsbt was not executed exactly once! Expected 1, got \(BroadcastLockSpyURLProtocol.finalizePsbtCount)")
+        }
+        guard BroadcastLockSpyURLProtocol.walletPassphraseCount == 1 else {
+            fatalError("FAILURE: walletpassphrase was not executed exactly once! Expected 1, got \(BroadcastLockSpyURLProtocol.walletPassphraseCount)")
+        }
+        guard BroadcastLockSpyURLProtocol.walletLockCount == 1 else {
+            fatalError("FAILURE: walletlock was not executed exactly once! Expected 1, got \(BroadcastLockSpyURLProtocol.walletLockCount)")
+        }
         guard BroadcastLockSpyURLProtocol.sendRawTransactionCount == 1 else {
             fatalError("FAILURE: sendrawtransaction was not executed exactly once! Expected 1, got \(BroadcastLockSpyURLProtocol.sendRawTransactionCount)")
         }
         guard BroadcastLockSpyURLProtocol.sendToAddressCount == 0 else {
             fatalError("FAILURE: sendtoaddress was unexpectedly executed! Expected 0, got \(BroadcastLockSpyURLProtocol.sendToAddressCount)")
         }
-        print("✓ Verified: Authorized synthetic send executed successfully via exact PSBT pipeline (txid: \(txid)).")
-        print("✓ Verified: Outbound sendrawtransaction transport request occurred EXACTLY ONCE on stub URLProtocol (0 sendtoaddress calls).")
+        print("✓ Verified: Complete end-to-end synthetic operator send journey (prepareSendPreview -> getaddressinfo -> approve -> unlock -> process -> finalize -> lock -> broadcast) executed successfully (txid: \(txid)).")
+        print("✓ Verified: Exact call counts asserted: 1 create, 1 getaddressinfo, 1 unlock, 1 process, 1 finalize, 1 lock, 1 broadcast, exactly 0 direct sendtoaddress.")
 
         // -------------------------------------------------------------
         // SECTION 3: Negative Security Validations & Bypass Prevention
@@ -1619,6 +1701,261 @@ struct ReleaseLockVerifier {
         } catch {
             fatalError("FAILURE: Legacy send() threw unexpected error: \(error)")
         }
+
+        // 3m. Foreign Change Address Fails Closed (R217-P0-02)
+        BroadcastLockSpyURLProtocol.simulateForeignChangeAddress = true
+        do {
+            _ = try await walletMgr.prepareSendPreview(
+                to: validDestination,
+                amountSats: 50_000,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            fatalError("FAILURE: prepareSendPreview accepted foreign change address!")
+        } catch let err as WalletSecurityError {
+            if case .previewTampered = err {
+                print("✓ Verified: Foreign change address failed closed with previewTampered.")
+            } else {
+                fatalError("FAILURE: Foreign change address threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Foreign change address threw unexpected error: \(error)")
+        }
+        BroadcastLockSpyURLProtocol.simulateForeignChangeAddress = false
+
+        // 3n. Out-of-Bounds Changepos Fails Closed (R217-P0-02)
+        BroadcastLockSpyURLProtocol.customFundedPsbtResult = [
+            "psbt": validPsbtBase64,
+            "fee": 0.00001,
+            "changepos": 99
+        ]
+        do {
+            _ = try await walletMgr.prepareSendPreview(
+                to: validDestination,
+                amountSats: 50_000,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            fatalError("FAILURE: prepareSendPreview accepted out-of-bounds changepos!")
+        } catch let err as WalletSecurityError {
+            if case .previewTampered = err {
+                print("✓ Verified: Out-of-bounds changepos failed closed with previewTampered.")
+            } else {
+                fatalError("FAILURE: Out-of-bounds changepos threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Out-of-bounds changepos threw unexpected error: \(error)")
+        }
+        BroadcastLockSpyURLProtocol.customFundedPsbtResult = nil
+
+        // 3o. Negative Changepos < -1 Fails Closed (R217-P0-02)
+        BroadcastLockSpyURLProtocol.customFundedPsbtResult = [
+            "psbt": validPsbtBase64,
+            "fee": 0.00001,
+            "changepos": -2
+        ]
+        do {
+            _ = try await walletMgr.prepareSendPreview(
+                to: validDestination,
+                amountSats: 50_000,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            fatalError("FAILURE: prepareSendPreview accepted negative changepos < -1!")
+        } catch let err as WalletSecurityError {
+            if case .previewTampered = err {
+                print("✓ Verified: Negative changepos < -1 failed closed with previewTampered.")
+            } else {
+                fatalError("FAILURE: Negative changepos threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Negative changepos threw unexpected error: \(error)")
+        }
+        BroadcastLockSpyURLProtocol.customFundedPsbtResult = nil
+
+        // 3p. Wallet Unlock Failure Fails Closed with Zero Broadcast Egress (R217-P0-03)
+        let unlockFailPreview = try! await walletMgr.prepareSendPreview(
+            to: validDestination,
+            amountSats: 50_000,
+            feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+            capability: capability
+        )
+        guard let unlockFailRecord = await walletMgr.getPendingFundedPsbt(id: unlockFailPreview.id) else {
+            fatalError("FAILURE: unlockFailRecord not found")
+        }
+        let unlockFailContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: unlockFailPreview.destinationAddress,
+            amountSats: unlockFailPreview.amountSats,
+            maxFeeSats: unlockFailPreview.feeSats,
+            satPerVB: unlockFailPreview.satPerVB,
+            previewId: unlockFailPreview.id,
+            utxoFingerprint: unlockFailPreview.selectedInputs.sorted().joined(separator: ","),
+            chain: "main",
+            nonce: unlockFailPreview.id.uuidString,
+            fundedPsbtDigest: unlockFailRecord.psbtDigest,
+            totalInputSats: unlockFailRecord.totalInputSats,
+            expectedOutputFingerprint: unlockFailRecord.expectedOutputFingerprint
+        )
+        let unlockFailApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: unlockFailPreview.destinationAddress,
+            reason: "Unlock failure test",
+            txContext: unlockFailContext
+        )
+
+        let sendRawCountBeforeUnlockFail = BroadcastLockSpyURLProtocol.sendRawTransactionCount
+        BroadcastLockSpyURLProtocol.simulateUnlockFailure = true
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: unlockFailPreview,
+                explicitPassphrase: "WrongPassword",
+                capability: capability,
+                approval: unlockFailApproval
+            )
+            fatalError("FAILURE: executeAuthorizedSend succeeded when wallet unlock failed!")
+        } catch let err as RPCClientError {
+            if case .serverError(let code, let msg) = err {
+                guard code == -14 else { fatalError("FAILURE: expected code -14, got \(code)") }
+                print("✓ Verified: Wallet unlock failure failed closed with RPC error code -14: \(msg).")
+            } else {
+                fatalError("FAILURE: Unlock failure threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Unlock failure threw unexpected error: \(error)")
+        }
+        BroadcastLockSpyURLProtocol.simulateUnlockFailure = false
+        guard BroadcastLockSpyURLProtocol.sendRawTransactionCount == sendRawCountBeforeUnlockFail else {
+            fatalError("FAILURE: sendrawtransaction was invoked despite wallet unlock failure!")
+        }
+        print("✓ Verified: Zero broadcast transport egress on wallet unlock failure.")
+
+        // 3q. Wallet Relock Failure After Broadcast Surfaces Txid (R217-P0-03)
+        let relockFailPreview = try! await walletMgr.prepareSendPreview(
+            to: validDestination,
+            amountSats: 50_000,
+            feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+            capability: capability
+        )
+        guard let relockFailRecord = await walletMgr.getPendingFundedPsbt(id: relockFailPreview.id) else {
+            fatalError("FAILURE: relockFailRecord not found")
+        }
+        let relockFailContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: relockFailPreview.destinationAddress,
+            amountSats: relockFailPreview.amountSats,
+            maxFeeSats: relockFailPreview.feeSats,
+            satPerVB: relockFailPreview.satPerVB,
+            previewId: relockFailPreview.id,
+            utxoFingerprint: relockFailPreview.selectedInputs.sorted().joined(separator: ","),
+            chain: "main",
+            nonce: relockFailPreview.id.uuidString,
+            fundedPsbtDigest: relockFailRecord.psbtDigest,
+            totalInputSats: relockFailRecord.totalInputSats,
+            expectedOutputFingerprint: relockFailRecord.expectedOutputFingerprint
+        )
+        let relockFailApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: relockFailPreview.destinationAddress,
+            reason: "Relock failure test",
+            txContext: relockFailContext
+        )
+
+        BroadcastLockSpyURLProtocol.simulateRelockFailure = true
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: relockFailPreview,
+                explicitPassphrase: "WalletPassword123!",
+                capability: capability,
+                approval: relockFailApproval
+            )
+            fatalError("FAILURE: executeAuthorizedSend succeeded when wallet relock failed!")
+        } catch let err as WalletSecurityError {
+            if case .walletRelockFailed(let wName, let underlying, let relockTxid) = err {
+                guard wName == walletName else { fatalError("FAILURE: wallet name mismatch in walletRelockFailed") }
+                guard !relockTxid.isEmpty else { fatalError("FAILURE: txid empty in walletRelockFailed") }
+                guard underlying.contains("Wallet lock failed") else { fatalError("FAILURE: underlying error mismatch") }
+                print("✓ Verified: Wallet relock failure threw walletRelockFailed preserving broadcast txid (\(relockTxid)).")
+            } else {
+                fatalError("FAILURE: Relock failure threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Relock failure threw unexpected error: \(error)")
+        }
+        BroadcastLockSpyURLProtocol.simulateRelockFailure = false
+
+        // 3r. Replayed / Consumed Approval in executeAuthorizedSend Fails Closed (R217-P0-03)
+        // Case 1: Reusing preview whose pending PSBT was already consumed fails closed with previewTampered
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: preview,
+                explicitPassphrase: "WalletPassword123!",
+                capability: capability,
+                approval: approval
+            )
+            fatalError("FAILURE: Replay of consumed approval and preview succeeded in executeAuthorizedSend!")
+        } catch let err as WalletSecurityError {
+            if case .previewTampered = err {
+                print("✓ Verified: Replaying consumed preview without active pending record failed closed with previewTampered.")
+            } else {
+                fatalError("FAILURE: Replayed preview threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Replayed preview threw unexpected error: \(error)")
+        }
+
+        // Case 2: Fresh preview with replayed already-consumed approval fails closed with unauthorizedHighRiskAction
+        let replayPreview = try! await walletMgr.prepareSendPreview(
+            to: validDestination,
+            amountSats: 50_000,
+            feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+            capability: capability
+        )
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: replayPreview,
+                explicitPassphrase: "WalletPassword123!",
+                capability: capability,
+                approval: approval
+            )
+            fatalError("FAILURE: Replayed consumed approval succeeded with fresh preview!")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                print("✓ Verified: Replaying consumed approval with fresh preview failed closed with unauthorizedHighRiskAction.")
+            } else {
+                fatalError("FAILURE: Replayed approval threw unexpected WalletAuthError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Replayed approval threw unexpected error: \(error)")
+        }
+
+        // 3s. PSBT CompactSize UInt64.max and Truncated Script Fail Closed Without Runtime Trap (R217-P0-01)
+        var hugeCompactSizePsbt = Data([0x70, 0x73, 0x62, 0x74, 0xff])
+        hugeCompactSizePsbt.append(contentsOf: [0x01, 0x00, 0x00])
+        hugeCompactSizePsbt.append(contentsOf: [0x01, 0x01])
+        var hugeVal = Data(repeating: 0x00, count: 8)
+        hugeVal.append(0xff)
+        hugeVal.append(contentsOf: [UInt8](repeating: 0xff, count: 8))
+        hugeCompactSizePsbt.append(UInt8(hugeVal.count))
+        hugeCompactSizePsbt.append(hugeVal)
+        hugeCompactSizePsbt.append(0x00)
+        hugeCompactSizePsbt.append(0x00)
+        let hugeB64 = hugeCompactSizePsbt.base64EncodedString()
+        let parsedHuge = WalletManager.parsePsbtDetails(hugeB64)
+        guard parsedHuge == nil else {
+            fatalError("FAILURE: Huge CompactSize UInt64.max did not fail closed!")
+        }
+        print("✓ Verified: Canonical CompactSize with UInt64.max fails closed without runtime trap or crash.")
+
+        // 3t. Legacy non-SegWit P2PKH script in PSBT_IN_WITNESS_UTXO rejected (R217-P0-01)
+        let legacyP2pkhWitnessOnly = "cHNidP8BAHECAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEJovwAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR+ghgEAAAAAABkAeBShnKx6k6W6x1c+28jY13q4z6MAAAA="
+        let parsedLegacy = WalletManager.parsePsbtDetails(legacyP2pkhWitnessOnly)
+        guard parsedLegacy == nil else {
+            fatalError("FAILURE: Legacy P2PKH script in PSBT_IN_WITNESS_UTXO was accepted without non-witness UTXO!")
+        }
+        print("✓ Verified: Legacy non-SegWit P2PKH in PSBT_IN_WITNESS_UTXO rejected per BIP-174 SegWit requirements.")
 
         // -------------------------------------------------------------
         // SECTION 4: Permanent Deletion & Purge Release Gating (WO-39, WO-44, WO-59)
