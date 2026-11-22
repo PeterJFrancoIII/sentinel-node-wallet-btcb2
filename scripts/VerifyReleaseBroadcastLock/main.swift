@@ -1994,6 +1994,84 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Exceeding supply threw unexpected error: \(error)")
         }
 
+        // 3v. Cross-wallet origin binding rejects preview funded from another wallet (R219-P0-01)
+        let crossWalletPreviewId = UUID()
+        await walletMgr.recordPendingFundedPsbt(
+            id: crossWalletPreviewId,
+            psbt: "cHNidP8BAHECAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEJovwAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR+ghgEAAAAAABYAFFVVVVVVVVVVVVVVVVVVVVVVVVVVAAAA",
+            destination: validDestination,
+            amountSats: 10_000,
+            feeSats: 500,
+            inputs: ["input:0"],
+            psbtDigest: "cross_digest",
+            totalInputSats: 10_500,
+            expectedOutputFingerprint: "fingerprint",
+            walletName: "foreign_vault",
+            username: "operator1"
+        )
+        let crossPreview = FundedTxPreview(
+            id: crossWalletPreviewId,
+            destinationAddress: validDestination,
+            amountSats: 10_000,
+            feeSats: 500,
+            satPerVB: 2,
+            estimatedVSize: 140,
+            changeSats: 0,
+            selectedInputs: ["input:0"]
+        )
+        let crossTxContext = TransactionSpendContext(
+            walletName: "release_test_wallet",
+            destinationAddress: validDestination,
+            amountSats: 10_000,
+            maxFeeSats: 500,
+            satPerVB: 2,
+            previewId: crossWalletPreviewId,
+            utxoFingerprint: "input:0",
+            chain: "main",
+            nonce: crossWalletPreviewId.uuidString,
+            fundedPsbtDigest: "cross_digest",
+            totalInputSats: 10_500,
+            expectedOutputFingerprint: "fingerprint"
+        )
+        let crossApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Cross-wallet send verification",
+            txContext: crossTxContext
+        )
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: crossPreview,
+                explicitPassphrase: "mock_passphrase",
+                capability: capability,
+                approval: crossApproval
+            )
+            fatalError("FAILURE: executeAuthorizedSend accepted cross-wallet preview funded from 'foreign_vault' while active was 'release_test_wallet'!")
+        } catch let err as WalletSecurityError {
+            if case .previewTampered = err {
+                print("✓ Verified: Cross-wallet preview origin mismatch failed closed with previewTampered.")
+            } else {
+                fatalError("FAILURE: Cross-wallet preview mismatch threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Cross-wallet preview mismatch threw unexpected error: \(error)")
+        }
+
+        // 3w. Truthful Relock Error Description (R219-P0-03)
+        let dualFailErr = WalletSecurityError.walletRelockFailed(
+            wallet: "test_vault",
+            underlyingError: "Dual failure: Broadcast failed AND relock failed",
+            txid: ""
+        )
+        guard let dualDesc = dualFailErr.errorDescription, dualDesc.contains("Transaction was NOT broadcast") else {
+            fatalError("FAILURE: WalletSecurityError.walletRelockFailed with empty txid did not state transaction was NOT broadcast: \(dualFailErr.errorDescription ?? "")")
+        }
+        guard !dualDesc.contains("Transaction was broadcast (txid:") else {
+            fatalError("FAILURE: WalletSecurityError.walletRelockFailed with empty txid falsely claimed transaction was broadcast!")
+        }
+        print("✓ Verified: WalletSecurityError.walletRelockFailed with empty txid truthfully reports transaction was NOT broadcast without false success.")
+
         // -------------------------------------------------------------
         // SECTION 4: Permanent Deletion & Purge Release Gating (WO-39, WO-44, WO-59)
         // -------------------------------------------------------------

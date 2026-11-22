@@ -229,7 +229,11 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .walletRelockFailed(let wallet, let underlying, let txid):
-            return "Transaction was broadcast (txid: \(txid)), but wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
+            if !txid.isEmpty {
+                return "Transaction was broadcast (txid: \(txid)), but wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
+            } else {
+                return "Transaction was NOT broadcast or broadcast status is UNKNOWN. Wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
+            }
         case .signingFailed(let reason):
             return "Transaction signing or finalization failed: \(reason)"
         case .noWalletLoaded:
@@ -307,6 +311,8 @@ public actor WalletManager {
         public let totalInputSats: Int64
         public let expectedOutputFingerprint: String
         public let inputs: [String]
+        public let walletName: String
+        public let username: String?
         public let createdAt: Date
 
         public init(
@@ -318,6 +324,8 @@ public actor WalletManager {
             totalInputSats: Int64 = 0,
             expectedOutputFingerprint: String = "",
             inputs: [String],
+            walletName: String = "",
+            username: String? = nil,
             createdAt: Date = Date()
         ) {
             self.psbt = psbt
@@ -328,6 +336,8 @@ public actor WalletManager {
             self.totalInputSats = totalInputSats
             self.expectedOutputFingerprint = expectedOutputFingerprint
             self.inputs = inputs
+            self.walletName = walletName
+            self.username = username
             self.createdAt = createdAt
         }
     }
@@ -343,7 +353,9 @@ public actor WalletManager {
         inputs: [String],
         psbtDigest: String = "",
         totalInputSats: Int64 = 0,
-        expectedOutputFingerprint: String = ""
+        expectedOutputFingerprint: String = "",
+        walletName: String = "",
+        username: String? = nil
     ) {
         guard pendingFundedPsbts[id] == nil else {
             return // Immutable: prevent post-approval replacement for the same preview UUID
@@ -358,6 +370,8 @@ public actor WalletManager {
             totalInputSats: totalInputSats,
             expectedOutputFingerprint: expectedOutputFingerprint,
             inputs: inputs,
+            walletName: walletName,
+            username: username,
             createdAt: Date()
         )
     }
@@ -373,6 +387,7 @@ public actor WalletManager {
     public func resetActiveWallet() {
         self.currentWalletName = nil
         self.latestSnapshot = nil
+        self.pendingFundedPsbts.removeAll()
     }
 
     public func registerStagingSession(_ id: String) {
@@ -798,6 +813,9 @@ public actor WalletManager {
         if !loaded.contains(name) {
             _ = try await rpcClient.loadWallet(name: name)
         }
+        if let old = self.currentWalletName, old != name {
+            self.pendingFundedPsbts.removeAll()
+        }
         self.currentWalletName = name
         if let user = capability?.username, !user.isEmpty {
             UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
@@ -1217,7 +1235,9 @@ public actor WalletManager {
             inputs: psbtDetails.inputs,
             psbtDigest: psbtDigest,
             totalInputSats: psbtDetails.totalInputSats,
-            expectedOutputFingerprint: outputFingerprint
+            expectedOutputFingerprint: outputFingerprint,
+            walletName: walletName,
+            username: capability?.username
         )
 
         return FundedTxPreview(
@@ -1320,6 +1340,18 @@ public actor WalletManager {
             throw WalletSecurityError.previewTampered
         }
 
+        // Validate origin wallet binding (R219-P0-01)
+        if !pending.walletName.isEmpty {
+            guard pending.walletName == walletName else {
+                throw WalletSecurityError.previewTampered
+            }
+        }
+        if let boundUser = pending.username, !boundUser.isEmpty, let execUser = capability?.username, !execUser.isEmpty {
+            guard boundUser.lowercased() == execUser.lowercased() else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator mismatch on authorized send.")
+            }
+        }
+
         guard pending.destination.lowercased() == preview.destinationAddress.lowercased(),
               pending.amountSats == preview.amountSats,
               pending.feeSats == preview.feeSats,
@@ -1380,7 +1412,23 @@ public actor WalletManager {
         }
 
         // 7. Temporarily unlock wallet for 15 seconds to sign and broadcast
-        try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
+        do {
+            try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
+        } catch {
+            // Attempt cancellation-independent relock cleanup in case unlock reached node before transport failure (R219-P0-02)
+            let isDeterministicAuthFailure: Bool
+            if let rpcErr = error as? RPCClientError, case .serverError(let code, _) = rpcErr, code == -14 {
+                isDeterministicAuthFailure = true
+            } else {
+                isDeterministicAuthFailure = false
+            }
+            if !isDeterministicAuthFailure {
+                _ = await Task.detached { [rpcClient, walletName] in
+                    try? await rpcClient.walletLock(walletName: walletName)
+                }.value
+            }
+            throw error
+        }
 
         // 8. Sign, finalize, and broadcast the exact funded PSBT via sendrawtransaction
         var txid: String = ""
@@ -1413,12 +1461,18 @@ public actor WalletManager {
             sendError = error
         }
 
-        // 9. Awaited wallet relock cleanup
+        // 9. Awaited wallet relock cleanup (cancellation-independent, R219-P0-02)
         var relockError: Error?
-        do {
-            try await rpcClient.walletLock(walletName: walletName)
-        } catch {
-            relockError = error
+        let lockResult = await Task.detached { [rpcClient, walletName] () -> Result<Void, Error> in
+            do {
+                try await rpcClient.walletLock(walletName: walletName)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        if case .failure(let err) = lockResult {
+            relockError = err
         }
 
         // Handle dual error or relock failure:

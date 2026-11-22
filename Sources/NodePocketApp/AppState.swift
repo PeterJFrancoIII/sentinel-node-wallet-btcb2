@@ -995,6 +995,12 @@ public final class AppState: ObservableObject {
         guard let pendingRecord = await walletManager.getPendingFundedPsbt(id: preview.id) else {
             throw WalletSecurityError.previewTampered
         }
+        // Ensure wallet has not changed between preview generation and send execution (R219-P0-01)
+        if !pendingRecord.walletName.isEmpty {
+            guard pendingRecord.walletName == walletName else {
+                throw WalletSecurityError.previewTampered
+            }
+        }
         guard !pendingRecord.psbtDigest.isEmpty, pendingRecord.totalInputSats > 0, !pendingRecord.expectedOutputFingerprint.isEmpty else {
             throw WalletSecurityError.previewTampered
         }

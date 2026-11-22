@@ -257,6 +257,8 @@ final class WalletIntegrationTests: XCTestCase {
             XCTAssertTrue(underlying.contains("Dual failure"), "Error must report Dual failure: \(underlying)")
             XCTAssertTrue(underlying.contains("Broadcast failed"), "Error must report broadcast failure: \(underlying)")
             XCTAssertTrue(underlying.contains("Wallet lock failed"), "Error must report wallet lock failure: \(underlying)")
+            XCTAssertTrue(err.errorDescription?.contains("Transaction was NOT broadcast") == true, "Error description must state transaction was NOT broadcast when txid is empty: \(err.errorDescription ?? "")")
+            XCTAssertFalse(err.errorDescription?.contains("Transaction was broadcast (txid:") == true, "Error description must NOT state transaction was broadcast when txid is empty")
         }
     }
 
@@ -814,6 +816,108 @@ final class WalletIntegrationTests: XCTestCase {
         } catch let err as WalletSecurityError {
             guard case .invalidAmount = err else {
                 XCTFail("Expected invalidAmount, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testExecuteAuthorizedSendCrossWalletBindingRejectsDifferentOriginWallet() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cross_wallet_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let urlSession = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(user: "test", password: "test", urlSession: urlSession, isBroadcastRestricted: false)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("test_addr_book.json"))
+        _ = try testAddressBook.addRecipient(name: "Test Recipient", address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq")
+
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        await authCoord.setMockDeviceOwnerSuccessForTesting(true)
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_cross")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_cross",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "vault_B"
+        )
+        try await manager.walletInventory.setOwner(for: "vault_B", owner: "operator_cross")
+
+        let preview = FundedTxPreview(
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 10_000,
+            feeSats: 500,
+            satPerVB: 2,
+            estimatedVSize: 140,
+            changeSats: 0,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+
+        // Record preview originating from vault_A
+        await manager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: "cHNidP8BAHECAAAAAaqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEJovwAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR+ghgEAAAAAABYAFFVVVVVVVVVVVVVVVVVVVVVVVVVVAAAA",
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: "mock_digest",
+            totalInputSats: 10_500,
+            expectedOutputFingerprint: "fingerprint",
+            walletName: "vault_A",
+            username: "operator_cross"
+        )
+
+        let txContext = TransactionSpendContext(
+            walletName: "vault_B",
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: preview.selectedInputs[0],
+            chain: "main",
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: "mock_digest",
+            totalInputSats: 10_500,
+            expectedOutputFingerprint: "fingerprint"
+        )
+
+        let approval = try await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Cross-wallet send attempt",
+            txContext: txContext
+        )
+
+        // Executing send against active wallet vault_B when preview was funded from vault_A must fail closed with previewTampered
+        do {
+            _ = try await manager.executeAuthorizedSend(
+                preview: preview,
+                explicitPassphrase: "pwd",
+                capability: capability,
+                approval: approval
+            )
+            XCTFail("Must fail closed when active wallet does not match origin wallet that funded the PSBT")
+        } catch let err as WalletSecurityError {
+            guard case .previewTampered = err else {
+                XCTFail("Expected previewTampered, got \(err)")
                 return
             }
         }
