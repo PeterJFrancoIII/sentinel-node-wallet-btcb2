@@ -999,6 +999,12 @@ public final class AppState: ObservableObject {
         guard !preview.selectedInputs.isEmpty else {
             throw WalletSecurityError.previewTampered
         }
+        guard let pendingRecord = await walletManager.getPendingFundedPsbt(id: preview.id) else {
+            throw WalletSecurityError.previewTampered
+        }
+        guard !pendingRecord.psbtDigest.isEmpty, pendingRecord.totalInputSats > 0, !pendingRecord.expectedOutputFingerprint.isEmpty else {
+            throw WalletSecurityError.previewTampered
+        }
         let utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
         let txContext = TransactionSpendContext(
             walletName: walletName,
@@ -1009,7 +1015,10 @@ public final class AppState: ObservableObject {
             previewId: preview.id,
             utxoFingerprint: utxoFingerprint,
             chain: "main",
-            nonce: preview.id.uuidString
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: pendingRecord.psbtDigest,
+            totalInputSats: pendingRecord.totalInputSats,
+            expectedOutputFingerprint: pendingRecord.expectedOutputFingerprint
         )
         let approval = try await authCoordinator.requestHighRiskApproval(
             capability: session,

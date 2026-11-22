@@ -60,7 +60,7 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
         } else if bodyString.contains("\"walletprocesspsbt\"") {
             Self.walletProcessPsbtCount += 1
             responseData = """
-            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=","complete":true},"error":null,"id":"1"}
+            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA","complete":true},"error":null,"id":"1"}
             """.data(using: .utf8)!
         } else if bodyString.contains("\"finalizepsbt\"") {
             Self.finalizePsbtCount += 1
@@ -69,7 +69,7 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
             """.data(using: .utf8)!
         } else if bodyString.contains("\"walletcreatefundedpsbt\"") {
             responseData = """
-            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=","fee":0.00001,"changepos":1},"error":null,"id":"1"}
+            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA","fee":0.00001,"changepos":1},"error":null,"id":"1"}
             """.data(using: .utf8)!
         } else if bodyString.contains("\"sendtoaddress\"") {
             Self.sendToAddressCount += 1
@@ -293,6 +293,23 @@ struct ReleaseLockVerifier {
             validityWindowSeconds: 60.0
         )
 
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
+        await walletMgr.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
+        )
+
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,
@@ -302,7 +319,10 @@ struct ReleaseLockVerifier {
             previewId: preview.id,
             utxoFingerprint: preview.selectedInputs.sorted().joined(separator: ","),
             chain: "main",
-            nonce: preview.id.uuidString
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
 
         let approval = try! await authCoord.requestHighRiskApproval(
@@ -311,16 +331,6 @@ struct ReleaseLockVerifier {
             target: preview.destinationAddress,
             reason: "Release safety verifier send",
             txContext: txContext
-        )
-
-        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA="
-        await walletMgr.recordPendingFundedPsbt(
-            id: preview.id,
-            psbt: validPsbtBase64,
-            destination: preview.destinationAddress,
-            amountSats: preview.amountSats,
-            feeSats: preview.feeSats,
-            inputs: preview.selectedInputs
         )
 
         let txid: String
@@ -434,7 +444,7 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Missing funded PSBT threw unexpected error: \(error)")
         }
 
-        // 3-pre-E: Direct sendRawTransaction with genuine coordinator-issued SpendAuthorization
+        // 3-pre-E: Direct sendRawTransaction without prior PSBT processing & finalization fails closed
         let rawTxHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
         let rawTxPreview = FundedTxPreview(
             id: UUID(),
@@ -454,7 +464,10 @@ struct ReleaseLockVerifier {
             previewId: rawTxPreview.id,
             utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
             chain: "main",
-            nonce: rawTxPreview.id.uuidString
+            nonce: rawTxPreview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
         let rawTxApproval = try! await authCoord.requestHighRiskApproval(
             capability: capability,
@@ -471,18 +484,51 @@ struct ReleaseLockVerifier {
             expectedTxContext: rawTxContext
         )
 
+        // Attempt direct sendRawTransaction before walletprocesspsbt -> must fail closed with transactionBroadcastDisabled
+        do {
+            _ = try await client.sendRawTransaction(
+                hex: rawTxHex,
+                walletName: walletName,
+                authorization: rawTxAuth
+            )
+            fatalError("FAILURE: Direct sendRawTransaction without prior PSBT signing phases did not fail closed!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Direct sendRawTransaction without prior PSBT signing phases failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Direct sendRawTransaction threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Direct sendRawTransaction threw unexpected error: \(error)")
+        }
+
+        // 3-pre-F: Completing valid PSBT sequence (walletprocesspsbt -> finalizepsbt -> sendrawtransaction) succeeds, and replay fails closed
+        let fullProc: ProcessedPsbtResponse = try! await client.walletProcessPsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: rawTxAuth
+        )
+        guard fullProc.complete else { fatalError("FAILURE: walletprocesspsbt failed on valid auth!") }
+
+        let fullFin: FinalizedPsbtResponse = try! await client.finalizePsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: rawTxAuth
+        )
+        guard fullFin.complete else { fatalError("FAILURE: finalizepsbt failed on valid auth!") }
+
         do {
             let res: String = try await client.sendRawTransaction(
                 hex: rawTxHex,
                 walletName: walletName,
                 authorization: rawTxAuth
             )
-            print("✓ Verified: Direct sendRawTransaction with genuine coordinator-issued SpendAuthorization succeeded (txid: \(res)).")
+            print("✓ Verified: Complete authorized PSBT pipeline (process -> finalize -> broadcast) succeeded (txid: \(res)).")
         } catch {
-            fatalError("FAILURE: Direct sendRawTransaction with valid SpendAuthorization failed: \(error)")
+            fatalError("FAILURE: Complete authorized PSBT sendRawTransaction failed: \(error)")
         }
 
-        // 3-pre-F: Replay of exact same sendRawTransaction authorization fails closed
+        // 3-pre-G: Replay of exact same sendRawTransaction authorization fails closed
         do {
             _ = try await client.sendRawTransaction(
                 hex: rawTxHex,
@@ -522,6 +568,7 @@ struct ReleaseLockVerifier {
             utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
             chain: "main",
             nonce: feeCapPreview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
             totalInputSats: 1_000_000,
             expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
         )
@@ -537,9 +584,17 @@ struct ReleaseLockVerifier {
             action: "send",
             target: validDestination,
             authorizedMethod: "sendrawtransaction",
-            expectedTxContext: feeCapContext,
-            totalInputSats: 1_000_000,
-            expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+            expectedTxContext: feeCapContext
+        )
+        _ = try! await client.walletProcessPsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: feeCapAuth
+        )
+        _ = try! await client.finalizePsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: feeCapAuth
         )
         do {
             _ = try await client.sendRawTransaction(
@@ -579,6 +634,7 @@ struct ReleaseLockVerifier {
             utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
             chain: "main",
             nonce: extraOutPreview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
             totalInputSats: 1_000_000,
             expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
         )
@@ -594,9 +650,17 @@ struct ReleaseLockVerifier {
             action: "send",
             target: validDestination,
             authorizedMethod: "sendrawtransaction",
-            expectedTxContext: extraOutContext,
-            totalInputSats: 1_000_000,
-            expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+            expectedTxContext: extraOutContext
+        )
+        _ = try! await client.walletProcessPsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: extraOutAuth
+        )
+        _ = try! await client.finalizePsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: extraOutAuth
         )
         do {
             _ = try await client.sendRawTransaction(
@@ -636,7 +700,9 @@ struct ReleaseLockVerifier {
             utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
             chain: "main",
             nonce: psbtMismatchPreview.id.uuidString,
-            fundedPsbtDigest: "expected_genuine_psbt_sha256_digest"
+            fundedPsbtDigest: "expected_genuine_psbt_sha256_digest",
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
         let psbtMismatchApproval = try! await authCoord.requestHighRiskApproval(
             capability: capability,
@@ -650,8 +716,7 @@ struct ReleaseLockVerifier {
             action: "send",
             target: validDestination,
             authorizedMethod: "sendrawtransaction",
-            expectedTxContext: psbtMismatchContext,
-            fundedPsbtDigest: "expected_genuine_psbt_sha256_digest"
+            expectedTxContext: psbtMismatchContext
         )
         do {
             _ = try await client.walletProcessPsbt(
@@ -691,7 +756,9 @@ struct ReleaseLockVerifier {
             utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
             chain: "main",
             nonce: psbtMultiPreview.id.uuidString,
-            fundedPsbtDigest: genuinePsbtDigest
+            fundedPsbtDigest: genuinePsbtDigest,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
         let psbtMultiApproval = try! await authCoord.requestHighRiskApproval(
             capability: capability,
@@ -705,8 +772,7 @@ struct ReleaseLockVerifier {
             action: "send",
             target: validDestination,
             authorizedMethod: "sendrawtransaction",
-            expectedTxContext: psbtMultiContext,
-            fundedPsbtDigest: genuinePsbtDigest
+            expectedTxContext: psbtMultiContext
         )
         // First call succeeds:
         let procResult = try! await client.walletProcessPsbt(
@@ -753,7 +819,10 @@ struct ReleaseLockVerifier {
             previewId: trailingPreview.id,
             utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
             chain: "main",
-            nonce: trailingPreview.id.uuidString
+            nonce: trailingPreview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
         let trailingApproval = try! await authCoord.requestHighRiskApproval(
             capability: capability,
@@ -768,6 +837,16 @@ struct ReleaseLockVerifier {
             target: validDestination,
             authorizedMethod: "sendrawtransaction",
             expectedTxContext: trailingContext
+        )
+        _ = try! await client.walletProcessPsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: trailingAuth
+        )
+        _ = try! await client.finalizePsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: trailingAuth
         )
         do {
             _ = try await client.sendRawTransaction(
@@ -785,6 +864,73 @@ struct ReleaseLockVerifier {
         } catch {
             fatalError("FAILURE: Trailing bytes threw unexpected error: \(error)")
         }
+
+        // 3-r215-A: Immutable Pending Funded PSBT Record Overwrite Prevention (R215-P0-01)
+        let immutableRecordId = UUID()
+        await walletMgr.recordPendingFundedPsbt(
+            id: immutableRecordId,
+            psbt: validPsbtBase64,
+            destination: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            inputs: ["input1:0"],
+            psbtDigest: "original_digest",
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: "original_fingerprint"
+        )
+        // Attempt to overwrite with malicious/altered details:
+        await walletMgr.recordPendingFundedPsbt(
+            id: immutableRecordId,
+            psbt: "malicious_psbt",
+            destination: "bc1qmalicious",
+            amountSats: 999_999,
+            feeSats: 0,
+            inputs: ["malicious_input:0"],
+            psbtDigest: "malicious_digest",
+            totalInputSats: 999_999,
+            expectedOutputFingerprint: "malicious_fingerprint"
+        )
+        let preservedRecord = await walletMgr.getPendingFundedPsbt(id: immutableRecordId)
+        guard let rec = preservedRecord,
+              rec.psbtDigest == "original_digest",
+              rec.amountSats == 50_000,
+              rec.totalInputSats == 1_000_000,
+              rec.expectedOutputFingerprint == "original_fingerprint" else {
+            fatalError("FAILURE: Pending funded PSBT record was overwritten after initial record!")
+        }
+        print("✓ Verified: Pending funded PSBT record is strictly immutable and cannot be overwritten once set.")
+
+        // 3-r215-B: Malformed VarInt / Non-Canonical VarInt / Truncated Inputs Fail Closed (R215-P0-02, R215-P0-03)
+        // 1. Non-canonical 3-byte VarInt encoding a value < 253 (e.g. 0xfd 0x05 0x00)
+        let nonCanonicalVarIntData = Data([0xfd, 0x05, 0x00])
+        let nonCanRes = WalletManager.parseVarInt(nonCanonicalVarIntData, at: 0)
+        guard nonCanRes == nil else {
+            fatalError("FAILURE: Non-canonical VarInt was accepted!")
+        }
+
+        // 2. Truncated VarInt (0xfe with only 2 bytes following)
+        let truncatedVarIntData = Data([0xfe, 0x01, 0x02])
+        let truncRes = WalletManager.parseVarInt(truncatedVarIntData, at: 0)
+        guard truncRes == nil else {
+            fatalError("FAILURE: Truncated VarInt was accepted!")
+        }
+
+        // 3. PSBT without global unsigned tx or invalid magic
+        guard WalletManager.parsePsbtDetails("invalid_base64_data") == nil else {
+            fatalError("FAILURE: Invalid base64 PSBT was parsed!")
+        }
+        guard WalletManager.parsePsbtDetails("cHNidA==") == nil else { // "psbt" without 0xff separator
+            fatalError("FAILURE: Invalid magic PSBT was parsed!")
+        }
+
+        // 4. RawTransactionDecoder fails closed on non-canonical VarInt or truncated data
+        guard RawTransactionDecoder.decode(hex: "02000000fd0500") == nil else {
+            fatalError("FAILURE: RawTransactionDecoder decoded non-canonical VarInt!")
+        }
+        guard RawTransactionDecoder.decode(hex: "0200000001") == nil else {
+            fatalError("FAILURE: RawTransactionDecoder decoded truncated transaction!")
+        }
+        print("✓ Verified: Malformed VarInts, non-canonical encodings, and truncated PSBT/raw transactions fail closed without crash.")
 
         // 3a. Forged token SpendAuthorization rejected at transport (P0-1)
         let forgedAuth = SpendAuthorization(

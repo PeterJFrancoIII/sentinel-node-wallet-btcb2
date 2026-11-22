@@ -345,6 +345,9 @@ public actor WalletManager {
         totalInputSats: Int64 = 0,
         expectedOutputFingerprint: String = ""
     ) {
+        guard pendingFundedPsbts[id] == nil else {
+            return // Immutable: prevent post-approval replacement for the same preview UUID
+        }
         let digest = !psbtDigest.isEmpty ? psbtDigest : SHA256.hash(data: Data(psbt.utf8)).map { String(format: "%02x", $0) }.joined()
         pendingFundedPsbts[id] = PendingFundedPsbtRecord(
             psbt: psbt,
@@ -357,6 +360,10 @@ public actor WalletManager {
             inputs: inputs,
             createdAt: Date()
         )
+    }
+
+    public func getPendingFundedPsbt(id: UUID) -> PendingFundedPsbtRecord? {
+        return pendingFundedPsbts[id]
     }
 
     public func consumePendingFundedPsbt(id: UUID) -> PendingFundedPsbtRecord? {
@@ -1109,8 +1116,7 @@ public actor WalletManager {
             throw WalletSecurityError.previewTampered
         }
 
-        let expectedOutputs = Self.extractOutputsFromPsbtBase64(funded.psbt)
-        guard !expectedOutputs.isEmpty else {
+        guard let psbtDetails = Self.parsePsbtDetails(funded.psbt) else {
             throw WalletSecurityError.previewTampered
         }
 
@@ -1118,6 +1124,13 @@ public actor WalletManager {
         guard feeSats > 0 else {
             throw WalletSecurityError.invalidAmount("Transaction fee must be strictly positive.")
         }
+        guard psbtDetails.calculatedFeeSats == feeSats else {
+            throw WalletSecurityError.previewTampered
+        }
+        guard psbtDetails.totalInputSats > 0 else {
+            throw WalletSecurityError.previewTampered
+        }
+
         let estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
         let changeSats = max(0, spendableSats - amountSats - feeSats)
 
@@ -1125,9 +1138,7 @@ public actor WalletManager {
             throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
         }
 
-        let sumOutputs = expectedOutputs.reduce(Int64(0)) { $0 + $1.valueSats }
-        let totalInputSats = sumOutputs + feeSats
-        let outputFingerprint = expectedOutputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
+        let outputFingerprint = psbtDetails.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
         let psbtDigest = SHA256.hash(data: Data(funded.psbt.utf8)).map { String(format: "%02x", $0) }.joined()
 
         let previewId = UUID()
@@ -1137,9 +1148,9 @@ public actor WalletManager {
             destination: trimmedAddr,
             amountSats: amountSats,
             feeSats: feeSats,
-            inputs: selectedInputs,
+            inputs: psbtDetails.inputs,
             psbtDigest: psbtDigest,
-            totalInputSats: totalInputSats,
+            totalInputSats: psbtDetails.totalInputSats,
             expectedOutputFingerprint: outputFingerprint
         )
 
@@ -1152,7 +1163,7 @@ public actor WalletManager {
             satPerVB: feeQuote.satPerVB,
             estimatedVSize: estimatedVSize,
             changeSats: changeSats,
-            selectedInputs: selectedInputs,
+            selectedInputs: psbtDetails.inputs,
             createdAt: Date(),
             validityWindowSeconds: 60.0
         )
@@ -1223,6 +1234,9 @@ public actor WalletManager {
             guard boundContext.previewId == preview.id else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Approval preview ID mismatch.")
             }
+            guard boundContext.walletName == walletName else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval wallet mismatch.")
+            }
         }
 
         // 6. Validate inputs and spend context
@@ -1230,7 +1244,7 @@ public actor WalletManager {
             throw WalletSecurityError.previewTampered
         }
 
-        // 7. Validate pending funded PSBT matches preview
+        // 7. Validate pending funded PSBT matches preview and approved context
         guard let pending = consumePendingFundedPsbt(id: preview.id) else {
             throw WalletSecurityError.previewTampered
         }
@@ -1240,6 +1254,24 @@ public actor WalletManager {
               pending.feeSats == preview.feeSats,
               pending.inputs == preview.selectedInputs else {
             throw WalletSecurityError.previewTampered
+        }
+
+        if let boundContext = app.txContext {
+            if !boundContext.fundedPsbtDigest.isEmpty {
+                guard pending.psbtDigest == boundContext.fundedPsbtDigest else {
+                    throw WalletSecurityError.previewTampered
+                }
+            }
+            if boundContext.totalInputSats > 0 {
+                guard pending.totalInputSats == boundContext.totalInputSats else {
+                    throw WalletSecurityError.previewTampered
+                }
+            }
+            if !boundContext.expectedOutputFingerprint.isEmpty {
+                guard pending.expectedOutputFingerprint == boundContext.expectedOutputFingerprint else {
+                    throw WalletSecurityError.previewTampered
+                }
+            }
         }
 
         let utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
@@ -1252,7 +1284,7 @@ public actor WalletManager {
             previewId: preview.id,
             utxoFingerprint: utxoFingerprint,
             chain: "main",
-            nonce: preview.id.uuidString,
+            nonce: app.txContext?.nonce ?? preview.id.uuidString,
             fundedPsbtDigest: pending.psbtDigest,
             totalInputSats: pending.totalInputSats,
             expectedOutputFingerprint: pending.expectedOutputFingerprint
@@ -1343,24 +1375,144 @@ public actor WalletManager {
         return txid
     }
 
+    public struct ParsedPsbtDetails: Sendable {
+        public let inputs: [String]
+        public let outputs: [DecodedRawTransaction.Output]
+        public let totalInputSats: Int64
+        public let totalOutputSats: Int64
+        public let calculatedFeeSats: Int64
+
+        public init(
+            inputs: [String],
+            outputs: [DecodedRawTransaction.Output],
+            totalInputSats: Int64,
+            totalOutputSats: Int64,
+            calculatedFeeSats: Int64
+        ) {
+            self.inputs = inputs
+            self.outputs = outputs
+            self.totalInputSats = totalInputSats
+            self.totalOutputSats = totalOutputSats
+            self.calculatedFeeSats = calculatedFeeSats
+        }
+    }
+
+    public static func parsePsbtDetails(_ base64: String) -> ParsedPsbtDetails? {
+        guard let data = Data(base64Encoded: base64), data.count >= 5 else { return nil }
+        guard data[0] == 0x70 && data[1] == 0x73 && data[2] == 0x62 && data[3] == 0x74 && data[4] == 0xff else {
+            return nil
+        }
+        var offset = 5
+        var rawTxData: Data?
+
+        // 1. Global map
+        while offset < data.count {
+            guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
+            offset += kLen
+            if keyLen == 0 { break } // Global map ends
+            guard keyLen <= UInt64(data.count - offset) else { return nil }
+            let keyType = data[offset]
+            offset += Int(keyLen)
+            guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
+            offset += vLen
+            guard valLen <= UInt64(data.count - offset) else { return nil }
+            let valData = data.subdata(in: offset..<(offset + Int(valLen)))
+            offset += Int(valLen)
+            if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
+                rawTxData = valData
+            }
+        }
+
+        guard let unsignedTx = rawTxData else { return nil }
+        let inputs = parseRawTxInputs(unsignedTx)
+        let outputs = parseRawTxOutputs(unsignedTx)
+        guard !inputs.isEmpty && !outputs.isEmpty else { return nil }
+
+        var totalOutputSats: Int64 = 0
+        for out in outputs {
+            guard out.valueSats > 0 else { return nil }
+            let (newSum, overflow) = totalOutputSats.addingReportingOverflow(out.valueSats)
+            guard !overflow else { return nil }
+            totalOutputSats = newSum
+        }
+
+        // 2. Input maps: scan inputs.count input maps
+        var inputPrevoutSats: [Int64] = Array(repeating: 0, count: inputs.count)
+        var foundPrevoutCount = 0
+
+        for i in 0..<inputs.count {
+            while offset < data.count {
+                guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += kLen
+                if keyLen == 0 { break } // This input map ends
+                guard keyLen <= UInt64(data.count - offset) else { return nil }
+                let keyType = data[offset]
+                offset += Int(keyLen)
+                guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += vLen
+                guard valLen <= UInt64(data.count - offset) else { return nil }
+                let valData = data.subdata(in: offset..<(offset + Int(valLen)))
+                offset += Int(valLen)
+
+                if keyType == 0x01 && valData.count >= 8 { // PSBT_IN_WITNESS_UTXO
+                    var satVal: UInt64 = 0
+                    for b in 0..<8 {
+                        satVal |= UInt64(valData[b]) << (b * 8)
+                    }
+                    guard satVal <= UInt64(Int64.max) && satVal > 0 else { return nil }
+                    inputPrevoutSats[i] = Int64(satVal)
+                    foundPrevoutCount += 1
+                } else if keyType == 0x00 { // PSBT_IN_NON_WITNESS_UTXO
+                    let prevOutputs = parseRawTxOutputs(valData)
+                    let voutStr = inputs[i].split(separator: ":").last.map(String.init) ?? ""
+                    if let vout = Int(voutStr), vout >= 0 && vout < prevOutputs.count {
+                        let satVal = prevOutputs[vout].valueSats
+                        guard satVal > 0 else { return nil }
+                        inputPrevoutSats[i] = satVal
+                        foundPrevoutCount += 1
+                    }
+                }
+            }
+        }
+
+        guard foundPrevoutCount == inputs.count else { return nil }
+
+        var totalInputSats: Int64 = 0
+        for inVal in inputPrevoutSats {
+            guard inVal > 0 else { return nil }
+            let (newSum, overflow) = totalInputSats.addingReportingOverflow(inVal)
+            guard !overflow else { return nil }
+            totalInputSats = newSum
+        }
+
+        guard totalInputSats > totalOutputSats else { return nil }
+        let calculatedFeeSats = totalInputSats - totalOutputSats
+
+        return ParsedPsbtDetails(
+            inputs: inputs,
+            outputs: outputs,
+            totalInputSats: totalInputSats,
+            totalOutputSats: totalOutputSats,
+            calculatedFeeSats: calculatedFeeSats
+        )
+    }
+
     public static func extractInputsFromPsbtBase64(_ base64: String) -> [String] {
         guard let data = Data(base64Encoded: base64), data.count >= 5 else { return [] }
-        // Magic bytes: 0x70 0x73 0x62 0x74 0xff
         guard data[0] == 0x70 && data[1] == 0x73 && data[2] == 0x62 && data[3] == 0x74 && data[4] == 0xff else {
             return []
         }
         var offset = 5
         while offset < data.count {
-            let (keyLen, kLen) = parseVarInt(data, at: offset)
+            guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return [] }
             offset += kLen
             if keyLen == 0 { break }
-            guard offset + Int(keyLen) <= data.count else { return [] }
+            guard keyLen <= UInt64(data.count - offset) else { return [] }
             let keyType = data[offset]
             offset += Int(keyLen)
-            guard offset < data.count else { return [] }
-            let (valLen, vLen) = parseVarInt(data, at: offset)
+            guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return [] }
             offset += vLen
-            guard offset + Int(valLen) <= data.count else { return [] }
+            guard valLen <= UInt64(data.count - offset) else { return [] }
             let valData = data.subdata(in: offset..<(offset + Int(valLen)))
             offset += Int(valLen)
             if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
@@ -1377,16 +1529,15 @@ public actor WalletManager {
         }
         var offset = 5
         while offset < data.count {
-            let (keyLen, kLen) = parseVarInt(data, at: offset)
+            guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return [] }
             offset += kLen
             if keyLen == 0 { break }
-            guard offset + Int(keyLen) <= data.count else { return [] }
+            guard keyLen <= UInt64(data.count - offset) else { return [] }
             let keyType = data[offset]
             offset += Int(keyLen)
-            guard offset < data.count else { return [] }
-            let (valLen, vLen) = parseVarInt(data, at: offset)
+            guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return [] }
             offset += vLen
-            guard offset + Int(valLen) <= data.count else { return [] }
+            guard valLen <= UInt64(data.count - offset) else { return nil ?? [] }
             let valData = data.subdata(in: offset..<(offset + Int(valLen)))
             offset += Int(valLen)
             if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
@@ -1399,12 +1550,11 @@ public actor WalletManager {
     private static func parseRawTxInputs(_ data: Data) -> [String] {
         guard data.count >= 5 else { return [] }
         var offset = 4 // skip version (4 bytes)
-        // Check for segwit marker
         if offset + 2 <= data.count && data[offset] == 0x00 && data[offset + 1] == 0x01 {
             offset += 2
         }
         guard offset < data.count else { return [] }
-        let (inCount, varintLen) = parseVarInt(data, at: offset)
+        guard let (inCount, varintLen) = parseVarInt(data, at: offset), inCount > 0, inCount <= UInt64(data.count / 41) else { return [] }
         offset += varintLen
         var inputs: [String] = []
         for _ in 0..<inCount {
@@ -1414,9 +1564,10 @@ public actor WalletManager {
             offset += 32
             let vout = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
             offset += 4
-            guard offset < data.count else { break }
-            let (scriptLen, sLen) = parseVarInt(data, at: offset)
-            offset += sLen + Int(scriptLen) + 4 // script + sequence
+            guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { break }
+            offset += sLen
+            guard scriptLen <= UInt64(data.count - offset - 4) else { break }
+            offset += Int(scriptLen) + 4 // script + sequence
             inputs.append("\(txidHex):\(vout)")
         }
         return inputs
@@ -1429,17 +1580,7 @@ public actor WalletManager {
             offset += 2
         }
         guard offset < data.count else { return [] }
-        let (inCount, varintLen) = parseVarInt(data, at: offset)
-        offset += varintLen
-        for _ in 0..<inCount {
-            guard offset + 36 <= data.count else { return [] }
-            offset += 36
-            guard offset < data.count else { return [] }
-            let (scriptLen, sLen) = parseVarInt(data, at: offset)
-            offset += sLen + Int(scriptLen) + 4
-        }
-        guard offset < data.count else { return [] }
-        let (outCount, outVarLen) = parseVarInt(data, at: offset)
+        guard let (outCount, outVarLen) = parseVarInt(data, at: offset), outCount > 0, outCount <= UInt64(data.count / 9) else { return [] }
         offset += outVarLen
         var outputs: [DecodedRawTransaction.Output] = []
         for _ in 0..<outCount {
@@ -1449,10 +1590,10 @@ public actor WalletManager {
                 val |= UInt64(data[offset + i]) << (i * 8)
             }
             offset += 8
-            guard offset < data.count else { return [] }
-            let (scriptLen, sLen) = parseVarInt(data, at: offset)
+            guard val <= UInt64(Int64.max) && val > 0 else { return [] }
+            guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return [] }
             offset += sLen
-            guard offset + Int(scriptLen) <= data.count else { return [] }
+            guard scriptLen <= UInt64(data.count - offset) else { return [] }
             let scriptData = data.subdata(in: offset..<(offset + Int(scriptLen)))
             offset += Int(scriptLen)
             outputs.append(DecodedRawTransaction.Output(valueSats: Int64(val), scriptPubKey: scriptData))
@@ -1460,28 +1601,28 @@ public actor WalletManager {
         return outputs
     }
 
-    private static func parseVarInt(_ data: Data, at offset: Int) -> (UInt64, Int) {
-        guard offset < data.count else { return (0, 0) }
+    public static func parseVarInt(_ data: Data, at offset: Int) -> (value: UInt64, length: Int)? {
+        guard offset < data.count else { return nil }
         let first = data[offset]
         if first < 0xfd {
             return (UInt64(first), 1)
         } else if first == 0xfd {
-            guard offset + 3 <= data.count else { return (0, 0) }
+            guard offset + 3 <= data.count else { return nil }
             let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8)
-            guard val >= 0xfd else { return (0, 0) }
+            guard val >= 0xfd else { return nil }
             return (val, 3)
         } else if first == 0xfe {
-            guard offset + 5 <= data.count else { return (0, 0) }
+            guard offset + 5 <= data.count else { return nil }
             let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8) | (UInt64(data[offset + 3]) << 16) | (UInt64(data[offset + 4]) << 24)
-            guard val >= 0x10000 else { return (0, 0) }
+            guard val >= 0x10000 else { return nil }
             return (val, 5)
         } else {
-            guard offset + 9 <= data.count else { return (0, 0) }
+            guard offset + 9 <= data.count else { return nil }
             var val: UInt64 = 0
             for i in 0..<8 {
                 val |= UInt64(data[offset + 1 + i]) << (i * 8)
             }
-            guard val >= 0x100000000 else { return (0, 0) }
+            guard val >= 0x100000000 else { return nil }
             return (val, 9)
         }
     }

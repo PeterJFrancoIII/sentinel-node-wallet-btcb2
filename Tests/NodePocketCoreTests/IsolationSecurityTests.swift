@@ -141,7 +141,10 @@ final class IsolationSecurityTests: XCTestCase {
         satPerVB: Int = 5,
         walletName: String = "vault1",
         chain: String = "main",
-        utxoFingerprint: String = "utxo_mock"
+        utxoFingerprint: String = "utxo_mock",
+        fundedPsbtDigest: String = "default_psbt_digest_sha256",
+        totalInputSats: Int64 = 1_000_000,
+        expectedOutputFingerprint: String = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
     ) async throws -> (WalletAuthCoordinator, SpendAuthorization) {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("isolation_test_\(UUID().uuidString)")
@@ -167,7 +170,10 @@ final class IsolationSecurityTests: XCTestCase {
             previewId: UUID(),
             utxoFingerprint: utxoFingerprint,
             chain: chain,
-            nonce: "nonce_\(UUID().uuidString)"
+            nonce: "nonce_\(UUID().uuidString)",
+            fundedPsbtDigest: fundedPsbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
         let approval = try await coordinator.requestHighRiskApproval(
             capability: capability,

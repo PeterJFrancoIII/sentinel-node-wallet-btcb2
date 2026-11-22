@@ -588,21 +588,24 @@ public actor WalletAuthCoordinator {
                 }
 
                 // Expected output fingerprint verification (no extra or mutated outputs)
-                if !auth.expectedOutputFingerprint.isEmpty {
-                    let actualOutputFingerprint = decoded.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
-                    guard actualOutputFingerprint == auth.expectedOutputFingerprint else {
-                        return false
-                    }
+                guard !auth.expectedOutputFingerprint.isEmpty else { return false }
+                let actualOutputFingerprint = decoded.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
+                guard actualOutputFingerprint == auth.expectedOutputFingerprint else {
+                    return false
                 }
 
                 // Actual fee calculation and verification
-                if auth.totalInputSats > 0 {
-                    let sumOutputs = decoded.outputs.reduce(Int64(0)) { $0 + $1.valueSats }
-                    guard sumOutputs > 0 && sumOutputs < auth.totalInputSats else { return false }
-                    let actualFeeSats = auth.totalInputSats - sumOutputs
-                    guard actualFeeSats > 0 else { return false }
-                    guard actualFeeSats <= auth.maxFeeSats else { return false }
+                guard auth.totalInputSats > 0 else { return false }
+                var sumOutputs: Int64 = 0
+                for out in decoded.outputs {
+                    guard out.valueSats > 0 else { return false }
+                    let (newSum, overflow) = sumOutputs.addingReportingOverflow(out.valueSats)
+                    guard !overflow else { return false }
+                    sumOutputs = newSum
                 }
+                guard sumOutputs > 0 && sumOutputs < auth.totalInputSats else { return false }
+                let actualFeeSats = auth.totalInputSats - sumOutputs
+                guard actualFeeSats > 0 && actualFeeSats <= auth.maxFeeSats else { return false }
 
                 return true
             } else if normalizedAuthMethod == "sendtoaddress" && normalizedMethod == "sendtoaddress" {
@@ -1472,7 +1475,7 @@ public actor WalletAuthCoordinator {
         let expiresAt = issuedAt.addingTimeInterval(60) // 60-second validity window
 
         let contextDigest = txContext.map {
-            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.satPerVB):\($0.chain):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
+            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.satPerVB):\($0.chain):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.fundedPsbtDigest):\($0.totalInputSats):\($0.expectedOutputFingerprint):\($0.nonce)"
         } ?? "none"
 
         let tokenPayload = "\(approvalId.uuidString):\(action):\(target.lowercased()):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(capability.id.uuidString):\(contextDigest)"
@@ -1548,6 +1551,15 @@ public actor WalletAuthCoordinator {
             guard actual.utxoFingerprint == expected.utxoFingerprint else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Approval UTXO fingerprint mismatch.")
             }
+            guard actual.fundedPsbtDigest == expected.fundedPsbtDigest else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval funded PSBT digest mismatch.")
+            }
+            guard actual.totalInputSats == expected.totalInputSats else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval total input sats mismatch: expected \(expected.totalInputSats), got \(actual.totalInputSats).")
+            }
+            guard actual.expectedOutputFingerprint == expected.expectedOutputFingerprint else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval expected output fingerprint mismatch.")
+            }
             guard actual.nonce == expected.nonce else {
                 throw WalletAuthError.unauthorizedHighRiskAction("Approval nonce mismatch.")
             }
@@ -1555,7 +1567,7 @@ public actor WalletAuthCoordinator {
 
         // 6. Verify cryptographic HMAC signature
         let contextDigest = approval.txContext.map {
-            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.satPerVB):\($0.chain):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.nonce)"
+            "\($0.walletName):\($0.destinationAddress.lowercased()):\($0.amountSats):\($0.maxFeeSats):\($0.satPerVB):\($0.chain):\($0.utxoFingerprint):\($0.previewId.uuidString):\($0.fundedPsbtDigest):\($0.totalInputSats):\($0.expectedOutputFingerprint):\($0.nonce)"
         } ?? "none"
         let expectedPayload = "\(approval.id.uuidString):\(approval.action):\(approval.target.lowercased()):\(approval.issuedAt.timeIntervalSince1970):\(approval.expiresAt.timeIntervalSince1970):\(record.boundSessionId.uuidString):\(contextDigest)"
         let expectedToken = Self.hmacSHA256(data: Data(expectedPayload.utf8), key: hmacSecret)
@@ -1590,9 +1602,15 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.sessionExpired
         }
 
-        let effectiveDigest = !fundedPsbtDigest.isEmpty ? fundedPsbtDigest : expectedTxContext.fundedPsbtDigest
-        let effectiveTotalInputs = totalInputSats > 0 ? totalInputSats : expectedTxContext.totalInputSats
-        let effectiveOutputFingerprint = !expectedOutputFingerprint.isEmpty ? expectedOutputFingerprint : expectedTxContext.expectedOutputFingerprint
+        let effectiveDigest = expectedTxContext.fundedPsbtDigest
+        let effectiveTotalInputs = expectedTxContext.totalInputSats
+        let effectiveOutputFingerprint = expectedTxContext.expectedOutputFingerprint
+
+        if authorizedMethod == "sendrawtransaction" {
+            guard !effectiveDigest.isEmpty, effectiveTotalInputs > 0, !effectiveOutputFingerprint.isEmpty else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Production spend authorization for sendrawtransaction requires non-empty fundedPsbtDigest, positive totalInputSats, and non-empty expectedOutputFingerprint.")
+            }
+        }
 
         let issuedAt = Date()
         let expiresAt = issuedAt.addingTimeInterval(60)
@@ -2654,7 +2672,7 @@ public enum RawTransactionDecoder {
             offset += 2
         }
         guard offset < data.count else { return nil }
-        guard let (inCount, vLen1) = parseVarInt(data, at: offset), inCount > 0 else { return nil }
+        guard let (inCount, vLen1) = parseVarInt(data, at: offset), inCount > 0, inCount <= UInt64(data.count / 41) else { return nil }
         offset += vLen1
         var inputs: [String] = []
         for _ in 0..<inCount {
@@ -2666,12 +2684,12 @@ public enum RawTransactionDecoder {
             offset += 4
             guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return nil }
             offset += sLen
-            guard offset + Int(scriptLen) + 4 <= data.count else { return nil }
+            guard scriptLen <= UInt64(data.count - offset - 4) else { return nil }
             offset += Int(scriptLen) + 4 // scriptSig + 4 bytes sequence
             inputs.append("\(txidHex):\(vout)")
         }
         guard offset < data.count else { return nil }
-        guard let (outCount, vLen2) = parseVarInt(data, at: offset), outCount > 0 else { return nil }
+        guard let (outCount, vLen2) = parseVarInt(data, at: offset), outCount > 0, outCount <= UInt64(data.count / 9) else { return nil }
         offset += vLen2
         var outputs: [DecodedRawTransaction.Output] = []
         for _ in 0..<outCount {
@@ -2681,9 +2699,10 @@ public enum RawTransactionDecoder {
                 val |= UInt64(data[offset + i]) << (i * 8)
             }
             offset += 8
+            guard val <= UInt64(Int64.max) && val > 0 else { return nil }
             guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return nil }
             offset += sLen
-            guard offset + Int(scriptLen) <= data.count else { return nil }
+            guard scriptLen <= UInt64(data.count - offset) else { return nil }
             let scriptData = data.subdata(in: offset..<(offset + Int(scriptLen)))
             offset += Int(scriptLen)
             outputs.append(DecodedRawTransaction.Output(valueSats: Int64(val), scriptPubKey: scriptData))
@@ -2693,10 +2712,11 @@ public enum RawTransactionDecoder {
             for _ in 0..<inCount {
                 guard let (itemCount, itemVarLen) = parseVarInt(data, at: offset) else { return nil }
                 offset += itemVarLen
+                guard itemCount <= UInt64(data.count - offset) else { return nil }
                 for _ in 0..<itemCount {
                     guard let (itemLen, iVarLen) = parseVarInt(data, at: offset) else { return nil }
                     offset += iVarLen
-                    guard offset + Int(itemLen) <= data.count else { return nil }
+                    guard itemLen <= UInt64(data.count - offset) else { return nil }
                     offset += Int(itemLen)
                 }
             }

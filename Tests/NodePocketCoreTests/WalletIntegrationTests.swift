@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import NodePocketCore
 
 final class WalletIntegrationTests: XCTestCase {
@@ -195,6 +196,23 @@ final class WalletIntegrationTests: XCTestCase {
             selectedInputs: [expectedInput]
         )
 
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
+        await manager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
+        )
+
         let txContext = TransactionSpendContext(
             walletName: "test_vault",
             destinationAddress: preview.destinationAddress,
@@ -204,7 +222,10 @@ final class WalletIntegrationTests: XCTestCase {
             previewId: preview.id,
             utxoFingerprint: expectedInput,
             chain: "main",
-            nonce: preview.id.uuidString
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
 
         let approval = try await authCoord.requestHighRiskApproval(
@@ -213,15 +234,6 @@ final class WalletIntegrationTests: XCTestCase {
             target: preview.destinationAddress,
             reason: "Dual failure test send",
             txContext: txContext
-        )
-
-        await manager.recordPendingFundedPsbt(
-            id: preview.id,
-            psbt: "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=",
-            destination: preview.destinationAddress,
-            amountSats: preview.amountSats,
-            feeSats: preview.feeSats,
-            inputs: preview.selectedInputs
         )
 
         DualFailureRPCURLProtocol.sendToAddressShouldFail = true
@@ -301,6 +313,23 @@ final class WalletIntegrationTests: XCTestCase {
             selectedInputs: [expectedInput]
         )
 
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
+        await manager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
+        )
+
         let txContext = TransactionSpendContext(
             walletName: "test_vault",
             destinationAddress: preview.destinationAddress,
@@ -310,7 +339,10 @@ final class WalletIntegrationTests: XCTestCase {
             previewId: preview.id,
             utxoFingerprint: expectedInput,
             chain: "main",
-            nonce: preview.id.uuidString
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
 
         let approval = try await authCoord.requestHighRiskApproval(
@@ -319,15 +351,6 @@ final class WalletIntegrationTests: XCTestCase {
             target: preview.destinationAddress,
             reason: "Relock failure test send",
             txContext: txContext
-        )
-
-        await manager.recordPendingFundedPsbt(
-            id: preview.id,
-            psbt: "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=",
-            destination: preview.destinationAddress,
-            amountSats: preview.amountSats,
-            feeSats: preview.feeSats,
-            inputs: preview.selectedInputs
         )
 
         DualFailureRPCURLProtocol.sendToAddressShouldFail = false
@@ -503,7 +526,7 @@ private final class DualFailureRPCURLProtocol: URLProtocol {
                 responsePayload = ["id": "1", "result": "synthetic_txid_1234567890abcdef", "error": NSNull()]
             }
         case "walletprocesspsbt":
-            responsePayload = ["id": "1", "result": ["psbt": "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=", "complete": true], "error": NSNull()]
+            responsePayload = ["id": "1", "result": ["psbt": "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA", "complete": true], "error": NSNull()]
         case "finalizepsbt":
             responsePayload = ["id": "1", "result": ["hex": "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000", "complete": true], "error": NSNull()]
         case "walletlock":

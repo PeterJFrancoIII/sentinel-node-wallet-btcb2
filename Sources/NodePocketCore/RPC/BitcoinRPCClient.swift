@@ -198,8 +198,8 @@ public final class BitcoinRPCClient: @unchecked Sendable {
                 authPhases[tokenKey] = .finalized
                 return true
             case "sendrawtransaction":
-                // Must be final step: phase must be .finalized (or nil for direct test sendrawtransaction)
-                guard current == nil || current == .finalized else { return false }
+                // Must be final step: phase must be strictly .finalized
+                guard current == .finalized else { return false }
                 guard !consumedAuthorizationTokens.contains(tokenKey) else { return false }
                 authPhases[tokenKey] = .broadcast
                 consumedAuthorizationTokens.insert(tokenKey)

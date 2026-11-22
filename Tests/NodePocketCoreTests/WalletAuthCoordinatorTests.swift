@@ -2377,6 +2377,11 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         let dest = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
         let previewId = UUID()
         let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
         let txContext = TransactionSpendContext(
             walletName: "vault_raw",
             destinationAddress: dest,
@@ -2386,7 +2391,10 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             previewId: previewId,
             utxoFingerprint: expectedInput,
             chain: "main",
-            nonce: "nonce_raw_test"
+            nonce: "nonce_raw_test",
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
 
         let approval = try await coordinator.requestHighRiskApproval(
@@ -2397,19 +2405,12 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             txContext: txContext
         )
 
-        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA="
-        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
-        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
-
         let spendAuthWithOutputs = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
             approval,
             action: "send",
             target: dest,
             authorizedMethod: "sendrawtransaction",
-            expectedTxContext: txContext,
-            fundedPsbtDigest: psbtDigest,
-            totalInputSats: 1_000_000,
-            expectedOutputFingerprint: expectedOutputFingerprint
+            expectedTxContext: txContext
         )
 
         // Intermediate signing steps with genuine matching PSBT are permitted
@@ -2493,6 +2494,162 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertNil(RawTransactionDecoder.decodeScriptPubKey(for: String(corruptedDest)))
         let mixedCaseDest = "bc1qAr0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
         XCTAssertNil(RawTransactionDecoder.decodeScriptPubKey(for: mixedCaseDest))
+    }
+
+    func testHighRiskApprovalContextImmutableBindingAndTamperResistance() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth_coord_immutable_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator_immutable")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coordinator.enroll(
+            username: "operator_immutable",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let dest = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        let previewId = UUID()
+        let txContext = TransactionSpendContext(
+            walletName: "vault_imm",
+            destinationAddress: dest,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: previewId,
+            utxoFingerprint: "mock_input:0",
+            chain: "main",
+            nonce: "nonce_imm",
+            fundedPsbtDigest: "genuine_psbt_digest",
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: "genuine_output_fingerprint"
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: dest,
+            reason: "Immutable approval test",
+            txContext: txContext
+        )
+
+        // 1. Swapping fundedPsbtDigest at consume fails closed
+        let tamperedDigestContext = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint,
+            chain: txContext.chain,
+            nonce: txContext.nonce,
+            fundedPsbtDigest: "tampered_digest",
+            totalInputSats: txContext.totalInputSats,
+            expectedOutputFingerprint: txContext.expectedOutputFingerprint
+        )
+        do {
+            _ = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+                approval,
+                action: "send",
+                target: dest,
+                authorizedMethod: "sendrawtransaction",
+                expectedTxContext: tamperedDigestContext
+            )
+            XCTFail("Swapped fundedPsbtDigest must fail closed")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Unexpected error: \(err)")
+            }
+        }
+
+        // 2. Swapping totalInputSats at consume fails closed
+        let tamperedInputsContext = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint,
+            chain: txContext.chain,
+            nonce: txContext.nonce,
+            fundedPsbtDigest: txContext.fundedPsbtDigest,
+            totalInputSats: 2_000_000,
+            expectedOutputFingerprint: txContext.expectedOutputFingerprint
+        )
+        do {
+            _ = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+                approval,
+                action: "send",
+                target: dest,
+                authorizedMethod: "sendrawtransaction",
+                expectedTxContext: tamperedInputsContext
+            )
+            XCTFail("Swapped totalInputSats must fail closed")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Unexpected error: \(err)")
+            }
+        }
+
+        // 3. Swapping expectedOutputFingerprint at consume fails closed
+        let tamperedOutputsContext = TransactionSpendContext(
+            walletName: txContext.walletName,
+            destinationAddress: txContext.destinationAddress,
+            amountSats: txContext.amountSats,
+            maxFeeSats: txContext.maxFeeSats,
+            satPerVB: txContext.satPerVB,
+            previewId: txContext.previewId,
+            utxoFingerprint: txContext.utxoFingerprint,
+            chain: txContext.chain,
+            nonce: txContext.nonce,
+            fundedPsbtDigest: txContext.fundedPsbtDigest,
+            totalInputSats: txContext.totalInputSats,
+            expectedOutputFingerprint: "tampered_output_fingerprint"
+        )
+        do {
+            _ = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+                approval,
+                action: "send",
+                target: dest,
+                authorizedMethod: "sendrawtransaction",
+                expectedTxContext: tamperedOutputsContext
+            )
+            XCTFail("Swapped expectedOutputFingerprint must fail closed")
+        } catch let err as WalletAuthError {
+            if case .unauthorizedHighRiskAction = err {
+                // Expected
+            } else {
+                XCTFail("Unexpected error: \(err)")
+            }
+        }
+    }
+
+    func testRawTransactionDecoderHardening() {
+        // 1. Non-canonical VarInt (0xfd 0x05 0x00 encodes 5, should be 0x05)
+        let nonCanonicalTx = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000fffffffffd0500"
+        XCTAssertNil(RawTransactionDecoder.decode(hex: nonCanonicalTx))
+
+        // 2. Output value exceeding Int64.max
+        // 0xffffffffffffffff = UInt64.max > Int64.max
+        let hugeValueTx = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff01ffffffffffffffff160014e8df018c7e326cc253faac7e46cdc51e68542c4200000000"
+        XCTAssertNil(RawTransactionDecoder.decode(hex: hugeValueTx))
+
+        // 3. Truncated output script
+        let truncatedTx = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0150c3000000000000160014e8"
+        XCTAssertNil(RawTransactionDecoder.decode(hex: truncatedTx))
     }
 }
 
