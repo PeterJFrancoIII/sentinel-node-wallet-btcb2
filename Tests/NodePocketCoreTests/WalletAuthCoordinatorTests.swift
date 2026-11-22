@@ -1,4 +1,5 @@
 import XCTest
+import CryptoKit
 @testable import NodePocketCore
 
 final class WalletAuthCoordinatorTests: XCTestCase {
@@ -2396,40 +2397,82 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             txContext: txContext
         )
 
-        let spendAuth = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA="
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+
+        let spendAuthWithOutputs = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
             approval,
             action: "send",
             target: dest,
             authorizedMethod: "sendrawtransaction",
-            expectedTxContext: txContext
+            expectedTxContext: txContext,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: expectedOutputFingerprint
         )
 
-        // Intermediate steps are permitted
+        // Intermediate signing steps with genuine matching PSBT are permitted
         XCTAssertTrue(coordinator.spendAuthorizationVerifier.verify(
-            authorization: spendAuth,
+            authorization: spendAuthWithOutputs,
             method: "walletprocesspsbt",
-            params: ["mock_psbt"],
+            params: [validPsbtBase64],
             walletName: "vault_raw"
         ))
         XCTAssertTrue(coordinator.spendAuthorizationVerifier.verify(
-            authorization: spendAuth,
+            authorization: spendAuthWithOutputs,
             method: "finalizepsbt",
-            params: ["mock_psbt"],
+            params: [validPsbtBase64],
             walletName: "vault_raw"
         ))
 
-        // Valid raw transaction hex matches inputs and recipient output
+        // Negative: mismatched PSBT fails verification
+        let mismatchedPsbt = "cHNidP8BAHUCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wEAAAAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA="
+        XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuthWithOutputs,
+            method: "walletprocesspsbt",
+            params: [mismatchedPsbt],
+            walletName: "vault_raw"
+        ))
+
+        // Valid raw transaction hex matches inputs, recipient output, all expected outputs, and fee <= cap
         let validRawHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
         XCTAssertTrue(coordinator.spendAuthorizationVerifier.verify(
-            authorization: spendAuth,
+            authorization: spendAuthWithOutputs,
             method: "sendrawtransaction",
             params: [validRawHex],
             walletName: "vault_raw"
         ))
 
+        // Negative: raw transaction fee exceeding cap (1,001 sats > 1,000 sats) fails verification
+        let highFeeRawHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42077b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuthWithOutputs,
+            method: "sendrawtransaction",
+            params: [highFeeRawHex],
+            walletName: "vault_raw"
+        ))
+
+        // Negative: extra unauthorized output (3 outputs instead of 2) fails verification
+        let extraOutputRawHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0350c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b01000000000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuthWithOutputs,
+            method: "sendrawtransaction",
+            params: [extraOutputRawHex],
+            walletName: "vault_raw"
+        ))
+
+        // Negative: unparsed trailing bytes fail decode
+        XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuthWithOutputs,
+            method: "sendrawtransaction",
+            params: [validRawHex + "ff"],
+            walletName: "vault_raw"
+        ))
+
         // Negative: malformed hex fails
         XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
-            authorization: spendAuth,
+            authorization: spendAuthWithOutputs,
             method: "sendrawtransaction",
             params: ["not_a_hex_tx"],
             walletName: "vault_raw"
@@ -2437,11 +2480,19 @@ final class WalletAuthCoordinatorTests: XCTestCase {
 
         // Negative: wallet mismatch fails
         XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
-            authorization: spendAuth,
+            authorization: spendAuthWithOutputs,
             method: "sendrawtransaction",
             params: [validRawHex],
             walletName: "wrong_vault"
         ))
+
+        // Test Bech32 scriptPubKey decode checksum integrity
+        let validSpk = RawTransactionDecoder.decodeScriptPubKey(for: dest)
+        XCTAssertNotNil(validSpk)
+        let corruptedDest = dest.dropLast() + "z"
+        XCTAssertNil(RawTransactionDecoder.decodeScriptPubKey(for: String(corruptedDest)))
+        let mixedCaseDest = "bc1qAr0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        XCTAssertNil(RawTransactionDecoder.decodeScriptPubKey(for: mixedCaseDest))
     }
 }
 

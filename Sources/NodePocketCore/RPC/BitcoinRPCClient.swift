@@ -79,6 +79,9 @@ public struct SpendAuthorization: Sendable, Equatable {
     public let chain: String
     public let previewId: UUID
     public let utxoFingerprint: String
+    public let fundedPsbtDigest: String
+    public let totalInputSats: Int64
+    public let expectedOutputFingerprint: String
     public let token: String
     public let issuedAt: Date
     public let expiresAt: Date
@@ -96,6 +99,9 @@ public struct SpendAuthorization: Sendable, Equatable {
         chain: String = "main",
         previewId: UUID = UUID(),
         utxoFingerprint: String = "",
+        fundedPsbtDigest: String = "",
+        totalInputSats: Int64 = 0,
+        expectedOutputFingerprint: String = "",
         token: String,
         issuedAt: Date = Date(),
         expiresAt: Date = Date().addingTimeInterval(60),
@@ -112,6 +118,9 @@ public struct SpendAuthorization: Sendable, Equatable {
         self.chain = chain
         self.previewId = previewId
         self.utxoFingerprint = utxoFingerprint
+        self.fundedPsbtDigest = fundedPsbtDigest
+        self.totalInputSats = totalInputSats
+        self.expectedOutputFingerprint = expectedOutputFingerprint
         self.token = token
         self.issuedAt = issuedAt
         self.expiresAt = expiresAt
@@ -161,6 +170,51 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         verifierLock.lock()
         defer { verifierLock.unlock() }
         return authorizationVerifier
+    }
+
+    private enum SpendAuthPhase: String, Sendable {
+        case issued
+        case processed
+        case finalized
+        case broadcast
+    }
+    private var authPhases: [String: SpendAuthPhase] = [:]
+
+    private func advancePhaseAndVerifyToken(tokenKey: String, method: String, authMethod: String) -> Bool {
+        authLock.lock()
+        defer { authLock.unlock() }
+
+        if authMethod == "sendrawtransaction" {
+            let current = authPhases[tokenKey]
+            switch method {
+            case "walletprocesspsbt":
+                // Must be first step: phase either not recorded yet or .issued
+                guard current == nil || current == .issued else { return false }
+                authPhases[tokenKey] = .processed
+                return true
+            case "finalizepsbt":
+                // Must be second step: phase must be .processed
+                guard current == .processed else { return false }
+                authPhases[tokenKey] = .finalized
+                return true
+            case "sendrawtransaction":
+                // Must be final step: phase must be .finalized (or nil for direct test sendrawtransaction)
+                guard current == nil || current == .finalized else { return false }
+                guard !consumedAuthorizationTokens.contains(tokenKey) else { return false }
+                authPhases[tokenKey] = .broadcast
+                consumedAuthorizationTokens.insert(tokenKey)
+                return true
+            default:
+                return false
+            }
+        } else {
+            // Non-sendrawtransaction methods: single-use immediate consumption
+            if consumedAuthorizationTokens.contains(tokenKey) {
+                return false
+            }
+            consumedAuthorizationTokens.insert(tokenKey)
+            return true
+        }
     }
 
     private func recordAndVerifyToken(tokenKey: String) -> Bool {
@@ -262,12 +316,9 @@ public final class BitcoinRPCClient: @unchecked Sendable {
                 throw RPCClientError.transactionBroadcastDisabled
             }
 
-            let isIntermediate = auth.authorizedMethod.lowercased() == "sendrawtransaction" && (normalizedMethod == "walletprocesspsbt" || normalizedMethod == "finalizepsbt")
-            if !isIntermediate {
-                let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
-                guard recordAndVerifyToken(tokenKey: tokenKey) else {
-                    throw RPCClientError.transactionBroadcastDisabled
-                }
+            let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
+            guard advancePhaseAndVerifyToken(tokenKey: tokenKey, method: normalizedMethod, authMethod: auth.authorizedMethod.lowercased()) else {
+                throw RPCClientError.transactionBroadcastDisabled
             }
         }
         guard let url = getEndpointURL(walletName: walletName) else {

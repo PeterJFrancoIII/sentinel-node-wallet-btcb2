@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import NodePocketCore
 
 final class BroadcastLockSpyURLProtocol: URLProtocol {
@@ -497,6 +498,292 @@ struct ReleaseLockVerifier {
             }
         } catch {
             fatalError("FAILURE: Replay threw unexpected error: \(error)")
+        }
+
+        // 3-raw-A: Actual fee in signed raw transaction exceeding approved cap rejected at transport (R214-P0-01, R214-P0-04a)
+        // High fee raw tx: total inputs 1,000,000 sats, outputs: 50,000 (send) + 948,999 (change) -> fee = 1,001 sats > cap 1,000 sats
+        let highFeeRawTxHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42077b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        let feeCapPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+        let feeCapContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: feeCapPreview.id,
+            utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+            chain: "main",
+            nonce: feeCapPreview.id.uuidString,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        )
+        let feeCapApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Fee cap test",
+            txContext: feeCapContext
+        )
+        let feeCapAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            feeCapApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: feeCapContext,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        )
+        do {
+            _ = try await client.sendRawTransaction(
+                hex: highFeeRawTxHex,
+                walletName: walletName,
+                authorization: feeCapAuth
+            )
+            fatalError("FAILURE: Raw transaction with fee exceeding approved cap was accepted!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Raw transaction fee exceeding approved cap failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Fee exceeding cap threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Fee exceeding cap threw unexpected error: \(error)")
+        }
+
+        // 3-raw-B: Extra unapproved output in signed raw transaction rejected at transport (R214-P0-01, R214-P0-04b)
+        let extraOutputRawTxHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0350c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b01000000000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        let extraOutPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+        let extraOutContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: extraOutPreview.id,
+            utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+            chain: "main",
+            nonce: extraOutPreview.id.uuidString,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        )
+        let extraOutApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Extra output test",
+            txContext: extraOutContext
+        )
+        let extraOutAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            extraOutApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: extraOutContext,
+            totalInputSats: 1_000_000,
+            expectedOutputFingerprint: "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        )
+        do {
+            _ = try await client.sendRawTransaction(
+                hex: extraOutputRawTxHex,
+                walletName: walletName,
+                authorization: extraOutAuth
+            )
+            fatalError("FAILURE: Raw transaction with extra output was accepted!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Raw transaction with extra unauthorized output failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Extra output threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Extra output threw unexpected error: \(error)")
+        }
+
+        // 3-raw-C: Mismatched PSBT in walletprocesspsbt rejected at transport (R214-P0-02, R214-P0-04c)
+        let mismatchedPsbtBase64 = "cHNidP8BAHUCAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/////wEAAAAAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA="
+        let psbtMismatchPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+        let psbtMismatchContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: psbtMismatchPreview.id,
+            utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+            chain: "main",
+            nonce: psbtMismatchPreview.id.uuidString,
+            fundedPsbtDigest: "expected_genuine_psbt_sha256_digest"
+        )
+        let psbtMismatchApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "PSBT mismatch test",
+            txContext: psbtMismatchContext
+        )
+        let psbtMismatchAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            psbtMismatchApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: psbtMismatchContext,
+            fundedPsbtDigest: "expected_genuine_psbt_sha256_digest"
+        )
+        do {
+            _ = try await client.walletProcessPsbt(
+                psbt: mismatchedPsbtBase64,
+                walletName: walletName,
+                authorization: psbtMismatchAuth
+            )
+            fatalError("FAILURE: Mismatched PSBT was signed by walletprocesspsbt!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Mismatched PSBT in walletprocesspsbt failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Mismatched PSBT threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Mismatched PSBT threw unexpected error: \(error)")
+        }
+
+        // 3-raw-D: Same approval reused to call walletprocesspsbt multiple times fails closed (R214-P0-02, R214-P0-04d)
+        let genuinePsbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let psbtMultiPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+        let psbtMultiContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: psbtMultiPreview.id,
+            utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+            chain: "main",
+            nonce: psbtMultiPreview.id.uuidString,
+            fundedPsbtDigest: genuinePsbtDigest
+        )
+        let psbtMultiApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "PSBT multi-signing test",
+            txContext: psbtMultiContext
+        )
+        let psbtMultiAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            psbtMultiApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: psbtMultiContext,
+            fundedPsbtDigest: genuinePsbtDigest
+        )
+        // First call succeeds:
+        let procResult = try! await client.walletProcessPsbt(
+            psbt: validPsbtBase64,
+            walletName: walletName,
+            authorization: psbtMultiAuth
+        )
+        guard procResult.complete else { fatalError("FAILURE: First walletprocesspsbt call failed!") }
+        // Second call with same authorization must fail closed:
+        do {
+            _ = try await client.walletProcessPsbt(
+                psbt: validPsbtBase64,
+                walletName: walletName,
+                authorization: psbtMultiAuth
+            )
+            fatalError("FAILURE: Same authorization reused to sign multiple PSBTs was accepted!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Same authorization reused for multiple walletprocesspsbt calls failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Reused PSBT auth threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Reused PSBT auth threw unexpected error: \(error)")
+        }
+
+        // 3-raw-E: Altered final raw transaction with trailing bytes rejected (R214-P1-03, R214-P0-04e)
+        let trailingBytesRawTxHex = rawTxHex + "ff"
+        let trailingPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+        let trailingContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: trailingPreview.id,
+            utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+            chain: "main",
+            nonce: trailingPreview.id.uuidString
+        )
+        let trailingApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Trailing bytes test",
+            txContext: trailingContext
+        )
+        let trailingAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            trailingApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: trailingContext
+        )
+        do {
+            _ = try await client.sendRawTransaction(
+                hex: trailingBytesRawTxHex,
+                walletName: walletName,
+                authorization: trailingAuth
+            )
+            fatalError("FAILURE: Raw transaction with unparsed trailing bytes was accepted!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Raw transaction with unparsed trailing bytes failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Trailing bytes threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Trailing bytes threw unexpected error: \(error)")
         }
 
         // 3a. Forged token SpendAuthorization rejected at transport (P0-1)
