@@ -1068,7 +1068,13 @@ public actor WalletManager {
     ) async throws -> FundedTxPreview {
         try await ensureAuthenticated(capability: capability)
 
-        // 1. Destination address validation
+        // 1. Transaction amount validation with supply bounds (R218-P0-02)
+        let maxSatoshis: Int64 = 2_100_000_000_000_000
+        guard amountSats > 0 && amountSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction amount must be strictly positive and within valid supply limits.")
+        }
+
+        // 2. Destination address validation
         let trimmedAddr = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
         guard AddressBook.isValidBTCB2MainnetAddress(trimmedAddr) else {
             throw WalletSecurityError.invalidMainnetAddress(trimmedAddr)
@@ -1121,21 +1127,26 @@ public actor WalletManager {
         }
 
         let feeSats = SatoshiMath.toSats(btc: funded.fee)
-        guard feeSats > 0 else {
-            throw WalletSecurityError.invalidAmount("Transaction fee must be strictly positive.")
+        guard feeSats > 0 && feeSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction fee must be strictly positive and within valid supply limits.")
         }
         guard psbtDetails.calculatedFeeSats == feeSats else {
             throw WalletSecurityError.previewTampered
         }
-        guard psbtDetails.totalInputSats > 0 else {
+        guard psbtDetails.totalInputSats > 0 && psbtDetails.totalInputSats <= maxSatoshis else {
             throw WalletSecurityError.previewTampered
+        }
+
+        let (requiredSats, reqOverflow) = amountSats.addingReportingOverflow(feeSats)
+        guard !reqOverflow && requiredSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction amount and fee sum exceeds valid supply limits.")
         }
 
         guard let destScript = RawTransactionDecoder.decodeScriptPubKey(for: trimmedAddr) else {
             throw WalletSecurityError.invalidMainnetAddress(trimmedAddr)
         }
 
-        // Validate changepos and change output ownership (R217-P0-02)
+        // Validate changepos and change output ownership (R217-P0-02, R218-P0-02)
         let changeSats: Int64
         if funded.changepos == -1 {
             // No change: exactly 1 output matching destination
@@ -1145,7 +1156,7 @@ public actor WalletManager {
             guard psbtDetails.outputs[0].scriptPubKey == destScript && psbtDetails.outputs[0].valueSats == amountSats else {
                 throw WalletSecurityError.previewTampered
             }
-            guard psbtDetails.totalInputSats == amountSats + feeSats else {
+            guard psbtDetails.totalInputSats == requiredSats else {
                 throw WalletSecurityError.previewTampered
             }
             changeSats = 0
@@ -1163,10 +1174,14 @@ public actor WalletManager {
             }
 
             changeSats = changeOutput.valueSats
-            guard changeSats > 0 else {
+            guard changeSats > 0 && changeSats <= maxSatoshis else {
                 throw WalletSecurityError.previewTampered
             }
-            guard psbtDetails.totalInputSats == amountSats + feeSats + changeSats else {
+            let (expectedTotal, totOverflow) = requiredSats.addingReportingOverflow(changeSats)
+            guard !totOverflow && expectedTotal <= maxSatoshis else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.totalInputSats == expectedTotal else {
                 throw WalletSecurityError.previewTampered
             }
 
@@ -1185,8 +1200,8 @@ public actor WalletManager {
 
         let estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
 
-        guard spendableSats >= (amountSats + feeSats) else {
-            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
+        guard spendableSats >= requiredSats else {
+            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: requiredSats)
         }
 
         let outputFingerprint = psbtDetails.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
@@ -1239,12 +1254,17 @@ public actor WalletManager {
             throw WalletSecurityError.previewExpired
         }
 
-        // 2. Validate amount & fee
-        guard preview.amountSats > 0 else {
-            throw WalletSecurityError.invalidAmount("Transaction amount must be strictly greater than 0.")
+        // 2. Validate amount & fee with checked overflow and supply limits (R218-P0-02)
+        let maxSatoshis: Int64 = 2_100_000_000_000_000
+        guard preview.amountSats > 0 && preview.amountSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction amount must be strictly greater than 0 and within valid supply limits.")
         }
-        guard preview.feeSats >= 0 else {
-            throw WalletSecurityError.invalidAmount("Transaction fee must be non-negative.")
+        guard preview.feeSats >= 0 && preview.feeSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction fee must be non-negative and within valid supply limits.")
+        }
+        let (_, execOverflow) = preview.amountSats.addingReportingOverflow(preview.feeSats)
+        guard !execOverflow else {
+            throw WalletSecurityError.invalidAmount("Transaction amount and fee sum exceeds valid bounds.")
         }
 
         // 3. Re-verify destination and allowlist

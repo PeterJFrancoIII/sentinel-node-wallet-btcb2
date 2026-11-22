@@ -2799,6 +2799,18 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         tracker.removeSkeleton(for: "token_abc")
         XCTAssertNil(tracker.getSkeleton(for: "token_abc"))
     }
+
+    func testContinuityStateTrackerCapacityBounding() {
+        let tracker = WalletAuthCoordinator.ContinuityStateTracker()
+        for i in 0..<110 {
+            tracker.recordSkeleton("skeleton_\(i)", for: "token_\(i)")
+        }
+        XCTAssertLessThanOrEqual(tracker.countForTesting(), 100, "ContinuityStateTracker must be capped at 100 entries")
+        // Earliest token should have been pruned
+        XCTAssertNil(tracker.getSkeleton(for: "token_0"))
+        // Latest token must exist
+        XCTAssertEqual(tracker.getSkeleton(for: "token_109"), "skeleton_109")
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

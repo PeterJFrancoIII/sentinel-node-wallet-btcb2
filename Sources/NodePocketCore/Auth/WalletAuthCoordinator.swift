@@ -518,11 +518,18 @@ public actor WalletAuthCoordinator {
     final class ContinuityStateTracker: @unchecked Sendable {
         private let lock = NSLock()
         private var skeletons: [String: (skeleton: String, recordedAt: Date)] = [:]
+        private let maxEntries: Int = 100
 
         func recordSkeleton(_ skeleton: String, for tokenKey: String) {
             lock.lock()
             defer { lock.unlock() }
             pruneExpiredLocked()
+            if skeletons.count >= maxEntries {
+                // Capacity bound: prune oldest entry if at maximum capacity (R218-P1-04)
+                if let oldestKey = skeletons.min(by: { $0.value.recordedAt < $1.value.recordedAt })?.key {
+                    skeletons.removeValue(forKey: oldestKey)
+                }
+            }
             skeletons[tokenKey] = (skeleton, Date())
         }
 
@@ -539,8 +546,14 @@ public actor WalletAuthCoordinator {
             skeletons.removeValue(forKey: tokenKey)
         }
 
+        func countForTesting() -> Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return skeletons.count
+        }
+
         private func pruneExpiredLocked() {
-            let cutoff = Date().addingTimeInterval(-120.0) // 120s TTL (exceeds 60s preview TTL)
+            let cutoff = Date().addingTimeInterval(-120.0) // 120s on-access TTL (exceeds 60s preview TTL)
             skeletons = skeletons.filter { $0.value.recordedAt >= cutoff }
         }
     }

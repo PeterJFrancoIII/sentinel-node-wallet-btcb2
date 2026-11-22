@@ -436,7 +436,7 @@ struct ReleaseLockVerifier {
         guard BroadcastLockSpyURLProtocol.sendToAddressCount == 0 else {
             fatalError("FAILURE: sendtoaddress was unexpectedly executed! Expected 0, got \(BroadcastLockSpyURLProtocol.sendToAddressCount)")
         }
-        print("✓ Verified: Complete end-to-end synthetic operator send journey (prepareSendPreview -> getaddressinfo -> approve -> unlock -> process -> finalize -> lock -> broadcast) executed successfully (txid: \(txid)).")
+        print("✓ Verified: Complete end-to-end synthetic operator send journey via WalletManager and WalletAuthCoordinator (prepareSendPreview -> getaddressinfo -> approve -> unlock -> process -> finalize -> lock -> broadcast) executed successfully (txid: \(txid)).")
         print("✓ Verified: Exact call counts asserted: 1 create, 1 getaddressinfo, 1 unlock, 1 process, 1 finalize, 1 lock, 1 broadcast, exactly 0 direct sendtoaddress.")
 
         // -------------------------------------------------------------
@@ -1956,6 +1956,43 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Legacy P2PKH script in PSBT_IN_WITNESS_UTXO was accepted without non-witness UTXO!")
         }
         print("✓ Verified: Legacy non-SegWit P2PKH in PSBT_IN_WITNESS_UTXO rejected per BIP-174 SegWit requirements.")
+
+        // 3u. Checked Satoshi Arithmetic Fails Closed on Near-Int64.max Amount and Supply Breach (R218-P0-02)
+        do {
+            _ = try await walletMgr.prepareSendPreview(
+                to: validDestination,
+                amountSats: Int64.max - 100,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            fatalError("FAILURE: prepareSendPreview accepted near-Int64.max amount!")
+        } catch let err as WalletSecurityError {
+            if case .invalidAmount = err {
+                print("✓ Verified: Near-Int64.max amount failed closed with invalidAmount without runtime trap or crash.")
+            } else {
+                fatalError("FAILURE: Near-Int64.max amount threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Near-Int64.max amount threw unexpected error: \(error)")
+        }
+
+        do {
+            _ = try await walletMgr.prepareSendPreview(
+                to: validDestination,
+                amountSats: 2_100_000_000_000_001,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            fatalError("FAILURE: prepareSendPreview accepted amount exceeding 21M BTC max supply!")
+        } catch let err as WalletSecurityError {
+            if case .invalidAmount = err {
+                print("✓ Verified: Amount exceeding max Bitcoin supply failed closed with invalidAmount.")
+            } else {
+                fatalError("FAILURE: Exceeding supply threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Exceeding supply threw unexpected error: \(error)")
+        }
 
         // -------------------------------------------------------------
         // SECTION 4: Permanent Deletion & Purge Release Gating (WO-39, WO-44, WO-59)

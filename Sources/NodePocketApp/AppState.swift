@@ -973,15 +973,8 @@ public final class AppState: ObservableObject {
     }
 
     public func sendTransaction(to destinationAddress: String, amount: Double, passphrase: String? = nil) async throws -> String {
-        guard isWalletTabUnlocked, self.authSession != nil else {
-            throw WalletAuthError.unauthenticated
-        }
-        let amountSats = SatoshiMath.toSats(btc: amount)
-        let defaultFeeQuote = feeQuotes[.normal] ?? FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60)
-        let preview = try await prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: defaultFeeQuote)
-        let txid = try await executeAuthorizedSend(preview: preview, explicitPassphrase: passphrase)
-        appendLog("[TRANSACTION] Broadcasted \(amount) BTCB2 to \(destinationAddress): \(txid)")
-        return txid
+        // Direct headless send without interactive operator review of the funded preview is prohibited per Choice B send safety requirements (R218-P0-03).
+        throw WalletAuthError.unauthorizedHighRiskAction("Direct send without interactive operator review of the funded transaction preview is prohibited. Generate and review a preview first via prepareSendPreview and executeAuthorizedSend.")
     }
 
     public func prepareSendPreview(to destinationAddress: String, amountSats: Int64, feeQuote: FeeQuote) async throws -> FundedTxPreview {
@@ -1020,11 +1013,15 @@ public final class AppState: ObservableObject {
             totalInputSats: pendingRecord.totalInputSats,
             expectedOutputFingerprint: pendingRecord.expectedOutputFingerprint
         )
+        let feeBTC = SatoshiMath.toBTC(sats: preview.feeSats)
+        let changeBTC = SatoshiMath.toBTC(sats: preview.changeSats)
+        let reason = "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress) (Fee: \(feeBTC) BTCB2 [\(preview.satPerVB) sat/vB], Change: \(changeBTC) BTCB2, Inputs: \(preview.selectedInputs.count))"
+
         let approval = try await authCoordinator.requestHighRiskApproval(
             capability: session,
             action: "send",
             target: preview.destinationAddress,
-            reason: "Send \(SatoshiMath.toBTC(sats: preview.amountSats)) BTCB2 to \(preview.destinationAddress)",
+            reason: reason,
             txContext: txContext
         )
         let txid: String
@@ -1039,11 +1036,7 @@ public final class AppState: ObservableObject {
             if case .walletRelockFailed(let wName, let underlying, let confirmedTxid) = error {
                 appendLog("[CRITICAL SECURITY ALERT] Wallet '\(wName)' failed immediate relock: \(underlying). Transaction ID: \(confirmedTxid.isEmpty ? "None (broadcast failed)" : confirmedTxid)")
                 refreshWallet()
-                if !confirmedTxid.isEmpty {
-                    return confirmedTxid
-                } else {
-                    throw error
-                }
+                throw error
             }
             throw error
         }

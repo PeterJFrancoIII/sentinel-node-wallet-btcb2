@@ -702,6 +702,122 @@ final class WalletIntegrationTests: XCTestCase {
             }
         }
     }
+
+    func testPrepareSendPreviewCheckedArithmeticRejectsNearInt64MaxAmount() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("overflow_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        let rpc = BitcoinRPCClient(host: "127.0.0.1", port: 18443, user: "u", password: "p", urlSession: session, isBroadcastRestricted: false)
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("addr.json"))
+        let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        _ = try testAddressBook.addRecipient(name: "Recip", address: validDestination)
+
+        let (secret, _, codes) = try await authCoord.generateEnrollmentSecret(username: "operator_overflow")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await authCoord.enroll(
+            username: "operator_overflow",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false,
+            initialWalletName: "overflow_vault"
+        )
+        try await manager.walletInventory.setOwner(for: "overflow_vault", owner: "operator_overflow")
+        try await manager.selectWallet(name: "overflow_vault", capability: capability)
+
+        // Near Int64.max amount must fail closed without Swift runtime trap
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: validDestination,
+                amountSats: Int64.max - 100,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            XCTFail("Must fail closed on near Int64.max amount")
+        } catch let err as WalletSecurityError {
+            guard case .invalidAmount = err else {
+                XCTFail("Expected invalidAmount, got \(err)")
+                return
+            }
+        }
+
+        // Amount exceeding max Bitcoin supply (21M BTC) must fail closed
+        do {
+            _ = try await manager.prepareSendPreview(
+                to: validDestination,
+                amountSats: 2_100_000_000_000_001,
+                feeQuote: FeeQuote(type: .normal, satPerVB: 5, targetBlocks: 6, estimatedMinutes: 60),
+                capability: capability
+            )
+            XCTFail("Must fail closed on amount exceeding maximum Bitcoin supply")
+        } catch let err as WalletSecurityError {
+            guard case .invalidAmount = err else {
+                XCTFail("Expected invalidAmount, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testExecuteAuthorizedSendCheckedArithmeticRejectsNearInt64Max() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("exec_overflow_test_\(UUID().uuidString)")
+        try? FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpc = BitcoinRPCClient(user: "u", password: "p", isBroadcastRestricted: false)
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let testAddressBook = AddressBook(storageURL: tempDir.appendingPathComponent("addr.json"))
+        let validDestination = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        _ = try testAddressBook.addRecipient(name: "Recip", address: validDestination)
+
+        let manager = WalletManager(
+            rpcClient: rpc,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "overflow_exec_vault"
+        )
+
+        let overflowPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: Int64.max - 10,
+            feeSats: 50, // sum overflows Int64!
+            satPerVB: 5,
+            estimatedVSize: 140,
+            changeSats: 0,
+            selectedInputs: ["test:0"]
+        )
+
+        do {
+            _ = try await manager.executeAuthorizedSend(
+                preview: overflowPreview,
+                explicitPassphrase: "pwd",
+                capability: nil,
+                approval: nil
+            )
+            XCTFail("Must fail closed on overflowing amount and fee sum")
+        } catch let err as WalletSecurityError {
+            guard case .invalidAmount = err else {
+                XCTFail("Expected invalidAmount, got \(err)")
+                return
+            }
+        }
+    }
 }
 
 private final class DualFailureRPCURLProtocol: URLProtocol {
