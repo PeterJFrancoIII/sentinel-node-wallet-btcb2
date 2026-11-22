@@ -348,6 +348,9 @@ public actor WalletManager {
             authCoordinator: authCoordinator,
             allowUnauthenticatedForTesting: allowUnauthenticatedForTesting
         )
+        if let coord = authCoordinator {
+            rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+        }
     }
 
     /// Purges any abandoned staging session directories from previous unexpected terminations.
@@ -1025,7 +1028,7 @@ public actor WalletManager {
         var feeSats: Int64
         var estimatedVSize: Int
         var changeSats: Int64
-        let selectedInputs: [String] = []
+        var selectedInputs: [String] = []
 
         if let funded = try? await rpcClient.walletCreateFundedPsbt(
             outputs: [trimmedAddr: btcAmount],
@@ -1035,6 +1038,7 @@ public actor WalletManager {
             feeSats = SatoshiMath.toSats(btc: funded.fee)
             estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
             changeSats = max(0, spendableSats - amountSats - feeSats)
+            selectedInputs = Self.extractInputsFromPsbtBase64(funded.psbt)
         } else {
             // Standard Native SegWit 1-input 2-output transaction: ~141 vB
             estimatedVSize = 141
@@ -1109,9 +1113,14 @@ public actor WalletManager {
         }
 
         // 5. Construct immutable transaction spend context
-        let utxoFingerprint = preview.selectedInputs.isEmpty
-            ? "auto_coin_selection:\(preview.id.uuidString)"
-            : preview.selectedInputs.sorted().joined(separator: ",")
+        let utxoFingerprint: String
+        if !preview.selectedInputs.isEmpty {
+            utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
+        } else {
+            let digestPayload = "psbt_funding_plan:\(walletName):\(preview.destinationAddress):\(preview.amountSats):\(preview.satPerVB):\(preview.id.uuidString)"
+            let hash = SHA256.hash(data: Data(digestPayload.utf8))
+            utxoFingerprint = hash.map { String(format: "%02x", $0) }.joined()
+        }
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,
@@ -1172,21 +1181,105 @@ public actor WalletManager {
             relockError = error
         }
 
-        // If send failed, rethrow original send error (relock was attempted)
+        // Handle dual error or relock failure:
+        if let rErr = relockError {
+            if let sErr = sendError {
+                throw WalletSecurityError.walletRelockFailed(
+                    wallet: walletName,
+                    underlyingError: "Dual failure: Broadcast failed (\(sErr.localizedDescription)) AND immediate wallet relock failed: \(rErr.localizedDescription)",
+                    txid: ""
+                )
+            } else {
+                throw WalletSecurityError.walletRelockFailed(
+                    wallet: walletName,
+                    underlyingError: rErr.localizedDescription,
+                    txid: txid
+                )
+            }
+        }
+
+        // If relock succeeded, but send failed, rethrow send error
         if let err = sendError {
             throw err
         }
 
-        // If send succeeded, but immediate relock failed, report recoverable error with confirmed txid
-        if let rErr = relockError {
-            throw WalletSecurityError.walletRelockFailed(
-                wallet: walletName,
-                underlyingError: rErr.localizedDescription,
-                txid: txid
-            )
-        }
-
         return txid
+    }
+
+    public static func extractInputsFromPsbtBase64(_ base64: String) -> [String] {
+        guard let data = Data(base64Encoded: base64), data.count >= 5 else { return [] }
+        // Magic bytes: 0x70 0x73 0x62 0x74 0xff
+        guard data[0] == 0x70 && data[1] == 0x73 && data[2] == 0x62 && data[3] == 0x74 && data[4] == 0xff else {
+            return []
+        }
+        var offset = 5
+        while offset < data.count {
+            let keyLen = Int(data[offset])
+            offset += 1
+            if keyLen == 0 { break }
+            guard offset + keyLen <= data.count else { return [] }
+            let keyType = data[offset]
+            offset += keyLen
+            guard offset < data.count else { return [] }
+            let valLen = Int(data[offset])
+            offset += 1
+            guard offset + valLen <= data.count else { return [] }
+            let valData = data.subdata(in: offset..<(offset + valLen))
+            offset += valLen
+            if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
+                return parseRawTxInputs(valData)
+            }
+        }
+        return []
+    }
+
+    private static func parseRawTxInputs(_ data: Data) -> [String] {
+        guard data.count >= 5 else { return [] }
+        var offset = 4 // skip version (4 bytes)
+        // Check for segwit marker
+        if offset + 2 <= data.count && data[offset] == 0x00 && data[offset + 1] == 0x01 {
+            offset += 2
+        }
+        guard offset < data.count else { return [] }
+        let (inCount, varintLen) = parseVarInt(data, at: offset)
+        offset += varintLen
+        var inputs: [String] = []
+        for _ in 0..<inCount {
+            guard offset + 36 <= data.count else { break }
+            let txidBytes = data.subdata(in: offset..<(offset + 32))
+            let txidHex = txidBytes.reversed().map { String(format: "%02x", $0) }.joined()
+            offset += 32
+            let vout = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            guard offset < data.count else { break }
+            let (scriptLen, sLen) = parseVarInt(data, at: offset)
+            offset += sLen + Int(scriptLen) + 4 // script + sequence
+            inputs.append("\(txidHex):\(vout)")
+        }
+        return inputs
+    }
+
+    private static func parseVarInt(_ data: Data, at offset: Int) -> (UInt64, Int) {
+        guard offset < data.count else { return (0, 0) }
+        let first = data[offset]
+        if first < 0xfd {
+            return (UInt64(first), 1)
+        } else if first == 0xfd {
+            guard offset + 3 <= data.count else { return (0, 1) }
+            let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8)
+            return (val, 3)
+        } else if first == 0xfe {
+            guard offset + 5 <= data.count else { return (0, 1) }
+            let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8) | (UInt64(data[offset + 3]) << 16) | (UInt64(data[offset + 4]) << 24)
+            return (val, 5)
+        } else {
+            guard offset + 9 <= data.count else { return (0, 1) }
+            var val: UInt64 = 0
+            for i in 0..<8 {
+                val |= UInt64(data[offset + 1 + i]) << (i * 8)
+            }
+            return (val, 9)
+        }
     }
 
     /// Legacy compatibility send method with strict V7 guards.

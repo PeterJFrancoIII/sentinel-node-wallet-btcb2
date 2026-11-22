@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import CommonCrypto
 import Security
 import LocalAuthentication
@@ -502,6 +503,96 @@ public actor WalletAuthCoordinator {
 
     private let customAuthKeychainHelper: KeychainHelper?
     private let deviceOwnerChallenger: DeviceOwnerChallenger
+    private let spendSigningKey: SymmetricKey = SymmetricKey(size: .bits256)
+
+    public struct CoordinatorSpendAuthVerifier: SpendAuthorizationVerifier, Sendable {
+        private let signingKey: SymmetricKey
+
+        fileprivate init(signingKey: SymmetricKey) {
+            self.signingKey = signingKey
+        }
+
+        public func verify(
+            authorization auth: SpendAuthorization,
+            method: String,
+            params: [Any],
+            walletName: String?
+        ) -> Bool {
+            // 1. Expiry check
+            guard !auth.isExpired else { return false }
+
+            // 2. Cryptographic signature check with coordinator's private key
+            let payload = "\(auth.approvalId.uuidString):\(auth.sessionId.uuidString):\(auth.authorizedMethod.lowercased()):\(auth.walletName):\(auth.destinationAddress.lowercased()):\(auth.amountSats):\(auth.maxFeeSats):\(auth.satPerVB):\(auth.chain):\(auth.previewId.uuidString):\(auth.utxoFingerprint):\(auth.issuedAt.timeIntervalSince1970):\(auth.expiresAt.timeIntervalSince1970):\(auth.nonce)"
+            let hmac = HMAC<SHA256>.authenticationCode(for: Data(payload.utf8), using: signingKey)
+            let expectedToken = hmac.map { String(format: "%02x", $0) }.joined()
+            guard constantTimeCompare(auth.token, expectedToken) else { return false }
+
+            // 3. Method check: exact normalized method match
+            let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard auth.authorizedMethod.lowercased() == normalizedMethod else { return false }
+
+            // 4. Wallet binding: walletName must be non-nil, non-empty, and match auth.walletName
+            guard let wName = walletName, !wName.isEmpty, wName == auth.walletName else { return false }
+
+            // 5. Chain check: must be mainnet
+            guard auth.chain == "main" else { return false }
+
+            // 6. UTXO fingerprint check: must not be empty
+            guard !auth.utxoFingerprint.isEmpty else { return false }
+
+            // 7. Method-specific parameter checks
+            if normalizedMethod == "sendtoaddress" {
+                // Strict arity requirement: must have at least 10 parameters to include explicit fee_rate
+                guard params.count >= 10 else { return false }
+
+                // Destination address match
+                guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
+                    return false
+                }
+
+                // Amount match
+                let paramAmountSats: Int64
+                if let amtDouble = params[1] as? Double {
+                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
+                } else if let amtStr = params[1] as? String, let amtDouble = Double(amtStr) {
+                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
+                } else {
+                    return false
+                }
+                guard paramAmountSats == auth.amountSats, paramAmountSats > 0 else { return false }
+
+                // Fee rate verification: params[9] must be non-null and strictly match auth.satPerVB
+                guard !(params[9] is NSNull) else { return false }
+                let feeRateVal: Int
+                if let rateInt = params[9] as? Int {
+                    feeRateVal = rateInt
+                } else if let rateDouble = params[9] as? Double {
+                    feeRateVal = Int(rateDouble)
+                } else {
+                    return false
+                }
+                guard feeRateVal == auth.satPerVB, feeRateVal > 0 else { return false }
+
+                return true
+            } else {
+                // Default-deny all other 11 restricted methods unless explicitly handled
+                return false
+            }
+        }
+
+        private func constantTimeCompare(_ a: String, _ b: String) -> Bool {
+            guard a.count == b.count else { return false }
+            var result: UInt8 = 0
+            for (byteA, byteB) in zip(a.utf8, b.utf8) {
+                result |= byteA ^ byteB
+            }
+            return result == 0
+        }
+    }
+
+    public nonisolated var spendAuthorizationVerifier: any SpendAuthorizationVerifier {
+        CoordinatorSpendAuthVerifier(signingKey: self.spendSigningKey)
+    }
 
     public init(
         dataDirectory: URL,
@@ -1415,11 +1506,17 @@ public actor WalletAuthCoordinator {
             throw WalletAuthError.sessionExpired
         }
 
-        return SpendAuthorizationIssuer.issue(
+        let issuedAt = Date()
+        let expiresAt = issuedAt.addingTimeInterval(60)
+        let payload = "\(approval.id.uuidString):\(session.id.uuidString):\(authorizedMethod.lowercased()):\(expectedTxContext.walletName):\(expectedTxContext.destinationAddress.lowercased()):\(expectedTxContext.amountSats):\(expectedTxContext.maxFeeSats):\(expectedTxContext.satPerVB):\(expectedTxContext.chain):\(expectedTxContext.previewId.uuidString):\(expectedTxContext.utxoFingerprint):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(expectedTxContext.nonce)"
+        let hmac = HMAC<SHA256>.authenticationCode(for: Data(payload.utf8), using: spendSigningKey)
+        let token = hmac.map { String(format: "%02x", $0) }.joined()
+
+        return SpendAuthorization(
             approvalId: approval.id,
             sessionId: session.id,
-            authorizedMethod: authorizedMethod,
             walletName: expectedTxContext.walletName,
+            authorizedMethod: authorizedMethod,
             destinationAddress: expectedTxContext.destinationAddress,
             amountSats: expectedTxContext.amountSats,
             maxFeeSats: expectedTxContext.maxFeeSats,
@@ -1427,6 +1524,9 @@ public actor WalletAuthCoordinator {
             chain: expectedTxContext.chain,
             previewId: expectedTxContext.previewId,
             utxoFingerprint: expectedTxContext.utxoFingerprint,
+            token: token,
+            issuedAt: issuedAt,
+            expiresAt: expiresAt,
             nonce: expectedTxContext.nonce
         )
     }

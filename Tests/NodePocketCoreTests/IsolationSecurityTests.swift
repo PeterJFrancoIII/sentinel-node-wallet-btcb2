@@ -2,6 +2,18 @@ import XCTest
 @testable import NodePocketCore
 
 final class IsolationSecurityTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        WalletAuthCoordinator.clearTestOverrides()
+    }
+
+    override func tearDown() {
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        WalletAuthCoordinator.clearTestOverrides()
+        super.tearDown()
+    }
+
     func testForbiddenIsolationTermsDetected() {
         let cleanText = "NODE Pocket BTCB2 standalone application with local RPC."
         let cleanResult = SecurityAuditor.auditContent(cleanText)
@@ -121,7 +133,61 @@ final class IsolationSecurityTests: XCTestCase {
         }
     }
 
+    private func createCoordinatorAndSpendAuth(
+        authorizedMethod: String = "sendtoaddress",
+        destinationAddress: String = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+        amountSats: Int64 = 25_000,
+        maxFeeSats: Int64 = 500,
+        satPerVB: Int = 5,
+        walletName: String = "vault1",
+        chain: String = "main",
+        utxoFingerprint: String = "utxo_mock"
+    ) async throws -> (WalletAuthCoordinator, SpendAuthorization) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("isolation_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator_iso")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let capability = try await coordinator.enroll(
+            username: "operator_iso",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+        let txContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: destinationAddress,
+            amountSats: amountSats,
+            maxFeeSats: maxFeeSats,
+            satPerVB: satPerVB,
+            previewId: UUID(),
+            utxoFingerprint: utxoFingerprint,
+            chain: chain,
+            nonce: "nonce_\(UUID().uuidString)"
+        )
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: destinationAddress,
+            reason: "Isolation test approval",
+            txContext: txContext
+        )
+        let auth = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            approval,
+            action: "send",
+            target: destinationAddress,
+            authorizedMethod: authorizedMethod,
+            expectedTxContext: txContext
+        )
+        return (coordinator, auth)
+    }
+
     func testSpendAuthorizationMethodMismatchRejectedAtTransport() async throws {
+        let (coord, bumpFeeAuth) = try await createCoordinatorAndSpendAuth(authorizedMethod: "bumpfee")
         let rpc = BitcoinRPCClient(
             host: "127.0.0.1",
             port: 59999,
@@ -129,24 +195,12 @@ final class IsolationSecurityTests: XCTestCase {
             password: "test",
             isBroadcastRestricted: false
         )
-        let bumpFeeAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: UUID(),
-            authorizedMethod: "bumpfee",
-            walletName: "vault1",
-            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
-            amountSats: 25_000,
-            maxFeeSats: 500,
-            satPerVB: 1,
-            chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "utxo_mock",
-            nonce: "nonce_test_method_mismatch"
-        )
+        rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
         do {
             _ = try await rpc.sendToAddress(
                 address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
                 amount: 0.00025,
+                feeRateSatPerVB: 5,
                 walletName: "vault1",
                 authorization: bumpFeeAuth
             )
@@ -160,6 +214,14 @@ final class IsolationSecurityTests: XCTestCase {
     }
 
     func testSpendAuthorizationParameterTamperingRejectedAtTransport() async throws {
+        let (coord, validAuth) = try await createCoordinatorAndSpendAuth(
+            authorizedMethod: "sendtoaddress",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 5,
+            walletName: "vault1"
+        )
         let rpc = BitcoinRPCClient(
             host: "127.0.0.1",
             port: 59999,
@@ -167,26 +229,14 @@ final class IsolationSecurityTests: XCTestCase {
             password: "test",
             isBroadcastRestricted: false
         )
-        let validAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: UUID(),
-            authorizedMethod: "sendtoaddress",
-            walletName: "vault1",
-            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
-            amountSats: 25_000,
-            maxFeeSats: 500,
-            satPerVB: 5,
-            chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "utxo_mock",
-            nonce: "nonce_param_tamper"
-        )
+        rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
 
         // 1. Destination mismatch
         do {
             _ = try await rpc.sendToAddress(
                 address: "bc1q9xxxxxx7xfkvy5l643lydnw9re59gtzzwf5mdq",
                 amount: 0.00025,
+                feeRateSatPerVB: 5,
                 walletName: "vault1",
                 authorization: validAuth
             )
@@ -203,6 +253,7 @@ final class IsolationSecurityTests: XCTestCase {
             _ = try await rpc.sendToAddress(
                 address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
                 amount: 0.001,
+                feeRateSatPerVB: 5,
                 walletName: "vault1",
                 authorization: validAuth
             )
@@ -219,10 +270,45 @@ final class IsolationSecurityTests: XCTestCase {
             _ = try await rpc.sendToAddress(
                 address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
                 amount: 0.00025,
+                feeRateSatPerVB: 5,
                 walletName: "vault2",
                 authorization: validAuth
             )
             XCTFail("Wallet tampering must fail closed")
+        } catch let error as RPCClientError {
+            guard case .transactionBroadcastDisabled = error else {
+                XCTFail("Expected transactionBroadcastDisabled, got \(error)")
+                return
+            }
+        }
+
+        // 4. Missing fee rate (fails arity / fee check)
+        do {
+            _ = try await rpc.sendToAddress(
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+                amount: 0.00025,
+                feeRateSatPerVB: nil,
+                walletName: "vault1",
+                authorization: validAuth
+            )
+            XCTFail("Missing fee rate must fail closed")
+        } catch let error as RPCClientError {
+            guard case .transactionBroadcastDisabled = error else {
+                XCTFail("Expected transactionBroadcastDisabled, got \(error)")
+                return
+            }
+        }
+
+        // 5. Altered fee rate
+        do {
+            _ = try await rpc.sendToAddress(
+                address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+                amount: 0.00025,
+                feeRateSatPerVB: 10,
+                walletName: "vault1",
+                authorization: validAuth
+            )
+            XCTFail("Altered fee rate must fail closed")
         } catch let error as RPCClientError {
             guard case .transactionBroadcastDisabled = error else {
                 XCTFail("Expected transactionBroadcastDisabled, got \(error)")

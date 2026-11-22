@@ -214,6 +214,7 @@ struct ReleaseLockVerifier {
             dataDirectory: tempDir,
             deviceOwnerChallenger: VerifierDeviceOwnerChallenger()
         )
+        client.registerAuthorizationVerifier(authCoord.spendAuthorizationVerifier)
 
         let (secret, _, codes) = try! await authCoord.generateEnrollmentSecret(username: "operator_ci")
         let code = WalletAuthCoordinator.generateTOTP(secret: secret)
@@ -331,24 +332,45 @@ struct ReleaseLockVerifier {
         }
 
         // 3b. Method binding mismatch rejected at transport (P0-2)
-        let bumpFeeAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: capability.id,
+        let methodMismatchApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "bumpfee",
+            target: validDestination,
+            reason: "Approval for bumpfee",
+            txContext: TransactionSpendContext(
+                walletName: walletName,
+                destinationAddress: validDestination,
+                amountSats: 25_000,
+                maxFeeSats: 500,
+                satPerVB: 2,
+                previewId: UUID(),
+                utxoFingerprint: "mock_utxo",
+                chain: "main",
+                nonce: "test_bumpfee_nonce"
+            )
+        )
+        let bumpFeeAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            methodMismatchApproval,
+            action: "bumpfee",
+            target: validDestination,
             authorizedMethod: "bumpfee",
-            walletName: walletName,
-            destinationAddress: validDestination,
-            amountSats: 25_000,
-            maxFeeSats: 500,
-            satPerVB: 1,
-            chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "mock_utxo",
-            nonce: "test_nonce_bumpfee"
+            expectedTxContext: TransactionSpendContext(
+                walletName: walletName,
+                destinationAddress: validDestination,
+                amountSats: 25_000,
+                maxFeeSats: 500,
+                satPerVB: 2,
+                previewId: methodMismatchApproval.txContext!.previewId,
+                utxoFingerprint: "mock_utxo",
+                chain: "main",
+                nonce: "test_bumpfee_nonce"
+            )
         )
         do {
             let _: String = try await client.sendToAddress(
                 address: validDestination,
                 amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
                 walletName: walletName,
                 authorization: bumpFeeAuth
             )
@@ -364,38 +386,60 @@ struct ReleaseLockVerifier {
         }
 
         // 3c. Direct RPC SpendAuthorization Enforcement: Positive and Single-Use Replay (P0-1 & P0-2)
-        let validDirectNonce = "valid_direct_nonce_\(UUID().uuidString)"
-        let validSpendAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: capability.id,
-            authorizedMethod: "sendtoaddress",
+        let directPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 25_000,
+            feeSats: 500,
+            satPerVB: 2,
+            estimatedVSize: 140,
+            selectedInputs: ["test_input_txid:0"]
+        )
+        let directContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: validDestination,
             amountSats: 25_000,
             maxFeeSats: 500,
-            satPerVB: 1,
+            satPerVB: 2,
+            previewId: directPreview.id,
+            utxoFingerprint: "test_input_txid:0",
             chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "mock_utxo",
-            nonce: validDirectNonce
+            nonce: directPreview.id.uuidString
         )
+        let directApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Positive direct send verification",
+            txContext: directContext
+        )
+        let validSpendAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            directApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendtoaddress",
+            expectedTxContext: directContext
+        )
+
         do {
             let res: String = try await client.sendToAddress(
                 address: validDestination,
                 amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
                 walletName: walletName,
                 authorization: validSpendAuth
             )
-            print("✓ Verified: Direct sendToAddress with valid SpendAuthorization succeeded (txid: \(res)).")
+            print("✓ Verified: Direct sendToAddress with genuine coordinator-issued SpendAuthorization succeeded (txid: \(res)).")
         } catch {
             fatalError("FAILURE: Direct sendToAddress with valid SpendAuthorization failed: \(error)")
         }
 
-        // Replay of the exact same SpendAuthorization must fail closed
+        // 3d. Replay of the exact same SpendAuthorization must fail closed (0 egress)
         do {
             let _: String = try await client.sendToAddress(
                 address: validDestination,
                 amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
                 walletName: walletName,
                 authorization: validSpendAuth
             )
@@ -410,27 +454,51 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Replayed SpendAuthorization threw unexpected error: \(error)")
         }
 
-        // 3d. Destination Address Substitution / Tampering on RPC Client
-        let tamperedDestAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: capability.id,
-            authorizedMethod: "sendtoaddress",
-            walletName: walletName,
-            destinationAddress: "bc1q9xxxxxx7xfkvy5l643lydnw9re59gtzzwf5mdq",
-            amountSats: 25_000,
-            maxFeeSats: 500,
-            satPerVB: 1,
-            chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "mock_utxo",
-            nonce: "tampered_dest_nonce"
+        // 3e. Replay with fresh approvalId but replayed token must fail closed (0 egress)
+        let freshIdReplayAuth = SpendAuthorization(
+            approvalId: UUID(), // altered approvalId!
+            sessionId: validSpendAuth.sessionId,
+            walletName: validSpendAuth.walletName,
+            authorizedMethod: validSpendAuth.authorizedMethod,
+            destinationAddress: validSpendAuth.destinationAddress,
+            amountSats: validSpendAuth.amountSats,
+            maxFeeSats: validSpendAuth.maxFeeSats,
+            satPerVB: validSpendAuth.satPerVB,
+            chain: validSpendAuth.chain,
+            previewId: validSpendAuth.previewId,
+            utxoFingerprint: validSpendAuth.utxoFingerprint,
+            token: validSpendAuth.token,
+            issuedAt: validSpendAuth.issuedAt,
+            expiresAt: validSpendAuth.expiresAt,
+            nonce: validSpendAuth.nonce
         )
         do {
             let _: String = try await client.sendToAddress(
-                address: validDestination, // Mismatch against auth destination!
+                address: validDestination,
                 amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
                 walletName: walletName,
-                authorization: tamperedDestAuth
+                authorization: freshIdReplayAuth
+            )
+            fatalError("FAILURE: SpendAuthorization with altered approvalId was accepted!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Replay with fresh approvalId failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Fresh approvalId replay threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Fresh approvalId replay threw unexpected error: \(error)")
+        }
+
+        // 3f. Destination Address Substitution / Tampering on RPC Client
+        do {
+            let _: String = try await client.sendToAddress(
+                address: "bc1q9xxxxxx7xfkvy5l643lydnw9re59gtzzwf5mdq", // Mismatch against auth destination!
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
+                walletName: walletName,
+                authorization: validSpendAuth
             )
             fatalError("FAILURE: Mismatched destination was accepted by RPC client!")
         } catch let err as RPCClientError {
@@ -443,27 +511,14 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Mismatched destination threw unexpected error: \(error)")
         }
 
-        // 3e. Amount Tampering / Substitution on RPC Client
-        let tamperedAmtAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: capability.id,
-            authorizedMethod: "sendtoaddress",
-            walletName: walletName,
-            destinationAddress: validDestination,
-            amountSats: 100_000,
-            maxFeeSats: 500,
-            satPerVB: 1,
-            chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "mock_utxo",
-            nonce: "tampered_amt_nonce"
-        )
+        // 3g. Amount Tampering / Substitution on RPC Client
         do {
             let _: String = try await client.sendToAddress(
                 address: validDestination,
-                amount: SatoshiMath.toBTC(sats: 25_000), // Mismatch against auth amount!
+                amount: SatoshiMath.toBTC(sats: 100_000), // Mismatch against auth amount!
+                feeRateSatPerVB: 2,
                 walletName: walletName,
-                authorization: tamperedAmtAuth
+                authorization: validSpendAuth
             )
             fatalError("FAILURE: Mismatched amount was accepted by RPC client!")
         } catch let err as RPCClientError {
@@ -476,27 +531,14 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Mismatched amount threw unexpected error: \(error)")
         }
 
-        // 3f. Wallet Name Tampering on RPC Client
-        let tamperedWalletAuth = SpendAuthorizationIssuer.issue(
-            approvalId: UUID(),
-            sessionId: capability.id,
-            authorizedMethod: "sendtoaddress",
-            walletName: "unauthorized_other_wallet",
-            destinationAddress: validDestination,
-            amountSats: 25_000,
-            maxFeeSats: 500,
-            satPerVB: 1,
-            chain: "main",
-            previewId: UUID(),
-            utxoFingerprint: "mock_utxo",
-            nonce: "tampered_wallet_nonce"
-        )
+        // 3h. Wallet Name Tampering on RPC Client
         do {
             let _: String = try await client.sendToAddress(
                 address: validDestination,
                 amount: SatoshiMath.toBTC(sats: 25_000),
-                walletName: walletName, // Mismatch against auth walletName!
-                authorization: tamperedWalletAuth
+                feeRateSatPerVB: 2,
+                walletName: "unauthorized_other_wallet", // Mismatch against auth wallet!
+                authorization: validSpendAuth
             )
             fatalError("FAILURE: Mismatched wallet name was accepted by RPC client!")
         } catch let err as RPCClientError {
@@ -507,6 +549,81 @@ struct ReleaseLockVerifier {
             }
         } catch {
             fatalError("FAILURE: Mismatched wallet name threw unexpected error: \(error)")
+        }
+
+        // 3i. Missing fee rate (params.count < 10) rejected at transport (P0-R210-02)
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: nil, // Omits index 9 fee_rate parameter!
+                walletName: walletName,
+                authorization: validSpendAuth
+            )
+            fatalError("FAILURE: Missing fee rate was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Missing fee rate failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Missing fee rate threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Missing fee rate threw unexpected error: \(error)")
+        }
+
+        // 3j. Altered fee rate (feeRate != auth.satPerVB) rejected at transport (P0-R210-02)
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 10, // Mismatch against auth satPerVB: 2!
+                walletName: walletName,
+                authorization: validSpendAuth
+            )
+            fatalError("FAILURE: Altered fee rate was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Altered fee rate failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Altered fee rate threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Altered fee rate threw unexpected error: \(error)")
+        }
+
+        // 3k. Mismatched chain rejected at transport (P0-R210-02)
+        let testnetAuth = SpendAuthorization(
+            approvalId: UUID(),
+            sessionId: capability.id,
+            walletName: walletName,
+            authorizedMethod: "sendtoaddress",
+            destinationAddress: validDestination,
+            amountSats: 25_000,
+            maxFeeSats: 500,
+            satPerVB: 2,
+            chain: "testnet", // Not mainnet!
+            previewId: UUID(),
+            utxoFingerprint: "mock_utxo",
+            token: "testnet_token",
+            nonce: "testnet_nonce"
+        )
+        do {
+            let _: String = try await client.sendToAddress(
+                address: validDestination,
+                amount: SatoshiMath.toBTC(sats: 25_000),
+                feeRateSatPerVB: 2,
+                walletName: walletName,
+                authorization: testnetAuth
+            )
+            fatalError("FAILURE: Non-mainnet chain authorization was accepted by RPC client!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Non-mainnet chain authorization failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Non-mainnet chain authorization threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Non-mainnet chain authorization threw unexpected error: \(error)")
         }
 
         // 3g. Expired SpendAuthorization Rejection

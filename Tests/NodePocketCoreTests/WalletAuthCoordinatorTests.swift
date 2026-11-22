@@ -2245,14 +2245,73 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         XCTAssertEqual(spendAuth.satPerVB, 6)
         XCTAssertFalse(spendAuth.token.isEmpty)
 
-        // Verify spendAuth validates in SpendAuthorizationIssuer
-        let isValid = SpendAuthorizationIssuer.verify(
+        // Verify spendAuth validates via coordinator.spendAuthorizationVerifier
+        let validParams: [Any] = [
+            "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            0.00075,
+            "",
+            "",
+            false,
+            true,
+            1,
+            "unset",
+            false,
+            6
+        ]
+        let isValid = coordinator.spendAuthorizationVerifier.verify(
             authorization: spendAuth,
             method: "sendtoaddress",
-            params: ["bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 0.00075],
+            params: validParams,
             walletName: "vault_beta"
         )
-        XCTAssertTrue(isValid, "Issued SpendAuthorization must pass SpendAuthorizationIssuer verification")
+        XCTAssertTrue(isValid, "Issued SpendAuthorization must pass coordinator.spendAuthorizationVerifier verification")
+
+        // Negative regression 1: Missing fee rate (params < 10) fails verification
+        let shortParams: [Any] = ["bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 0.00075]
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "sendtoaddress",
+                params: shortParams,
+                walletName: "vault_beta"
+            ),
+            "sendtoaddress with params.count < 10 must fail verification"
+        )
+
+        // Negative regression 2: Altered fee rate fails verification
+        var alteredFeeParams = validParams
+        alteredFeeParams[9] = 12
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "sendtoaddress",
+                params: alteredFeeParams,
+                walletName: "vault_beta"
+            ),
+            "sendtoaddress with altered fee rate must fail verification"
+        )
+
+        // Negative regression 3: Wrong wallet fails verification
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "sendtoaddress",
+                params: validParams,
+                walletName: "other_vault"
+            ),
+            "SpendAuthorization with mismatched wallet must fail verification"
+        )
+
+        // Negative regression 4: Method mismatch fails verification
+        XCTAssertFalse(
+            coordinator.spendAuthorizationVerifier.verify(
+                authorization: spendAuth,
+                method: "bumpfee",
+                params: validParams,
+                walletName: "vault_beta"
+            ),
+            "SpendAuthorization method mismatch must fail verification"
+        )
     }
 }
 

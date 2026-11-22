@@ -30,6 +30,15 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     }
 }
 
+public protocol SpendAuthorizationVerifier: Sendable {
+    func verify(
+        authorization: SpendAuthorization,
+        method: String,
+        params: [Any],
+        walletName: String?
+    ) -> Bool
+}
+
 public struct SpendAuthorization: Sendable, Equatable {
     public let approvalId: UUID
     public let sessionId: UUID
@@ -86,163 +95,6 @@ public struct SpendAuthorization: Sendable, Equatable {
     }
 }
 
-public enum SpendAuthorizationIssuer: Sendable {
-    private static let signingKey: SymmetricKey = SymmetricKey(size: .bits256)
-
-    public static func computeToken(
-        approvalId: UUID,
-        sessionId: UUID,
-        authorizedMethod: String,
-        walletName: String,
-        destinationAddress: String,
-        amountSats: Int64,
-        maxFeeSats: Int64,
-        satPerVB: Int,
-        chain: String,
-        previewId: UUID,
-        utxoFingerprint: String,
-        issuedAt: Date,
-        expiresAt: Date,
-        nonce: String
-    ) -> String {
-        let payload = "\(approvalId.uuidString):\(sessionId.uuidString):\(authorizedMethod.lowercased()):\(walletName):\(destinationAddress.lowercased()):\(amountSats):\(maxFeeSats):\(satPerVB):\(chain):\(previewId.uuidString):\(utxoFingerprint):\(issuedAt.timeIntervalSince1970):\(expiresAt.timeIntervalSince1970):\(nonce)"
-        let hmac = HMAC<SHA256>.authenticationCode(for: Data(payload.utf8), using: signingKey)
-        return hmac.map { String(format: "%02x", $0) }.joined()
-    }
-
-    public static func issue(
-        approvalId: UUID,
-        sessionId: UUID,
-        authorizedMethod: String,
-        walletName: String,
-        destinationAddress: String,
-        amountSats: Int64,
-        maxFeeSats: Int64,
-        satPerVB: Int,
-        chain: String,
-        previewId: UUID,
-        utxoFingerprint: String,
-        nonce: String
-    ) -> SpendAuthorization {
-        let issuedAt = Date()
-        let expiresAt = issuedAt.addingTimeInterval(60)
-        let token = computeToken(
-            approvalId: approvalId,
-            sessionId: sessionId,
-            authorizedMethod: authorizedMethod,
-            walletName: walletName,
-            destinationAddress: destinationAddress,
-            amountSats: amountSats,
-            maxFeeSats: maxFeeSats,
-            satPerVB: satPerVB,
-            chain: chain,
-            previewId: previewId,
-            utxoFingerprint: utxoFingerprint,
-            issuedAt: issuedAt,
-            expiresAt: expiresAt,
-            nonce: nonce
-        )
-        return SpendAuthorization(
-            approvalId: approvalId,
-            sessionId: sessionId,
-            walletName: walletName,
-            authorizedMethod: authorizedMethod,
-            destinationAddress: destinationAddress,
-            amountSats: amountSats,
-            maxFeeSats: maxFeeSats,
-            satPerVB: satPerVB,
-            chain: chain,
-            previewId: previewId,
-            utxoFingerprint: utxoFingerprint,
-            token: token,
-            issuedAt: issuedAt,
-            expiresAt: expiresAt,
-            nonce: nonce
-        )
-    }
-
-    public static func verify(
-        authorization auth: SpendAuthorization,
-        method: String,
-        params: [Any],
-        walletName: String?
-    ) -> Bool {
-        // 1. Expiry check
-        guard !auth.isExpired else { return false }
-
-        // 2. Cryptographic signature check (constant-time comparison)
-        let expectedToken = computeToken(
-            approvalId: auth.approvalId,
-            sessionId: auth.sessionId,
-            authorizedMethod: auth.authorizedMethod,
-            walletName: auth.walletName,
-            destinationAddress: auth.destinationAddress,
-            amountSats: auth.amountSats,
-            maxFeeSats: auth.maxFeeSats,
-            satPerVB: auth.satPerVB,
-            chain: auth.chain,
-            previewId: auth.previewId,
-            utxoFingerprint: auth.utxoFingerprint,
-            issuedAt: auth.issuedAt,
-            expiresAt: auth.expiresAt,
-            nonce: auth.nonce
-        )
-        guard constantTimeCompare(auth.token, expectedToken) else { return false }
-
-        // 3. Method check: exact normalized method match
-        let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard auth.authorizedMethod.lowercased() == normalizedMethod else { return false }
-
-        // 4. Wallet binding: walletName must be non-nil, non-empty, and match auth.walletName
-        guard let wName = walletName, !wName.isEmpty, wName == auth.walletName else { return false }
-
-        // 5. Method-specific parameter checks
-        if normalizedMethod == "sendtoaddress" {
-            guard params.count >= 2 else { return false }
-            // Destination address match
-            guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
-                return false
-            }
-            // Amount match
-            let paramAmountSats: Int64
-            if let amtDouble = params[1] as? Double {
-                paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
-            } else if let amtStr = params[1] as? String, let amtDouble = Double(amtStr) {
-                paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
-            } else {
-                return false
-            }
-            guard paramAmountSats == auth.amountSats else { return false }
-
-            // Fee rate verification (if present in params at index 9)
-            if params.count >= 10, !(params[9] is NSNull) {
-                let feeRateVal: Int
-                if let rateInt = params[9] as? Int {
-                    feeRateVal = rateInt
-                } else if let rateDouble = params[9] as? Double {
-                    feeRateVal = Int(rateDouble)
-                } else {
-                    feeRateVal = -1
-                }
-                guard feeRateVal == auth.satPerVB else { return false }
-            }
-            return true
-        } else {
-            // Default-deny all other 11 restricted methods unless explicitly handled
-            return false
-        }
-    }
-
-    private static func constantTimeCompare(_ a: String, _ b: String) -> Bool {
-        guard a.count == b.count else { return false }
-        var result: UInt8 = 0
-        for (byteA, byteB) in zip(a.utf8, b.utf8) {
-            result |= byteA ^ byteB
-        }
-        return result == 0
-    }
-}
-
 public final class BitcoinRPCClient: @unchecked Sendable {
     public let host: String
     public let port: Int
@@ -256,6 +108,26 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     private let credLock = NSLock()
     private let authLock = NSLock()
     private var consumedAuthorizationTokens = Set<String>()
+    private let verifierLock = NSLock()
+    private var authorizationVerifier: (any SpendAuthorizationVerifier)?
+
+    public func registerAuthorizationVerifier(_ verifier: any SpendAuthorizationVerifier) {
+        verifierLock.lock()
+        defer { verifierLock.unlock() }
+        self.authorizationVerifier = verifier
+    }
+
+    public var isAuthorizationVerifierRegistered: Bool {
+        verifierLock.lock()
+        defer { verifierLock.unlock() }
+        return authorizationVerifier != nil
+    }
+
+    private func getRegisteredVerifier() -> (any SpendAuthorizationVerifier)? {
+        verifierLock.lock()
+        defer { verifierLock.unlock() }
+        return authorizationVerifier
+    }
 
     private func recordAndVerifyToken(tokenKey: String) -> Bool {
         authLock.lock()
@@ -338,7 +210,16 @@ public final class BitcoinRPCClient: @unchecked Sendable {
             guard let auth = authorization else {
                 throw RPCClientError.transactionBroadcastDisabled
             }
-            guard SpendAuthorizationIssuer.verify(
+            guard !auth.isExpired else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+
+            guard let activeVerifier = getRegisteredVerifier() else {
+                // Fail closed: No authentic coordinator verifier has been registered!
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+
+            guard activeVerifier.verify(
                 authorization: auth,
                 method: normalizedMethod,
                 params: params,

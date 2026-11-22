@@ -1,5 +1,6 @@
 import SwiftUI
 import Combine
+import CryptoKit
 import NodePocketCore
 
 @MainActor
@@ -995,9 +996,14 @@ public final class AppState: ObservableObject {
         guard let walletName = currentWallet, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
-        let utxoFingerprint = preview.selectedInputs.isEmpty
-            ? "auto_coin_selection:\(preview.id.uuidString)"
-            : preview.selectedInputs.sorted().joined(separator: ",")
+        let utxoFingerprint: String
+        if !preview.selectedInputs.isEmpty {
+            utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
+        } else {
+            let digestPayload = "psbt_funding_plan:\(walletName):\(preview.destinationAddress):\(preview.amountSats):\(preview.satPerVB):\(preview.id.uuidString)"
+            let hash = SHA256.hash(data: Data(digestPayload.utf8))
+            utxoFingerprint = hash.map { String(format: "%02x", $0) }.joined()
+        }
         let txContext = TransactionSpendContext(
             walletName: walletName,
             destinationAddress: preview.destinationAddress,
@@ -1025,10 +1031,14 @@ public final class AppState: ObservableObject {
                 approval: approval
             )
         } catch let error as WalletSecurityError {
-            if case .walletRelockFailed(_, let underlying, let confirmedTxid) = error {
-                appendLog("[SECURITY WARNING] Transaction broadcasted (\(confirmedTxid)), but immediate wallet relock failed: \(underlying). Passphrase timeout active.")
+            if case .walletRelockFailed(let wName, let underlying, let confirmedTxid) = error {
+                appendLog("[CRITICAL SECURITY ALERT] Wallet '\(wName)' failed immediate relock: \(underlying). Transaction ID: \(confirmedTxid.isEmpty ? "None (broadcast failed)" : confirmedTxid)")
                 refreshWallet()
-                return confirmedTxid
+                if !confirmedTxid.isEmpty {
+                    return confirmedTxid
+                } else {
+                    throw error
+                }
             }
             throw error
         }
