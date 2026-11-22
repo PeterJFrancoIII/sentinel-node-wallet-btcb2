@@ -2267,7 +2267,8 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             params: validParams,
             walletName: "vault_beta"
         )
-        XCTAssertTrue(isValid, "Issued SpendAuthorization must pass coordinator.spendAuthorizationVerifier verification")
+        // R216-P0-03: Direct sendtoaddress fails closed unconditionally at transport even with otherwise valid token
+        XCTAssertFalse(isValid, "Direct sendtoaddress must fail closed at transport even with valid token (retired in R216)")
 
         // Negative regression 1: Missing fee rate / params < 12 fails verification
         let shortParams: [Any] = ["bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", 0.00075]
@@ -2650,6 +2651,35 @@ final class WalletAuthCoordinatorTests: XCTestCase {
         // 3. Truncated output script
         let truncatedTx = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0150c3000000000000160014e8"
         XCTAssertNil(RawTransactionDecoder.decode(hex: truncatedTx))
+    }
+
+    func testUnsignedTransactionDecoderAndContinuity() async throws {
+        // 1. Truncated input when fewer than 4 bytes remain for sequence (R216-P0-04 trap regression)
+        let truncatedSequenceData = Data([0x02, 0x00, 0x00, 0x00, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x00, 0xff])
+        XCTAssertNil(RawTransactionDecoder.decode(data: truncatedSequenceData))
+        XCTAssertNil(RawTransactionDecoder.decodeUnsignedTx(data: truncatedSequenceData))
+
+        // 2. decodeUnsignedTx rejects non-empty scriptSig (per BIP-174)
+        let nonZeroScriptSig = Data([0x02, 0x00, 0x00, 0x00, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x01, 0x51, 0xff, 0xff, 0xff, 0xff, 0x01, 0x50, 0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x14] + [UInt8](repeating: 0x11, count: 20) + [0x00, 0x00, 0x00, 0x00])
+        XCTAssertNil(RawTransactionDecoder.decodeUnsignedTx(data: nonZeroScriptSig))
+
+        // 3. decodeUnsignedTx rejects segwit marker/flag (per BIP-174 legacy format requirement)
+        let segwitUnsigned = Data([0x02, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0x50, 0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x14] + [UInt8](repeating: 0x11, count: 20) + [0x00, 0x00, 0x00, 0x00])
+        XCTAssertNil(RawTransactionDecoder.decodeUnsignedTx(data: segwitUnsigned))
+
+        // 4. Valid unsigned tx decodes successfully
+        let validUnsigned = Data([0x02, 0x00, 0x00, 0x00, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x01, 0x50, 0xc3, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x16, 0x00, 0x14] + [UInt8](repeating: 0x11, count: 20) + [0x00, 0x00, 0x00, 0x00])
+        let decodedUnsigned = RawTransactionDecoder.decodeUnsignedTx(data: validUnsigned)
+        XCTAssertNotNil(decodedUnsigned)
+        XCTAssertEqual(decodedUnsigned?.version, 2)
+        XCTAssertEqual(decodedUnsigned?.inputs.count, 1)
+        XCTAssertEqual(decodedUnsigned?.outputs.count, 1)
+        XCTAssertEqual(decodedUnsigned?.outputs.first?.valueSats, 50_000)
+
+        // 5. computeTxid computes consensus txid correctly
+        let computedTxid = RawTransactionDecoder.computeTxid(for: validUnsigned)
+        XCTAssertNotNil(computedTxid)
+        XCTAssertEqual(computedTxid?.count, 64)
     }
 }
 

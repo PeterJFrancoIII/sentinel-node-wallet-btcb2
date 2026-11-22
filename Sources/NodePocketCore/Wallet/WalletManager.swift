@@ -1381,19 +1381,26 @@ public actor WalletManager {
         public let totalInputSats: Int64
         public let totalOutputSats: Int64
         public let calculatedFeeSats: Int64
+        public let skeletonFingerprint: String
+        public let baseTx: DecodedRawTransaction
 
         public init(
             inputs: [String],
             outputs: [DecodedRawTransaction.Output],
             totalInputSats: Int64,
             totalOutputSats: Int64,
-            calculatedFeeSats: Int64
+            calculatedFeeSats: Int64,
+            skeletonFingerprint: String = "",
+            baseTx: DecodedRawTransaction? = nil
         ) {
             self.inputs = inputs
             self.outputs = outputs
             self.totalInputSats = totalInputSats
             self.totalOutputSats = totalOutputSats
             self.calculatedFeeSats = calculatedFeeSats
+            let resolvedBaseTx = baseTx ?? DecodedRawTransaction(inputs: inputs, outputs: outputs)
+            self.baseTx = resolvedBaseTx
+            self.skeletonFingerprint = skeletonFingerprint.isEmpty ? resolvedBaseTx.skeletonFingerprint : skeletonFingerprint
         }
     }
 
@@ -1404,6 +1411,7 @@ public actor WalletManager {
         }
         var offset = 5
         var rawTxData: Data?
+        var seenGlobalKeys = Set<Data>()
 
         // 1. Global map
         while offset < data.count {
@@ -1411,6 +1419,8 @@ public actor WalletManager {
             offset += kLen
             if keyLen == 0 { break } // Global map ends
             guard keyLen <= UInt64(data.count - offset) else { return nil }
+            let keyData = data.subdata(in: offset..<(offset + Int(keyLen)))
+            guard seenGlobalKeys.insert(keyData).inserted else { return nil } // Reject duplicate global keys
             let keyType = data[offset]
             offset += Int(keyLen)
             guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
@@ -1418,14 +1428,16 @@ public actor WalletManager {
             guard valLen <= UInt64(data.count - offset) else { return nil }
             let valData = data.subdata(in: offset..<(offset + Int(valLen)))
             offset += Int(valLen)
-            if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
+            if keyType == 0x00 && keyLen == 1 { // PSBT_GLOBAL_UNSIGNED_TX
+                guard rawTxData == nil else { return nil } // Reject duplicate unsigned tx key
                 rawTxData = valData
             }
         }
 
         guard let unsignedTx = rawTxData else { return nil }
-        let inputs = parseRawTxInputs(unsignedTx)
-        let outputs = parseRawTxOutputs(unsignedTx)
+        guard let baseTx = RawTransactionDecoder.decodeUnsignedTx(data: unsignedTx) else { return nil }
+        let inputs = baseTx.inputs
+        let outputs = baseTx.outputs
         guard !inputs.isEmpty && !outputs.isEmpty else { return nil }
 
         var totalOutputSats: Int64 = 0
@@ -1436,16 +1448,25 @@ public actor WalletManager {
             totalOutputSats = newSum
         }
 
-        // 2. Input maps: scan inputs.count input maps
+        // 2. Input maps: exactly baseTx.inputRecords.count input maps
         var inputPrevoutSats: [Int64] = Array(repeating: 0, count: inputs.count)
-        var foundPrevoutCount = 0
 
         for i in 0..<inputs.count {
+            var seenInputKeys = Set<Data>()
+            var witnessUtxo: (amount: Int64, script: Data)?
+            var nonWitnessUtxo: (amount: Int64, script: Data)?
+            var inputMapTerminated = false
+
             while offset < data.count {
                 guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
                 offset += kLen
-                if keyLen == 0 { break } // This input map ends
+                if keyLen == 0 {
+                    inputMapTerminated = true
+                    break // This input map ends
+                }
                 guard keyLen <= UInt64(data.count - offset) else { return nil }
+                let keyData = data.subdata(in: offset..<(offset + Int(keyLen)))
+                guard seenInputKeys.insert(keyData).inserted else { return nil } // Reject duplicate key in input map
                 let keyType = data[offset]
                 offset += Int(keyLen)
                 guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
@@ -1454,29 +1475,74 @@ public actor WalletManager {
                 let valData = data.subdata(in: offset..<(offset + Int(valLen)))
                 offset += Int(valLen)
 
-                if keyType == 0x01 && valData.count >= 8 { // PSBT_IN_WITNESS_UTXO
+                if keyType == 0x01 && keyLen == 1 { // PSBT_IN_WITNESS_UTXO
+                    guard valData.count >= 9 else { return nil }
                     var satVal: UInt64 = 0
                     for b in 0..<8 {
                         satVal |= UInt64(valData[b]) << (b * 8)
                     }
                     guard satVal <= UInt64(Int64.max) && satVal > 0 else { return nil }
-                    inputPrevoutSats[i] = Int64(satVal)
-                    foundPrevoutCount += 1
-                } else if keyType == 0x00 { // PSBT_IN_NON_WITNESS_UTXO
-                    let prevOutputs = parseRawTxOutputs(valData)
-                    let voutStr = inputs[i].split(separator: ":").last.map(String.init) ?? ""
-                    if let vout = Int(voutStr), vout >= 0 && vout < prevOutputs.count {
-                        let satVal = prevOutputs[vout].valueSats
-                        guard satVal > 0 else { return nil }
-                        inputPrevoutSats[i] = satVal
-                        foundPrevoutCount += 1
-                    }
+                    guard let (spkLen, spkVarLen) = parseVarInt(valData, at: 8) else { return nil }
+                    // Strict length verification: 8 + varIntLen + scriptLen == valData.count (R216-P0-02)
+                    guard 8 + spkVarLen + Int(spkLen) == valData.count else { return nil }
+                    let spk = valData.subdata(in: (8 + spkVarLen)..<valData.count)
+                    witnessUtxo = (Int64(satVal), spk)
+                } else if keyType == 0x00 && keyLen == 1 { // PSBT_IN_NON_WITNESS_UTXO
+                    guard let prevTx = RawTransactionDecoder.decode(data: valData) else { return nil }
+                    guard let prevTxid = RawTransactionDecoder.computeTxid(for: valData) else { return nil }
+                    guard prevTxid.lowercased() == baseTx.inputRecords[i].txidHex.lowercased() else { return nil }
+                    let vout = Int(baseTx.inputRecords[i].vout)
+                    guard vout >= 0 && vout < prevTx.outputs.count else { return nil }
+                    let satVal = prevTx.outputs[vout].valueSats
+                    guard satVal > 0 else { return nil }
+                    nonWitnessUtxo = (satVal, prevTx.outputs[vout].scriptPubKey)
                 }
+            }
+
+            guard inputMapTerminated else { return nil }
+
+            // BIP-174 UTXO resolution
+            if let w = witnessUtxo, let nw = nonWitnessUtxo {
+                // Both are present: verify consistent value and script, do not double-count (R216-P0-02)
+                guard w.amount == nw.amount else { return nil }
+                guard w.script == nw.script else { return nil }
+                inputPrevoutSats[i] = w.amount
+            } else if let w = witnessUtxo {
+                inputPrevoutSats[i] = w.amount
+            } else if let nw = nonWitnessUtxo {
+                inputPrevoutSats[i] = nw.amount
+            } else {
+                return nil // Missing prevout!
             }
         }
 
-        guard foundPrevoutCount == inputs.count else { return nil }
+        // 3. Output maps: exactly baseTx.outputs.count output maps
+        for _ in 0..<outputs.count {
+            var seenOutputKeys = Set<Data>()
+            var outputMapTerminated = false
+            while offset < data.count {
+                guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += kLen
+                if keyLen == 0 {
+                    outputMapTerminated = true
+                    break // This output map ends
+                }
+                guard keyLen <= UInt64(data.count - offset) else { return nil }
+                let keyData = data.subdata(in: offset..<(offset + Int(keyLen)))
+                guard seenOutputKeys.insert(keyData).inserted else { return nil } // Reject duplicate key in output map
+                offset += Int(keyLen)
+                guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += vLen
+                guard valLen <= UInt64(data.count - offset) else { return nil }
+                offset += Int(valLen)
+            }
+            guard outputMapTerminated else { return nil }
+        }
 
+        // 4. Exact byte consumption: fail closed on unparsed trailing bytes (R216-P0-02)
+        guard offset == data.count else { return nil }
+
+        // 5. Total input calculation and fee check
         var totalInputSats: Int64 = 0
         for inVal in inputPrevoutSats {
             guard inVal > 0 else { return nil }
@@ -1493,7 +1559,9 @@ public actor WalletManager {
             outputs: outputs,
             totalInputSats: totalInputSats,
             totalOutputSats: totalOutputSats,
-            calculatedFeeSats: calculatedFeeSats
+            calculatedFeeSats: calculatedFeeSats,
+            skeletonFingerprint: baseTx.skeletonFingerprint,
+            baseTx: baseTx
         )
     }
 
@@ -1503,6 +1571,7 @@ public actor WalletManager {
             return []
         }
         var offset = 5
+        var rawTxData: Data?
         while offset < data.count {
             guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return [] }
             offset += kLen
@@ -1515,11 +1584,15 @@ public actor WalletManager {
             guard valLen <= UInt64(data.count - offset) else { return [] }
             let valData = data.subdata(in: offset..<(offset + Int(valLen)))
             offset += Int(valLen)
-            if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
-                return parseRawTxInputs(valData)
+            if keyType == 0x00 && keyLen == 1 { // PSBT_GLOBAL_UNSIGNED_TX
+                guard rawTxData == nil else { return [] }
+                rawTxData = valData
             }
         }
-        return []
+        guard let raw = rawTxData, let baseTx = RawTransactionDecoder.decodeUnsignedTx(data: raw) else {
+            return []
+        }
+        return baseTx.inputs
     }
 
     public static func extractOutputsFromPsbtBase64(_ base64: String) -> [DecodedRawTransaction.Output] {
@@ -1528,6 +1601,7 @@ public actor WalletManager {
             return []
         }
         var offset = 5
+        var rawTxData: Data?
         while offset < data.count {
             guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return [] }
             offset += kLen
@@ -1537,14 +1611,18 @@ public actor WalletManager {
             offset += Int(keyLen)
             guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return [] }
             offset += vLen
-            guard valLen <= UInt64(data.count - offset) else { return nil ?? [] }
+            guard valLen <= UInt64(data.count - offset) else { return [] }
             let valData = data.subdata(in: offset..<(offset + Int(valLen)))
             offset += Int(valLen)
-            if keyType == 0x00 { // PSBT_GLOBAL_UNSIGNED_TX
-                return parseRawTxOutputs(valData)
+            if keyType == 0x00 && keyLen == 1 { // PSBT_GLOBAL_UNSIGNED_TX
+                guard rawTxData == nil else { return [] }
+                rawTxData = valData
             }
         }
-        return []
+        guard let raw = rawTxData, let baseTx = RawTransactionDecoder.decodeUnsignedTx(data: raw) else {
+            return []
+        }
+        return baseTx.outputs
     }
 
     private static func parseRawTxInputs(_ data: Data) -> [String] {
@@ -1566,7 +1644,10 @@ public actor WalletManager {
             offset += 4
             guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { break }
             offset += sLen
+            // Safe remaining-length guard before subtraction/casting (R216-P0-04)
+            guard data.count - offset >= 4 else { break }
             guard scriptLen <= UInt64(data.count - offset - 4) else { break }
+            guard offset + Int(scriptLen) + 4 <= data.count else { break }
             offset += Int(scriptLen) + 4 // script + sequence
             inputs.append("\(txidHex):\(vout)")
         }
@@ -1574,31 +1655,8 @@ public actor WalletManager {
     }
 
     private static func parseRawTxOutputs(_ data: Data) -> [DecodedRawTransaction.Output] {
-        guard data.count >= 5 else { return [] }
-        var offset = 4 // skip version (4 bytes)
-        if offset + 2 <= data.count && data[offset] == 0x00 && data[offset + 1] != 0x00 {
-            offset += 2
-        }
-        guard offset < data.count else { return [] }
-        guard let (outCount, outVarLen) = parseVarInt(data, at: offset), outCount > 0, outCount <= UInt64(data.count / 9) else { return [] }
-        offset += outVarLen
-        var outputs: [DecodedRawTransaction.Output] = []
-        for _ in 0..<outCount {
-            guard offset + 8 <= data.count else { return [] }
-            var val: UInt64 = 0
-            for i in 0..<8 {
-                val |= UInt64(data[offset + i]) << (i * 8)
-            }
-            offset += 8
-            guard val <= UInt64(Int64.max) && val > 0 else { return [] }
-            guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return [] }
-            offset += sLen
-            guard scriptLen <= UInt64(data.count - offset) else { return [] }
-            let scriptData = data.subdata(in: offset..<(offset + Int(scriptLen)))
-            offset += Int(scriptLen)
-            outputs.append(DecodedRawTransaction.Output(valueSats: Int64(val), scriptPubKey: scriptData))
-        }
-        return outputs
+        guard let decoded = RawTransactionDecoder.decode(data: data) else { return [] }
+        return decoded.outputs
     }
 
     public static func parseVarInt(_ data: Data, at offset: Int) -> (value: UInt64, length: Int)? {

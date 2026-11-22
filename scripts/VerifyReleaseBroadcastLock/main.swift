@@ -932,6 +932,130 @@ struct ReleaseLockVerifier {
         }
         print("✓ Verified: Malformed VarInts, non-canonical encodings, and truncated PSBT/raw transactions fail closed without crash.")
 
+        // 3-r216-A: Genuine BIP-174 Unsigned Tx & Prevout Parsing (1in/2out and 2in/3out) (R216-P0-01)
+        // 1. Positive 1in/2out PSBT parsing
+        guard let p1in2out = WalletManager.parsePsbtDetails(validPsbtBase64) else {
+            fatalError("FAILURE: validPsbtBase64 (1in/2out) failed to parse!")
+        }
+        guard p1in2out.inputs == ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"] else {
+            fatalError("FAILURE: 1in/2out PSBT parsed unexpected inputs: \(p1in2out.inputs)")
+        }
+        guard p1in2out.outputs.count == 2,
+              p1in2out.outputs[0].valueSats == 50_000,
+              p1in2out.outputs[1].valueSats == 949_000 else {
+            fatalError("FAILURE: 1in/2out PSBT parsed unexpected outputs!")
+        }
+        guard p1in2out.totalInputSats == 1_000_000, p1in2out.calculatedFeeSats == 1_000 else {
+            fatalError("FAILURE: 1in/2out PSBT calculated unexpected total inputs / fee!")
+        }
+        print("✓ Verified: 1in/2out genuinely serialized BIP-174 PSBT parsed exact input IDs, recipient/change scripts, sat values, and fee (1,000 sats).")
+
+        // 2. Positive 2in/3out PSBT parsing
+        let psbt2in3out = "cHNidP8BALkCAAAAAhERERERERERERERERERERERERERERERERERERERERERAAAAAAD/////IiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIBAAAAAP////8DMHUAAAAAAAAWABTo3wGMfjJswlP6rH5GzcUeaFQsQkCcAAAAAAAAFgAUOiscTV5veoucDR4vOktcbX6PmgukMgEAAAAAABYAFJmZmZmZmZmZmZmZmZmZmZmZmZmZAAAAAAABAR/4JAEAAAAAABYAFBERERERERERERERERERERERERERAAEBH/gkAQAAAAAAFgAUIiIiIiIiIiIiIiIiIiIiIiIiIiIAAAAA"
+        guard let p2in3out = WalletManager.parsePsbtDetails(psbt2in3out) else {
+            fatalError("FAILURE: 2in/3out PSBT failed to parse!")
+        }
+        guard p2in3out.inputs.count == 2,
+              p2in3out.inputs[0] == "1111111111111111111111111111111111111111111111111111111111111111:0",
+              p2in3out.inputs[1] == "2222222222222222222222222222222222222222222222222222222222222222:1" else {
+            fatalError("FAILURE: 2in/3out PSBT parsed unexpected inputs: \(p2in3out.inputs)")
+        }
+        guard p2in3out.outputs.count == 3,
+              p2in3out.outputs[0].valueSats == 30_000,
+              p2in3out.outputs[1].valueSats == 40_000,
+              p2in3out.outputs[2].valueSats == 78_500 else {
+            fatalError("FAILURE: 2in/3out PSBT parsed unexpected outputs!")
+        }
+        guard p2in3out.totalInputSats == 150_000, p2in3out.totalOutputSats == 148_500, p2in3out.calculatedFeeSats == 1_500 else {
+            fatalError("FAILURE: 2in/3out PSBT calculated unexpected total inputs (got \(p2in3out.totalInputSats), expected 150000) or fee (got \(p2in3out.calculatedFeeSats), expected 1500)!")
+        }
+        print("✓ Verified: 2in/3out genuinely serialized BIP-174 PSBT parsed exact inputs, 3 distinct outputs, total inputs (150,000 sats), and fee (1,500 sats).")
+
+        // 3-r216-B: Prevout Provenance (Non-Witness UTXO and Both-Record Fixtures) (R216-P0-02)
+        // 1. Non-witness UTXO PSBT parsing
+        let psbtNonWitness = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEAUgIAAAABqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAAAAP////8BoIYBAAAAAAAWABQ6KxxNXm96i5wNHi86S1xtfo+aCwAAAAAAAA=="
+        guard let pNonWitness = WalletManager.parsePsbtDetails(psbtNonWitness) else {
+            fatalError("FAILURE: Non-witness UTXO PSBT failed to parse!")
+        }
+        guard pNonWitness.inputs == ["533acd29dfacbd9c5bdc6e443e5ba97de94fed81e2752e510c4b53e52cb0e146:0"],
+              pNonWitness.outputs.count == 1,
+              pNonWitness.outputs[0].valueSats == 95_000,
+              pNonWitness.totalInputSats == 100_000,
+              pNonWitness.calculatedFeeSats == 5_000 else {
+            fatalError("FAILURE: Non-witness UTXO PSBT parsed unexpected details!")
+        }
+        print("✓ Verified: Non-witness UTXO PSBT successfully validated previous tx serialization, computed consensus txid, and verified prevout.")
+
+        // 2. Both UTXO types present for input (BIP-174 permits both) -> validated consistent, no double count
+        let psbtBoth = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEAUgIAAAABqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAAAAP////8BoIYBAAAAAAAWABQ6KxxNXm96i5wNHi86S1xtfo+aCwAAAAABAR+ghgEAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAA="
+        guard let pBoth = WalletManager.parsePsbtDetails(psbtBoth) else {
+            fatalError("FAILURE: Both-UTXO-types PSBT failed to parse!")
+        }
+        guard pBoth.totalInputSats == 100_000, pBoth.calculatedFeeSats == 5_000 else {
+            fatalError("FAILURE: Both-UTXO-types PSBT double counted inputs or computed incorrect fee!")
+        }
+        print("✓ Verified: Both witness and non-witness UTXOs present validated consistent amounts and script, without double-counting.")
+
+        // 3-r216-C: BIP-174 Fail-Closed Regressions (R216-P0-02)
+        // 1. Previous txid mismatch in non-witness UTXO
+        let psbtTxidMismatch = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEAUgIAAAABqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAAAAP////8BoIYBAAAAAAAWABQ6KxxNXm96i5wNHi86S1xtfo+aCwEAAAAAAA=="
+        guard WalletManager.parsePsbtDetails(psbtTxidMismatch) == nil else {
+            fatalError("FAILURE: Non-witness UTXO with mismatched txid was accepted!")
+        }
+
+        // 2. Out of bounds vout in non-witness UTXO
+        let psbtWrongVout = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAQAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEAUgIAAAABqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAAAAP////8BoIYBAAAAAAAWABQ6KxxNXm96i5wNHi86S1xtfo+aCwAAAAAAAA=="
+        guard WalletManager.parsePsbtDetails(psbtWrongVout) == nil else {
+            fatalError("FAILURE: Non-witness UTXO with out-of-bounds vout was accepted!")
+        }
+
+        // 3. Altered witness UTXO length (trailing garbage in value)
+        let psbtAlteredWitnessLen = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEBIKCGAQAAAAAAFgAUOiscTV5veoucDR4vOktcbX6Pmgv/AAA="
+        guard WalletManager.parsePsbtDetails(psbtAlteredWitnessLen) == nil else {
+            fatalError("FAILURE: Witness UTXO with altered serialized length was accepted!")
+        }
+
+        // 4. Contradictory amounts in both UTXO types (witness 99,999 != non-witness 100,000)
+        let psbtContradictoryUtxo = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEAUgIAAAABqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAAAAP////8BoIYBAAAAAAAWABQ6KxxNXm96i5wNHi86S1xtfo+aCwAAAAABAR+fhgEAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAA="
+        guard WalletManager.parsePsbtDetails(psbtContradictoryUtxo) == nil else {
+            fatalError("FAILURE: Contradictory witness and non-witness UTXO amounts were accepted!")
+        }
+
+        // 5. Missing prevout in input map
+        let psbtMissingPrevout = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAAA"
+        guard WalletManager.parsePsbtDetails(psbtMissingPrevout) == nil else {
+            fatalError("FAILURE: PSBT with missing prevout was accepted!")
+        }
+
+        // 6. Duplicate key in input map
+        let psbtDupKey = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEBH6CGAQAAAAAAFgAUOiscTV5veoucDR4vOktcbX6PmgsBAR+ghgEAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAA="
+        guard WalletManager.parsePsbtDetails(psbtDupKey) == nil else {
+            fatalError("FAILURE: PSBT with duplicate key in input map was accepted!")
+        }
+
+        // 7. Duplicate global unsigned tx key
+        let psbtDupGlobal = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAQBSAgAAAAFG4bAs5VNLDFEudeKB7U/pfalbPkRu3FucvazfKc06UwAAAAAA/////wEYcwEAAAAAABYAFOjfAYx+MmzCU/qsfkbNxR5oVCxCAAAAAAABASCghgEAAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oL/wAA"
+        guard WalletManager.parsePsbtDetails(psbtDupGlobal) == nil else {
+            fatalError("FAILURE: PSBT with duplicate global unsigned tx key was accepted!")
+        }
+
+        // 8. Trailing unparsed bytes after output maps
+        let psbtTrailingBytes = "cHNidP8BAFICAAAAAUbhsCzlU0sMUS514oHtT+l9qVs+RG7cW5y9rN8pzTpTAAAAAAD/////ARhzAQAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIAAAAAAAEAUgIAAAABqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqoAAAAAAP////8BoIYBAAAAAAAWABQ6KxxNXm96i5wNHi86S1xtfo+aCwAAAAAAAO4="
+        guard WalletManager.parsePsbtDetails(psbtTrailingBytes) == nil else {
+            fatalError("FAILURE: PSBT with unparsed trailing bytes was accepted!")
+        }
+        print("✓ Verified: BIP-174 fail-closed negative regressions (txid mismatch, wrong vout, altered witness len, contradictory UTXOs, missing prevout, duplicate keys, trailing bytes) all fail closed.")
+
+        // 3-r216-D: Truncated Sequence Byte Safety (R216-P0-04 Swift Trap Fix)
+        let truncatedSeqData = Data([0x02, 0x00, 0x00, 0x00, 0x01] + [UInt8](repeating: 0xaa, count: 32) + [0x00, 0x00, 0x00, 0x00, 0x00, 0xff])
+        guard RawTransactionDecoder.decode(data: truncatedSeqData) == nil else {
+            fatalError("FAILURE: Truncated sequence data decoded without failing closed!")
+        }
+        guard RawTransactionDecoder.decodeUnsignedTx(data: truncatedSeqData) == nil else {
+            fatalError("FAILURE: Truncated sequence data decoded as unsigned tx!")
+        }
+        print("✓ Verified: Truncated sequence bytes in raw transaction decoder fail closed without Swift runtime traps.")
+
         // 3a. Forged token SpendAuthorization rejected at transport (P0-1)
         let forgedAuth = SpendAuthorization(
             walletName: walletName,
@@ -1014,7 +1138,9 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: SpendAuthorization method mismatch threw unexpected error: \(error)")
         }
 
-        // 3c. Direct RPC SpendAuthorization Enforcement: Positive and Single-Use Replay (P0-1 & P0-2)
+        // 3c. Direct RPC SpendAuthorization Retirement: Fail-Closed Even With Valid Token (R216-P0-03)
+        // Direct sendtoaddress is retired at lowest-level transport. Only exact funded PSBT pipeline is permitted.
+        let directSendCountBefore = BroadcastLockSpyURLProtocol.sendToAddressCount
         let directPreview = FundedTxPreview(
             id: UUID(),
             destinationAddress: validDestination,
@@ -1039,7 +1165,7 @@ struct ReleaseLockVerifier {
             capability: capability,
             action: "send",
             target: validDestination,
-            reason: "Positive direct send verification",
+            reason: "Direct send retirement verification",
             txContext: directContext
         )
         let validSpendAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
@@ -1051,17 +1177,28 @@ struct ReleaseLockVerifier {
         )
 
         do {
-            let res: String = try await client.sendToAddress(
+            let _: String = try await client.sendToAddress(
                 address: validDestination,
                 amount: SatoshiMath.toBTC(sats: 25_000),
                 feeRateSatPerVB: 2,
                 walletName: walletName,
                 authorization: validSpendAuth
             )
-            print("✓ Verified: Direct sendToAddress with genuine coordinator-issued SpendAuthorization succeeded (txid: \(res)).")
+            fatalError("FAILURE: Direct sendToAddress with genuine token did NOT fail closed!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Direct sendToAddress with genuine HMAC token failed closed at transport with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Direct sendToAddress threw unexpected RPCClientError: \(err)")
+            }
         } catch {
-            fatalError("FAILURE: Direct sendToAddress with valid SpendAuthorization failed: \(error)")
+            fatalError("FAILURE: Direct sendToAddress threw unexpected error: \(error)")
         }
+
+        guard BroadcastLockSpyURLProtocol.sendToAddressCount == directSendCountBefore else {
+            fatalError("FAILURE: Direct sendToAddress attempt caused outbound transport egress! Expected \(directSendCountBefore), got \(BroadcastLockSpyURLProtocol.sendToAddressCount)")
+        }
+        print("✓ Verified: Zero outbound egress on direct sendToAddress attempt (sendToAddressCount == \(directSendCountBefore)).")
 
         // 3d. Replay of the exact same SpendAuthorization must fail closed (0 egress)
         do {

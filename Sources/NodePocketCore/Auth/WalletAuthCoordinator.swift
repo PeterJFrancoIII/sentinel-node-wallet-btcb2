@@ -513,12 +513,38 @@ public actor WalletAuthCoordinator {
     private let customAuthKeychainHelper: KeychainHelper?
     private let deviceOwnerChallenger: DeviceOwnerChallenger
     private let spendSigningKey: SymmetricKey = SymmetricKey(size: .bits256)
+    private let continuityTracker = ContinuityStateTracker()
+
+    final class ContinuityStateTracker: @unchecked Sendable {
+        private let lock = NSLock()
+        private var skeletons: [String: String] = [:]
+
+        func recordSkeleton(_ skeleton: String, for tokenKey: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            skeletons[tokenKey] = skeleton
+        }
+
+        func getSkeleton(for tokenKey: String) -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return skeletons[tokenKey]
+        }
+
+        func removeSkeleton(for tokenKey: String) {
+            lock.lock()
+            defer { lock.unlock() }
+            skeletons.removeValue(forKey: tokenKey)
+        }
+    }
 
     public struct CoordinatorSpendAuthVerifier: SpendAuthorizationVerifier, Sendable {
         private let signingKey: SymmetricKey
+        private let continuityTracker: ContinuityStateTracker
 
-        fileprivate init(signingKey: SymmetricKey) {
+        fileprivate init(signingKey: SymmetricKey, continuityTracker: ContinuityStateTracker = ContinuityStateTracker()) {
             self.signingKey = signingKey
+            self.continuityTracker = continuityTracker
         }
 
         public func verify(
@@ -540,6 +566,11 @@ public actor WalletAuthCoordinator {
             let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let normalizedAuthMethod = auth.authorizedMethod.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
+            // R216-P0-03: At transport, fail-closed ALL production direct sendtoaddress even with valid HMAC token
+            if normalizedMethod == "sendtoaddress" || normalizedAuthMethod == "sendtoaddress" {
+                return false
+            }
+
             // 4. Wallet binding: walletName must be non-nil, non-empty, and match auth.walletName
             guard let wName = walletName, !wName.isEmpty, wName == auth.walletName else { return false }
 
@@ -551,23 +582,44 @@ public actor WalletAuthCoordinator {
 
             // 7. Method-specific parameter checks
             if normalizedAuthMethod == "sendrawtransaction" {
+                let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
+
                 if normalizedMethod == "walletprocesspsbt" {
                     guard let psbtStr = params.first as? String, !psbtStr.isEmpty else { return false }
                     if !auth.fundedPsbtDigest.isEmpty {
                         let digest = SHA256.hash(data: Data(psbtStr.utf8)).map { String(format: "%02x", $0) }.joined()
                         guard digest == auth.fundedPsbtDigest else { return false }
                     }
-                    let inputs = WalletManager.extractInputsFromPsbtBase64(psbtStr)
-                    guard !inputs.isEmpty else { return false }
-                    guard inputs.sorted().joined(separator: ",") == auth.utxoFingerprint else { return false }
+                    guard let details = WalletManager.parsePsbtDetails(psbtStr) else { return false }
+                    guard details.inputs.sorted().joined(separator: ",") == auth.utxoFingerprint else { return false }
+                    if !auth.expectedOutputFingerprint.isEmpty {
+                        let actualOutFp = details.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
+                        guard actualOutFp == auth.expectedOutputFingerprint else { return false }
+                    }
+                    guard let targetOut = details.outputs.first(where: { $0.matches(address: auth.destinationAddress) }) else { return false }
+                    guard targetOut.valueSats == auth.amountSats, targetOut.valueSats > 0 else { return false }
+                    guard details.calculatedFeeSats > 0 && details.calculatedFeeSats <= auth.maxFeeSats else { return false }
+
+                    // Record original immutable unsigned base tx skeleton (R216-P0-04)
+                    continuityTracker.recordSkeleton(details.skeletonFingerprint, for: tokenKey)
                     return true
                 }
 
                 if normalizedMethod == "finalizepsbt" {
                     guard let psbtStr = params.first as? String, !psbtStr.isEmpty else { return false }
-                    let inputs = WalletManager.extractInputsFromPsbtBase64(psbtStr)
-                    guard !inputs.isEmpty else { return false }
-                    guard inputs.sorted().joined(separator: ",") == auth.utxoFingerprint else { return false }
+                    guard let details = WalletManager.parsePsbtDetails(psbtStr) else { return false }
+                    guard details.inputs.sorted().joined(separator: ",") == auth.utxoFingerprint else { return false }
+                    if !auth.expectedOutputFingerprint.isEmpty {
+                        let actualOutFp = details.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
+                        guard actualOutFp == auth.expectedOutputFingerprint else { return false }
+                    }
+                    guard let targetOut = details.outputs.first(where: { $0.matches(address: auth.destinationAddress) }) else { return false }
+                    guard targetOut.valueSats == auth.amountSats, targetOut.valueSats > 0 else { return false }
+                    guard details.calculatedFeeSats > 0 && details.calculatedFeeSats <= auth.maxFeeSats else { return false }
+
+                    // Assert transaction skeleton continuity against walletprocesspsbt stage (R216-P0-04)
+                    guard let expectedSkeleton = continuityTracker.getSkeleton(for: tokenKey) else { return false }
+                    guard details.skeletonFingerprint == expectedSkeleton else { return false }
                     return true
                 }
 
@@ -607,59 +659,13 @@ public actor WalletAuthCoordinator {
                 let actualFeeSats = auth.totalInputSats - sumOutputs
                 guard actualFeeSats > 0 && actualFeeSats <= auth.maxFeeSats else { return false }
 
-                return true
-            } else if normalizedAuthMethod == "sendtoaddress" && normalizedMethod == "sendtoaddress" {
-                // Strict arity requirement: must have at least 12 parameters to include explicit fee_rate, maxFeeSats, and utxoFingerprint
-                guard params.count >= 12 else { return false }
-
-                // Destination address match
-                guard let dest = params[0] as? String, dest.lowercased() == auth.destinationAddress.lowercased() else {
-                    return false
-                }
-
-                // Amount match
-                let paramAmountSats: Int64
-                if let amtDouble = params[1] as? Double {
-                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
-                } else if let amtStr = params[1] as? String, let amtDouble = Double(amtStr) {
-                    paramAmountSats = SatoshiMath.toSats(btc: amtDouble)
-                } else {
-                    return false
-                }
-                guard paramAmountSats == auth.amountSats, paramAmountSats > 0 else { return false }
-
-                // Fee rate verification: params[9] must be non-null and strictly match auth.satPerVB
-                guard !(params[9] is NSNull) else { return false }
-                let feeRateVal: Int
-                if let rateInt = params[9] as? Int {
-                    feeRateVal = rateInt
-                } else if let rateDouble = params[9] as? Double {
-                    feeRateVal = Int(rateDouble)
-                } else {
-                    return false
-                }
-                guard feeRateVal == auth.satPerVB, feeRateVal > 0 else { return false }
-
-                // Max fee cap verification: params[10] must not exceed auth.maxFeeSats
-                guard !(params[10] is NSNull) else { return false }
-                let actualFeeSats: Int64
-                if let feeInt64 = params[10] as? Int64 {
-                    actualFeeSats = feeInt64
-                } else if let feeInt = params[10] as? Int {
-                    actualFeeSats = Int64(feeInt)
-                } else {
-                    return false
-                }
-                guard actualFeeSats <= auth.maxFeeSats, actualFeeSats >= 0 else { return false }
-
-                // UTXO fingerprint verification: params[11] must be non-empty and strictly match auth.utxoFingerprint
-                guard let actualUtxo = params[11] as? String, !actualUtxo.isEmpty, actualUtxo == auth.utxoFingerprint else {
-                    return false
-                }
+                // Assert transaction skeleton continuity against signing stage (R216-P0-04)
+                guard let expectedSkeleton = continuityTracker.getSkeleton(for: tokenKey) else { return false }
+                guard decoded.skeletonFingerprint == expectedSkeleton else { return false }
 
                 return true
             } else {
-                // Default-deny all other 11 restricted methods unless explicitly handled
+                // Default-deny all other restricted methods
                 return false
             }
         }
@@ -675,7 +681,7 @@ public actor WalletAuthCoordinator {
     }
 
     public nonisolated var spendAuthorizationVerifier: any SpendAuthorizationVerifier {
-        CoordinatorSpendAuthVerifier(signingKey: self.spendSigningKey)
+        CoordinatorSpendAuthVerifier(signingKey: self.spendSigningKey, continuityTracker: self.continuityTracker)
     }
 
     public init(
@@ -1590,7 +1596,7 @@ public actor WalletAuthCoordinator {
         _ approval: HighRiskApproval,
         action: String,
         target: String,
-        authorizedMethod: String = "sendtoaddress",
+        authorizedMethod: String = "sendrawtransaction",
         expectedTxContext: TransactionSpendContext,
         fundedPsbtDigest: String = "",
         totalInputSats: Int64 = 0,
@@ -2633,6 +2639,24 @@ public actor WalletAuthCoordinator {
 }
 
 public struct DecodedRawTransaction: Sendable {
+    public struct InputRecord: Sendable, Equatable {
+        public let txidHex: String
+        public let vout: UInt32
+        public let sequence: UInt32
+        public let scriptSig: Data
+
+        public init(txidHex: String, vout: UInt32, sequence: UInt32, scriptSig: Data = Data()) {
+            self.txidHex = txidHex
+            self.vout = vout
+            self.sequence = sequence
+            self.scriptSig = scriptSig
+        }
+
+        public var identifier: String {
+            "\(txidHex):\(vout)"
+        }
+    }
+
     public struct Output: Sendable, Equatable {
         public let valueSats: Int64
         public let scriptPubKey: Data
@@ -2650,20 +2674,51 @@ public struct DecodedRawTransaction: Sendable {
         }
     }
 
+    public let version: UInt32
     public let inputs: [String]
+    public let inputRecords: [InputRecord]
     public let outputs: [Output]
     public let locktime: UInt32
 
-    public init(inputs: [String], outputs: [Output], locktime: UInt32 = 0) {
+    public init(
+        version: UInt32 = 2,
+        inputs: [String],
+        outputs: [Output],
+        locktime: UInt32 = 0,
+        inputRecords: [InputRecord] = []
+    ) {
+        self.version = version
         self.inputs = inputs
         self.outputs = outputs
         self.locktime = locktime
+        if !inputRecords.isEmpty {
+            self.inputRecords = inputRecords
+        } else {
+            self.inputRecords = inputs.map { inp in
+                let parts = inp.split(separator: ":")
+                let txid = parts.first.map(String.init) ?? ""
+                let vout = parts.count > 1 ? (UInt32(parts[1]) ?? 0) : 0
+                return InputRecord(txidHex: txid, vout: vout, sequence: 0xffffffff)
+            }
+        }
+    }
+
+    public var skeletonFingerprint: String {
+        let inStr = inputRecords.map { "\($0.txidHex):\($0.vout):\($0.sequence)" }.joined(separator: ",")
+        let outStr = outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
+        return "v:\(version);in:\(inStr);out:\(outStr);lt:\(locktime)"
     }
 }
 
 public enum RawTransactionDecoder {
     public static func decode(hex: String) -> DecodedRawTransaction? {
-        guard let data = Data(hexString: hex), data.count >= 10 else { return nil }
+        guard let data = Data(hexString: hex) else { return nil }
+        return decode(data: data)
+    }
+
+    public static func decode(data: Data) -> DecodedRawTransaction? {
+        guard data.count >= 10 else { return nil }
+        let version = UInt32(data[0]) | (UInt32(data[1]) << 8) | (UInt32(data[2]) << 16) | (UInt32(data[3]) << 24)
         var offset = 4 // version (4 bytes)
         var isSegWit = false
         // Check segwit marker (0x00) and flag (0x01)
@@ -2675,6 +2730,7 @@ public enum RawTransactionDecoder {
         guard let (inCount, vLen1) = parseVarInt(data, at: offset), inCount > 0, inCount <= UInt64(data.count / 41) else { return nil }
         offset += vLen1
         var inputs: [String] = []
+        var inputRecords: [DecodedRawTransaction.InputRecord] = []
         for _ in 0..<inCount {
             guard offset + 36 <= data.count else { return nil }
             let txidBytes = data.subdata(in: offset..<(offset + 32))
@@ -2684,9 +2740,16 @@ public enum RawTransactionDecoder {
             offset += 4
             guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return nil }
             offset += sLen
+            // Safe remaining-length guard before subtraction/casting (R216-P0-04)
+            guard data.count - offset >= 4 else { return nil }
             guard scriptLen <= UInt64(data.count - offset - 4) else { return nil }
-            offset += Int(scriptLen) + 4 // scriptSig + 4 bytes sequence
+            guard offset + Int(scriptLen) + 4 <= data.count else { return nil }
+            let scriptSig = data.subdata(in: offset..<(offset + Int(scriptLen)))
+            offset += Int(scriptLen)
+            let sequence = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
             inputs.append("\(txidHex):\(vout)")
+            inputRecords.append(DecodedRawTransaction.InputRecord(txidHex: txidHex, vout: vout, sequence: sequence, scriptSig: scriptSig))
         }
         guard offset < data.count else { return nil }
         guard let (outCount, vLen2) = parseVarInt(data, at: offset), outCount > 0, outCount <= UInt64(data.count / 9) else { return nil }
@@ -2729,7 +2792,131 @@ public enum RawTransactionDecoder {
         // Canonical complete consumption: fail closed on any trailing unparsed bytes
         guard offset == data.count else { return nil }
 
-        return DecodedRawTransaction(inputs: inputs, outputs: outputs, locktime: locktime)
+        return DecodedRawTransaction(version: version, inputs: inputs, outputs: outputs, locktime: locktime, inputRecords: inputRecords)
+    }
+
+    public static func decodeUnsignedTx(data: Data) -> DecodedRawTransaction? {
+        // BIP-174: Unsigned tx is serialized in legacy format (no segwit marker/flag, empty scriptSigs)
+        guard data.count >= 10 else { return nil }
+        guard !(data.count >= 6 && data[4] == 0x00 && data[5] != 0x00) else { return nil }
+        let version = UInt32(data[0]) | (UInt32(data[1]) << 8) | (UInt32(data[2]) << 16) | (UInt32(data[3]) << 24)
+        var offset = 4
+        guard let (inCount, vLen1) = parseVarInt(data, at: offset), inCount > 0, inCount <= UInt64(data.count / 41) else { return nil }
+        offset += vLen1
+        var inputs: [String] = []
+        var inputRecords: [DecodedRawTransaction.InputRecord] = []
+        for _ in 0..<inCount {
+            guard offset + 36 <= data.count else { return nil }
+            let txidBytes = data.subdata(in: offset..<(offset + 32))
+            let txidHex = txidBytes.reversed().map { String(format: "%02x", $0) }.joined()
+            offset += 32
+            let vout = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return nil }
+            offset += sLen
+            // BIP-174 requirement: scriptSig in unsigned tx MUST be empty (length 0)
+            guard scriptLen == 0 else { return nil }
+            guard offset + 4 <= data.count else { return nil }
+            let sequence = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            inputs.append("\(txidHex):\(vout)")
+            inputRecords.append(DecodedRawTransaction.InputRecord(txidHex: txidHex, vout: vout, sequence: sequence, scriptSig: Data()))
+        }
+        guard offset < data.count else { return nil }
+        guard let (outCount, vLen2) = parseVarInt(data, at: offset), outCount > 0, outCount <= UInt64(data.count / 9) else { return nil }
+        offset += vLen2
+        var outputs: [DecodedRawTransaction.Output] = []
+        for _ in 0..<outCount {
+            guard offset + 8 <= data.count else { return nil }
+            var val: UInt64 = 0
+            for i in 0..<8 {
+                val |= UInt64(data[offset + i]) << (i * 8)
+            }
+            offset += 8
+            guard val <= UInt64(Int64.max) && val > 0 else { return nil }
+            guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { return nil }
+            offset += sLen
+            guard scriptLen <= UInt64(data.count - offset) else { return nil }
+            let scriptData = data.subdata(in: offset..<(offset + Int(scriptLen)))
+            offset += Int(scriptLen)
+            outputs.append(DecodedRawTransaction.Output(valueSats: Int64(val), scriptPubKey: scriptData))
+        }
+
+        guard offset + 4 <= data.count else { return nil }
+        let locktime = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+        offset += 4
+
+        // Byte exhaustion
+        guard offset == data.count else { return nil }
+
+        return DecodedRawTransaction(version: version, inputs: inputs, outputs: outputs, locktime: locktime, inputRecords: inputRecords)
+    }
+
+    public static func computeTxid(for data: Data) -> String? {
+        guard data.count >= 10 else { return nil }
+        let isSegWit = data.count >= 6 && data[4] == 0x00 && data[5] != 0x00
+        let legacyData: Data
+        if !isSegWit {
+            guard let _ = decode(data: data) else { return nil }
+            legacyData = data
+        } else {
+            var offset = 4 // skip version
+            offset += 2 // skip marker & flag
+            let inputsStart = offset
+            guard let (inCount, vLen1) = parseVarInt(data, at: offset), inCount > 0, inCount <= UInt64(data.count / 41) else { return nil }
+            offset += vLen1
+            for _ in 0..<inCount {
+                guard offset + 36 <= data.count else { return nil }
+                offset += 36 // txid + vout
+                guard let (sLen, sVarLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += sVarLen
+                guard data.count - offset >= 4, sLen <= UInt64(data.count - offset - 4) else { return nil }
+                offset += Int(sLen) + 4 // scriptSig + sequence
+            }
+            let inputsEnd = offset
+            let outputsStart = offset
+            guard let (outCount, vLen2) = parseVarInt(data, at: offset), outCount > 0, outCount <= UInt64(data.count / 9) else { return nil }
+            offset += vLen2
+            for _ in 0..<outCount {
+                guard offset + 8 <= data.count else { return nil }
+                offset += 8
+                guard let (spkLen, spkVarLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += spkVarLen
+                guard spkLen <= UInt64(data.count - offset) else { return nil }
+                offset += Int(spkLen)
+            }
+            let outputsEnd = offset
+
+            // Witness
+            for _ in 0..<inCount {
+                guard let (itemCount, itemVarLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += itemVarLen
+                guard itemCount <= UInt64(data.count - offset) else { return nil }
+                for _ in 0..<itemCount {
+                    guard let (itemLen, iVarLen) = parseVarInt(data, at: offset) else { return nil }
+                    offset += iVarLen
+                    guard itemLen <= UInt64(data.count - offset) else { return nil }
+                    offset += Int(itemLen)
+                }
+            }
+
+            // Locktime
+            guard offset + 4 <= data.count else { return nil }
+            let locktimeData = data.subdata(in: offset..<(offset + 4))
+            offset += 4
+            guard offset == data.count else { return nil }
+
+            var reconstructed = Data()
+            reconstructed.append(data.subdata(in: 0..<4)) // version
+            reconstructed.append(data.subdata(in: inputsStart..<inputsEnd)) // inputs
+            reconstructed.append(data.subdata(in: outputsStart..<outputsEnd)) // outputs
+            reconstructed.append(locktimeData) // locktime
+            legacyData = reconstructed
+        }
+
+        let firstHash = SHA256.hash(data: legacyData)
+        let doubleHash = SHA256.hash(data: Data(firstHash))
+        return Data(doubleHash).reversed().map { String(format: "%02x", $0) }.joined()
     }
 
     public static func decodeScriptPubKey(for address: String) -> Data? {

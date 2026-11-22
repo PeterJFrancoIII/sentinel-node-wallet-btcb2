@@ -91,7 +91,7 @@ public struct SpendAuthorization: Sendable, Equatable {
         approvalId: UUID = UUID(),
         sessionId: UUID = UUID(),
         walletName: String,
-        authorizedMethod: String = "sendtoaddress",
+        authorizedMethod: String = "sendrawtransaction",
         destinationAddress: String,
         amountSats: Int64,
         maxFeeSats: Int64,
