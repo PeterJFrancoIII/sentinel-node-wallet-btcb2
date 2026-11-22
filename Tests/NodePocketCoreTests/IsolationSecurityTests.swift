@@ -414,4 +414,43 @@ final class IsolationSecurityTests: XCTestCase {
             }
         }
     }
+
+    func testSendRawTransactionWithoutAuthorizationFailsClosed() async throws {
+        let rpc = BitcoinRPCClient(user: "test", password: "test", isBroadcastRestricted: false)
+        let rawHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        do {
+            _ = try await rpc.sendRawTransaction(hex: rawHex, walletName: "vault1")
+            XCTFail("sendRawTransaction without authorization must fail closed")
+        } catch let err as RPCClientError {
+            guard case .transactionBroadcastDisabled = err else {
+                XCTFail("Expected transactionBroadcastDisabled, got \(err)")
+                return
+            }
+        }
+    }
+
+    func testSendRawTransactionUtxoMismatchFailsClosed() async throws {
+        let (coord, validAuth) = try await createCoordinatorAndSpendAuth(
+            authorizedMethod: "sendrawtransaction",
+            destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            walletName: "vault1",
+            utxoFingerprint: "different_utxo:0" // Mismatch against raw tx inputs!
+        )
+        let rpc = BitcoinRPCClient(user: "test", password: "test", isBroadcastRestricted: false)
+        try rpc.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+
+        let rawHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        do {
+            _ = try await rpc.sendRawTransaction(hex: rawHex, walletName: "vault1", authorization: validAuth)
+            XCTFail("sendRawTransaction with UTXO fingerprint mismatch must fail closed")
+        } catch let err as RPCClientError {
+            guard case .transactionBroadcastDisabled = err else {
+                XCTFail("Expected transactionBroadcastDisabled, got \(err)")
+                return
+            }
+        }
+    }
 }

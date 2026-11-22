@@ -2353,6 +2353,96 @@ final class WalletAuthCoordinatorTests: XCTestCase {
             "SpendAuthorization method mismatch must fail verification"
         )
     }
+
+    func testSpendAuthorizationVerifierValidatesRawTransactionHex() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("auth_coord_raw_tx_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let coordinator = WalletAuthCoordinator(dataDirectory: tempDir)
+        await coordinator.setMockDeviceOwnerSuccessForTesting(true)
+
+        let (secret, _, codes) = try await coordinator.generateEnrollmentSecret(username: "operator_raw_tx")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coordinator.enroll(
+            username: "operator_raw_tx",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let dest = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        let previewId = UUID()
+        let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
+        let txContext = TransactionSpendContext(
+            walletName: "vault_raw",
+            destinationAddress: dest,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: previewId,
+            utxoFingerprint: expectedInput,
+            chain: "main",
+            nonce: "nonce_raw_test"
+        )
+
+        let approval = try await coordinator.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: dest,
+            reason: "Approve raw tx spend",
+            txContext: txContext
+        )
+
+        let spendAuth = try await coordinator.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            approval,
+            action: "send",
+            target: dest,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: txContext
+        )
+
+        // Intermediate steps are permitted
+        XCTAssertTrue(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuth,
+            method: "walletprocesspsbt",
+            params: ["mock_psbt"],
+            walletName: "vault_raw"
+        ))
+        XCTAssertTrue(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuth,
+            method: "finalizepsbt",
+            params: ["mock_psbt"],
+            walletName: "vault_raw"
+        ))
+
+        // Valid raw transaction hex matches inputs and recipient output
+        let validRawHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        XCTAssertTrue(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuth,
+            method: "sendrawtransaction",
+            params: [validRawHex],
+            walletName: "vault_raw"
+        ))
+
+        // Negative: malformed hex fails
+        XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuth,
+            method: "sendrawtransaction",
+            params: ["not_a_hex_tx"],
+            walletName: "vault_raw"
+        ))
+
+        // Negative: wallet mismatch fails
+        XCTAssertFalse(coordinator.spendAuthorizationVerifier.verify(
+            authorization: spendAuth,
+            method: "sendrawtransaction",
+            params: [validRawHex],
+            walletName: "wrong_vault"
+        ))
+    }
 }
 
 final class MockBackupURLProtocol: URLProtocol {

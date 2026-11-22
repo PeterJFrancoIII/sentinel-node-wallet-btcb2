@@ -36,6 +36,28 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     }
 }
 
+public struct ProcessedPsbtResponse: Codable, Sendable {
+    public let psbt: String
+    public let complete: Bool
+
+    public init(psbt: String, complete: Bool) {
+        self.psbt = psbt
+        self.complete = complete
+    }
+}
+
+public struct FinalizedPsbtResponse: Codable, Sendable {
+    public let psbt: String?
+    public let hex: String?
+    public let complete: Bool
+
+    public init(psbt: String? = nil, hex: String? = nil, complete: Bool) {
+        self.psbt = psbt
+        self.hex = hex
+        self.complete = complete
+    }
+}
+
 public protocol SpendAuthorizationVerifier: Sendable {
     func verify(
         authorization: SpendAuthorization,
@@ -240,9 +262,12 @@ public final class BitcoinRPCClient: @unchecked Sendable {
                 throw RPCClientError.transactionBroadcastDisabled
             }
 
-            let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
-            guard recordAndVerifyToken(tokenKey: tokenKey) else {
-                throw RPCClientError.transactionBroadcastDisabled
+            let isIntermediate = auth.authorizedMethod.lowercased() == "sendrawtransaction" && (normalizedMethod == "walletprocesspsbt" || normalizedMethod == "finalizepsbt")
+            if !isIntermediate {
+                let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
+                guard recordAndVerifyToken(tokenKey: tokenKey) else {
+                    throw RPCClientError.transactionBroadcastDisabled
+                }
             }
         }
         guard let url = getEndpointURL(walletName: walletName) else {
@@ -446,6 +471,52 @@ public final class BitcoinRPCClient: @unchecked Sendable {
             params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate, effectiveMaxFee, effectiveUtxo]
         }
         return try await call(method: "sendtoaddress", params: params, walletName: walletName, authorization: authorization)
+    }
+
+    public func walletProcessPsbt(
+        psbt: String,
+        sign: Bool = true,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> ProcessedPsbtResponse {
+        return try await call(
+            method: "walletprocesspsbt",
+            params: [psbt, sign],
+            walletName: walletName,
+            authorization: authorization
+        )
+    }
+
+    public func finalizePsbt(
+        psbt: String,
+        extract: Bool = true,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> FinalizedPsbtResponse {
+        return try await call(
+            method: "finalizepsbt",
+            params: [psbt, extract],
+            walletName: walletName,
+            authorization: authorization
+        )
+    }
+
+    public func sendRawTransaction(
+        hex: String,
+        maxFeeRate: Double? = nil,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> String {
+        var params: [Any] = [hex]
+        if let maxRate = maxFeeRate {
+            params.append(maxRate)
+        }
+        return try await call(
+            method: "sendrawtransaction",
+            params: params,
+            walletName: walletName,
+            authorization: authorization
+        )
     }
 
     public func walletCreateFundedPsbt(

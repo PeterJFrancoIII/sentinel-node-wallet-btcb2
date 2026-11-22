@@ -185,13 +185,14 @@ final class WalletIntegrationTests: XCTestCase {
             initialWalletName: "test_vault"
         )
         try await manager.walletInventory.setOwner(for: "test_vault", owner: "operator_dual")
+        let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
         let preview = FundedTxPreview(
             destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
-            amountSats: 10_000,
-            feeSats: 500,
-            satPerVB: 2,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
             estimatedVSize: 140,
-            selectedInputs: ["dummy_input:0"]
+            selectedInputs: [expectedInput]
         )
 
         let txContext = TransactionSpendContext(
@@ -201,7 +202,7 @@ final class WalletIntegrationTests: XCTestCase {
             maxFeeSats: preview.feeSats,
             satPerVB: preview.satPerVB,
             previewId: preview.id,
-            utxoFingerprint: "dummy_input:0",
+            utxoFingerprint: expectedInput,
             chain: "main",
             nonce: preview.id.uuidString
         )
@@ -212,6 +213,15 @@ final class WalletIntegrationTests: XCTestCase {
             target: preview.destinationAddress,
             reason: "Dual failure test send",
             txContext: txContext
+        )
+
+        await manager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=",
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs
         )
 
         DualFailureRPCURLProtocol.sendToAddressShouldFail = true
@@ -281,13 +291,14 @@ final class WalletIntegrationTests: XCTestCase {
             initialWalletName: "test_vault"
         )
         try await manager.walletInventory.setOwner(for: "test_vault", owner: "operator_relock")
+        let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
         let preview = FundedTxPreview(
             destinationAddress: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq",
-            amountSats: 10_000,
-            feeSats: 500,
-            satPerVB: 2,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
             estimatedVSize: 140,
-            selectedInputs: ["dummy_input:0"]
+            selectedInputs: [expectedInput]
         )
 
         let txContext = TransactionSpendContext(
@@ -297,7 +308,7 @@ final class WalletIntegrationTests: XCTestCase {
             maxFeeSats: preview.feeSats,
             satPerVB: preview.satPerVB,
             previewId: preview.id,
-            utxoFingerprint: "dummy_input:0",
+            utxoFingerprint: expectedInput,
             chain: "main",
             nonce: preview.id.uuidString
         )
@@ -308,6 +319,15 @@ final class WalletIntegrationTests: XCTestCase {
             target: preview.destinationAddress,
             reason: "Relock failure test send",
             txContext: txContext
+        )
+
+        await manager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=",
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs
         )
 
         DualFailureRPCURLProtocol.sendToAddressShouldFail = false
@@ -476,12 +496,16 @@ private final class DualFailureRPCURLProtocol: URLProtocol {
             } else {
                 responsePayload = ["id": "1", "result": NSNull(), "error": NSNull()]
             }
-        case "sendtoaddress":
+        case "sendtoaddress", "sendrawtransaction":
             if DualFailureRPCURLProtocol.sendToAddressShouldFail {
                 responsePayload = ["id": "1", "result": NSNull(), "error": ["code": -4, "message": "Broadcast failed in node pool"]]
             } else {
                 responsePayload = ["id": "1", "result": "synthetic_txid_1234567890abcdef", "error": NSNull()]
             }
+        case "walletprocesspsbt":
+            responsePayload = ["id": "1", "result": ["psbt": "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=", "complete": true], "error": NSNull()]
+        case "finalizepsbt":
+            responsePayload = ["id": "1", "result": ["hex": "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000", "complete": true], "error": NSNull()]
         case "walletlock":
             if DualFailureRPCURLProtocol.walletLockShouldFail {
                 responsePayload = ["id": "1", "result": NSNull(), "error": ["code": -1, "message": "Wallet lock failed I/O"]]

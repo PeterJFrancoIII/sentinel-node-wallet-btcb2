@@ -5,11 +5,17 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
     static var outboundRequestCount: Int = 0
     static var interceptedRequests: [URLRequest] = []
     static var sendToAddressCount: Int = 0
+    static var sendRawTransactionCount: Int = 0
+    static var walletProcessPsbtCount: Int = 0
+    static var finalizePsbtCount: Int = 0
 
     static func reset() {
         outboundRequestCount = 0
         interceptedRequests = []
         sendToAddressCount = 0
+        sendRawTransactionCount = 0
+        walletProcessPsbtCount = 0
+        finalizePsbtCount = 0
     }
 
     override class func canInit(with request: URLRequest) -> Bool {
@@ -45,7 +51,26 @@ final class BroadcastLockSpyURLProtocol: URLProtocol {
         let bodyString = bodyData.flatMap { String(data: $0, encoding: .utf8) } ?? ""
 
         let responseData: Data
-        if bodyString.contains("\"sendtoaddress\"") {
+        if bodyString.contains("\"sendrawtransaction\"") {
+            Self.sendRawTransactionCount += 1
+            responseData = """
+            {"result":"synthetic_txid_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","error":null,"id":"1"}
+            """.data(using: .utf8)!
+        } else if bodyString.contains("\"walletprocesspsbt\"") {
+            Self.walletProcessPsbtCount += 1
+            responseData = """
+            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=","complete":true},"error":null,"id":"1"}
+            """.data(using: .utf8)!
+        } else if bodyString.contains("\"finalizepsbt\"") {
+            Self.finalizePsbtCount += 1
+            responseData = """
+            {"result":{"hex":"02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000","complete":true},"error":null,"id":"1"}
+            """.data(using: .utf8)!
+        } else if bodyString.contains("\"walletcreatefundedpsbt\"") {
+            responseData = """
+            {"result":{"psbt":"cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA=","fee":0.00001,"changepos":1},"error":null,"id":"1"}
+            """.data(using: .utf8)!
+        } else if bodyString.contains("\"sendtoaddress\"") {
             Self.sendToAddressCount += 1
             responseData = """
             {"result":"synthetic_txid_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","error":null,"id":"1"}
@@ -287,7 +312,16 @@ struct ReleaseLockVerifier {
             txContext: txContext
         )
 
-        let sendCountBefore = BroadcastLockSpyURLProtocol.sendToAddressCount
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAAAAAA="
+        await walletMgr.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs
+        )
+
         let txid: String
         do {
             txid = try await walletMgr.executeAuthorizedSend(
@@ -303,11 +337,14 @@ struct ReleaseLockVerifier {
         guard !txid.isEmpty else {
             fatalError("FAILURE: executeAuthorizedSend returned empty txid!")
         }
-        guard BroadcastLockSpyURLProtocol.sendToAddressCount == sendCountBefore + 1 else {
-            fatalError("FAILURE: sendtoaddress was not executed exactly once! Expected \(sendCountBefore + 1), got \(BroadcastLockSpyURLProtocol.sendToAddressCount)")
+        guard BroadcastLockSpyURLProtocol.sendRawTransactionCount == 1 else {
+            fatalError("FAILURE: sendrawtransaction was not executed exactly once! Expected 1, got \(BroadcastLockSpyURLProtocol.sendRawTransactionCount)")
         }
-        print("✓ Verified: Authorized synthetic send executed successfully (txid: \(txid)).")
-        print("✓ Verified: Outbound sendtoaddress transport request occurred EXACTLY ONCE on stub URLProtocol.")
+        guard BroadcastLockSpyURLProtocol.sendToAddressCount == 0 else {
+            fatalError("FAILURE: sendtoaddress was unexpectedly executed! Expected 0, got \(BroadcastLockSpyURLProtocol.sendToAddressCount)")
+        }
+        print("✓ Verified: Authorized synthetic send executed successfully via exact PSBT pipeline (txid: \(txid)).")
+        print("✓ Verified: Outbound sendrawtransaction transport request occurred EXACTLY ONCE on stub URLProtocol (0 sendtoaddress calls).")
 
         // -------------------------------------------------------------
         // SECTION 3: Negative Security Validations & Bypass Prevention
@@ -349,6 +386,118 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Malformed PSBT did not return empty inputs!")
         }
         print("✓ Verified: Malformed / truncated PSBT failed closed with zero extracted inputs.")
+
+        // 3-pre-D: Missing pending funded PSBT fails closed with previewTampered
+        let missingPsbtPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 10_000,
+            feeSats: 500,
+            satPerVB: 2,
+            estimatedVSize: 140,
+            selectedInputs: ["test_input:0"]
+        )
+        let missingContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 10_000,
+            maxFeeSats: 500,
+            satPerVB: 2,
+            previewId: missingPsbtPreview.id,
+            utxoFingerprint: "test_input:0",
+            chain: "main",
+            nonce: missingPsbtPreview.id.uuidString
+        )
+        let missingApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Missing PSBT test",
+            txContext: missingContext
+        )
+        do {
+            _ = try await walletMgr.executeAuthorizedSend(
+                preview: missingPsbtPreview,
+                explicitPassphrase: "WalletPassword123!",
+                capability: capability,
+                approval: missingApproval
+            )
+            fatalError("FAILURE: executeAuthorizedSend did not fail closed on missing funded PSBT!")
+        } catch let err as WalletSecurityError {
+            if case .previewTampered = err {
+                print("✓ Verified: Missing / absent funded PSBT failed closed with previewTampered.")
+            } else {
+                fatalError("FAILURE: Missing funded PSBT threw unexpected WalletSecurityError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Missing funded PSBT threw unexpected error: \(error)")
+        }
+
+        // 3-pre-E: Direct sendRawTransaction with genuine coordinator-issued SpendAuthorization
+        let rawTxHex = "02000000000101efcdab8967452301efcdab8967452301efcdab8967452301efcdab89674523010000000000ffffffff0250c3000000000000160014e8df018c7e326cc253faac7e46cdc51e68542c42087b0e00000000001600143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b0000000000"
+        let rawTxPreview = FundedTxPreview(
+            id: UUID(),
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: ["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"]
+        )
+        let rawTxContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: validDestination,
+            amountSats: 50_000,
+            maxFeeSats: 1_000,
+            satPerVB: 5,
+            previewId: rawTxPreview.id,
+            utxoFingerprint: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0",
+            chain: "main",
+            nonce: rawTxPreview.id.uuidString
+        )
+        let rawTxApproval = try! await authCoord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: validDestination,
+            reason: "Raw TX test",
+            txContext: rawTxContext
+        )
+        let rawTxAuth = try! await authCoord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            rawTxApproval,
+            action: "send",
+            target: validDestination,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: rawTxContext
+        )
+
+        do {
+            let res: String = try await client.sendRawTransaction(
+                hex: rawTxHex,
+                walletName: walletName,
+                authorization: rawTxAuth
+            )
+            print("✓ Verified: Direct sendRawTransaction with genuine coordinator-issued SpendAuthorization succeeded (txid: \(res)).")
+        } catch {
+            fatalError("FAILURE: Direct sendRawTransaction with valid SpendAuthorization failed: \(error)")
+        }
+
+        // 3-pre-F: Replay of exact same sendRawTransaction authorization fails closed
+        do {
+            _ = try await client.sendRawTransaction(
+                hex: rawTxHex,
+                walletName: walletName,
+                authorization: rawTxAuth
+            )
+            fatalError("FAILURE: Replayed sendRawTransaction authorization was accepted!")
+        } catch let err as RPCClientError {
+            if case .transactionBroadcastDisabled = err {
+                print("✓ Verified: Replayed sendRawTransaction authorization failed closed with transactionBroadcastDisabled.")
+            } else {
+                fatalError("FAILURE: Replay threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Replay threw unexpected error: \(error)")
+        }
 
         // 3a. Forged token SpendAuthorization rejected at transport (P0-1)
         let forgedAuth = SpendAuthorization(

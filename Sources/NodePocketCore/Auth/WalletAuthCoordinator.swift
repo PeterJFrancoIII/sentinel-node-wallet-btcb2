@@ -527,9 +527,9 @@ public actor WalletAuthCoordinator {
             let expectedToken = hmac.map { String(format: "%02x", $0) }.joined()
             guard constantTimeCompare(auth.token, expectedToken) else { return false }
 
-            // 3. Method check: exact normalized method match
+            // 3. Method check
             let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard auth.authorizedMethod.lowercased() == normalizedMethod else { return false }
+            let normalizedAuthMethod = auth.authorizedMethod.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
             // 4. Wallet binding: walletName must be non-nil, non-empty, and match auth.walletName
             guard let wName = walletName, !wName.isEmpty, wName == auth.walletName else { return false }
@@ -541,7 +541,29 @@ public actor WalletAuthCoordinator {
             guard !auth.utxoFingerprint.isEmpty else { return false }
 
             // 7. Method-specific parameter checks
-            if normalizedMethod == "sendtoaddress" {
+            if normalizedAuthMethod == "sendrawtransaction" {
+                if normalizedMethod == "walletprocesspsbt" || normalizedMethod == "finalizepsbt" {
+                    // Authorized intermediate signing / finalization steps
+                    return true
+                }
+                guard normalizedMethod == "sendrawtransaction" else { return false }
+                guard let rawTxHex = params.first as? String, !rawTxHex.isEmpty else { return false }
+                guard let decoded = RawTransactionDecoder.decode(hex: rawTxHex) else { return false }
+
+                // UTXO fingerprint verification
+                let decodedFingerprint = decoded.inputs.sorted().joined(separator: ",")
+                guard decodedFingerprint == auth.utxoFingerprint else { return false }
+
+                // Destination and amount verification
+                guard let targetOutput = decoded.outputs.first(where: { $0.matches(address: auth.destinationAddress) }) else {
+                    return false
+                }
+                guard targetOutput.valueSats == auth.amountSats, targetOutput.valueSats > 0 else {
+                    return false
+                }
+
+                return true
+            } else if normalizedAuthMethod == "sendtoaddress" && normalizedMethod == "sendtoaddress" {
                 // Strict arity requirement: must have at least 12 parameters to include explicit fee_rate, maxFeeSats, and utxoFingerprint
                 guard params.count >= 12 else { return false }
 
@@ -2537,5 +2559,139 @@ public actor WalletAuthCoordinator {
 
     private func saveRecord() throws {
         try saveRecords()
+    }
+}
+
+public struct DecodedRawTransaction: Sendable {
+    public struct Output: Sendable {
+        public let valueSats: Int64
+        public let scriptPubKey: Data
+
+        public func matches(address: String) -> Bool {
+            guard let expectedScript = RawTransactionDecoder.decodeScriptPubKey(for: address) else {
+                return false
+            }
+            return scriptPubKey == expectedScript
+        }
+    }
+
+    public let inputs: [String]
+    public let outputs: [Output]
+}
+
+public enum RawTransactionDecoder {
+    public static func decode(hex: String) -> DecodedRawTransaction? {
+        guard let data = Data(hexString: hex), data.count >= 10 else { return nil }
+        var offset = 4 // version (4 bytes)
+        // Check segwit marker (0x00 0x01)
+        if offset + 2 <= data.count && data[offset] == 0x00 && data[offset + 1] == 0x01 {
+            offset += 2
+        }
+        guard offset < data.count else { return nil }
+        let (inCount, vLen1) = parseVarInt(data, at: offset)
+        offset += vLen1
+        var inputs: [String] = []
+        for _ in 0..<inCount {
+            guard offset + 36 <= data.count else { return nil }
+            let txidBytes = data.subdata(in: offset..<(offset + 32))
+            let txidHex = txidBytes.reversed().map { String(format: "%02x", $0) }.joined()
+            offset += 32
+            let vout = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            guard offset < data.count else { return nil }
+            let (scriptLen, sLen) = parseVarInt(data, at: offset)
+            offset += sLen + Int(scriptLen) + 4 // scriptSig + sequence
+            inputs.append("\(txidHex):\(vout)")
+        }
+        guard offset < data.count else { return nil }
+        let (outCount, vLen2) = parseVarInt(data, at: offset)
+        offset += vLen2
+        var outputs: [DecodedRawTransaction.Output] = []
+        for _ in 0..<outCount {
+            guard offset + 8 <= data.count else { return nil }
+            var val: UInt64 = 0
+            for i in 0..<8 {
+                val |= UInt64(data[offset + i]) << (i * 8)
+            }
+            offset += 8
+            guard offset < data.count else { return nil }
+            let (scriptLen, sLen) = parseVarInt(data, at: offset)
+            offset += sLen
+            guard offset + Int(scriptLen) <= data.count else { return nil }
+            let scriptData = data.subdata(in: offset..<(offset + Int(scriptLen)))
+            offset += Int(scriptLen)
+            outputs.append(DecodedRawTransaction.Output(valueSats: Int64(val), scriptPubKey: scriptData))
+        }
+        return DecodedRawTransaction(inputs: inputs, outputs: outputs)
+    }
+
+    public static func decodeScriptPubKey(for address: String) -> Data? {
+        let clean = address.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard clean.hasPrefix("bc1") else { return nil }
+        let charset = Array("qpzry9x8gf2tvdw0s3jn54khce6mua7l")
+        let dataChars = Array(clean.dropFirst(3))
+        guard dataChars.count >= 7 else { return nil }
+        var data5Bit: [UInt8] = []
+        for c in dataChars {
+            guard let idx = charset.firstIndex(of: c) else { return nil }
+            data5Bit.append(UInt8(idx))
+        }
+        let payload5Bit = Array(data5Bit.dropLast(6))
+        guard let witnessVersion = payload5Bit.first, witnessVersion <= 16 else { return nil }
+        let program5Bit = Array(payload5Bit.dropFirst())
+        var acc = 0
+        var bits = 0
+        var ret: [UInt8] = []
+        for val in program5Bit {
+            acc = (acc << 5) | Int(val)
+            bits += 5
+            while bits >= 8 {
+                bits -= 8
+                ret.append(UInt8((acc >> bits) & 0xff))
+            }
+        }
+        guard ret.count >= 2 && ret.count <= 40 else { return nil }
+        var script = Data([witnessVersion, UInt8(ret.count)])
+        script.append(contentsOf: ret)
+        return script
+    }
+
+    private static func parseVarInt(_ data: Data, at offset: Int) -> (UInt64, Int) {
+        guard offset < data.count else { return (0, 0) }
+        let first = data[offset]
+        if first < 0xfd {
+            return (UInt64(first), 1)
+        } else if first == 0xfd {
+            guard offset + 3 <= data.count else { return (0, 1) }
+            let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8)
+            return (val, 3)
+        } else if first == 0xfe {
+            guard offset + 5 <= data.count else { return (0, 1) }
+            let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8) | (UInt64(data[offset + 3]) << 16) | (UInt64(data[offset + 4]) << 24)
+            return (val, 5)
+        } else {
+            guard offset + 9 <= data.count else { return (0, 1) }
+            var val: UInt64 = 0
+            for i in 0..<8 {
+                val |= UInt64(data[offset + 1 + i]) << (i * 8)
+            }
+            return (val, 9)
+        }
+    }
+}
+
+fileprivate extension Data {
+    init?(hexString: String) {
+        let clean = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard clean.count % 2 == 0 else { return nil }
+        var data = Data(capacity: clean.count / 2)
+        var index = clean.startIndex
+        while index < clean.endIndex {
+            let nextIndex = clean.index(index, offsetBy: 2)
+            guard let byte = UInt8(clean[index..<nextIndex], radix: 16) else { return nil }
+            data.append(byte)
+            index = nextIndex
+        }
+        self = data
     }
 }

@@ -223,12 +223,15 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case restoreSourceEmpty(String)
     case restoreTargetWalletAlreadyExists(String)
     case invalidAmount(String)
+    case signingFailed(String)
     case walletRelockFailed(wallet: String, underlyingError: String, txid: String)
 
     public var errorDescription: String? {
         switch self {
         case .walletRelockFailed(let wallet, let underlying, let txid):
             return "Transaction was broadcast (txid: \(txid)), but wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
+        case .signingFailed(let reason):
+            return "Transaction signing or finalization failed: \(reason)"
         case .noWalletLoaded:
             return "No wallet is currently loaded in memory. Load or create an encrypted wallet first."
         case .backupDestinationAlreadyExists(let path):
@@ -294,6 +297,55 @@ public actor WalletManager {
     public private(set) var latestSnapshot: WalletSnapshot?
     public private(set) var isCreatingWallet = false
     private var activeStagingSessionIDs = Set<String>()
+
+    public struct PendingFundedPsbtRecord: Sendable {
+        public let psbt: String
+        public let destination: String
+        public let amountSats: Int64
+        public let feeSats: Int64
+        public let inputs: [String]
+        public let createdAt: Date
+
+        public init(
+            psbt: String,
+            destination: String,
+            amountSats: Int64,
+            feeSats: Int64,
+            inputs: [String],
+            createdAt: Date = Date()
+        ) {
+            self.psbt = psbt
+            self.destination = destination
+            self.amountSats = amountSats
+            self.feeSats = feeSats
+            self.inputs = inputs
+            self.createdAt = createdAt
+        }
+    }
+
+    private var pendingFundedPsbts: [UUID: PendingFundedPsbtRecord] = [:]
+
+    public func recordPendingFundedPsbt(
+        id: UUID,
+        psbt: String,
+        destination: String,
+        amountSats: Int64,
+        feeSats: Int64,
+        inputs: [String]
+    ) {
+        pendingFundedPsbts[id] = PendingFundedPsbtRecord(
+            psbt: psbt,
+            destination: destination,
+            amountSats: amountSats,
+            feeSats: feeSats,
+            inputs: inputs,
+            createdAt: Date()
+        )
+    }
+
+    public func consumePendingFundedPsbt(id: UUID) -> PendingFundedPsbtRecord? {
+        return pendingFundedPsbts.removeValue(forKey: id)
+    }
 
     public func resetActiveWallet() {
         self.currentWalletName = nil
@@ -1052,7 +1104,18 @@ public actor WalletManager {
             throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
         }
 
+        let previewId = UUID()
+        self.recordPendingFundedPsbt(
+            id: previewId,
+            psbt: funded.psbt,
+            destination: trimmedAddr,
+            amountSats: amountSats,
+            feeSats: feeSats,
+            inputs: selectedInputs
+        )
+
         return FundedTxPreview(
+            id: previewId,
             destinationAddress: trimmedAddr,
             recipientName: recipientName,
             amountSats: amountSats,
@@ -1119,10 +1182,11 @@ public actor WalletManager {
             throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
         }
 
-        // 6. Construct immutable transaction spend context and validate inputs
+        // 6. Validate inputs and spend context
         guard !preview.selectedInputs.isEmpty else {
             throw WalletSecurityError.previewTampered
         }
+
         let utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
         let txContext = TransactionSpendContext(
             walletName: walletName,
@@ -1140,9 +1204,21 @@ public actor WalletManager {
             app,
             action: "send",
             target: preview.destinationAddress,
-            authorizedMethod: "sendtoaddress",
+            authorizedMethod: "sendrawtransaction",
             expectedTxContext: txContext
         )
+
+        // 7. Validate pending funded PSBT matches preview
+        guard let pending = consumePendingFundedPsbt(id: preview.id) else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        guard pending.destination.lowercased() == preview.destinationAddress.lowercased(),
+              pending.amountSats == preview.amountSats,
+              pending.feeSats == preview.feeSats,
+              pending.inputs == preview.selectedInputs else {
+            throw WalletSecurityError.previewTampered
+        }
 
         let passphrase: String
         if let explicit = explicitPassphrase, !explicit.isEmpty {
@@ -1154,19 +1230,30 @@ public actor WalletManager {
         // 7. Temporarily unlock wallet for 15 seconds to sign and broadcast
         try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
 
-        // 8. Broadcast via sendtoaddress with explicit sat/vB fee rate, max fee cap, UTXO fingerprint, and SpendAuthorization
-        let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
+        // 8. Sign, finalize, and broadcast the exact funded PSBT via sendrawtransaction
         var txid: String = ""
         var sendError: Error?
         do {
-            txid = try await rpcClient.sendToAddress(
-                address: preview.destinationAddress,
-                amount: btcAmount,
-                comment: "Sentinel Node Wallet",
-                feeRateSatPerVB: preview.satPerVB,
-                replaceable: true,
-                maxFeeSats: preview.feeSats,
-                utxoFingerprint: utxoFingerprint,
+            let processed = try await rpcClient.walletProcessPsbt(
+                psbt: pending.psbt,
+                walletName: walletName,
+                authorization: spendAuth
+            )
+            guard processed.complete else {
+                throw WalletSecurityError.signingFailed("Wallet failed to sign funded PSBT inputs")
+            }
+
+            let finalized = try await rpcClient.finalizePsbt(
+                psbt: processed.psbt,
+                walletName: walletName,
+                authorization: spendAuth
+            )
+            guard finalized.complete, let rawHex = finalized.hex, !rawHex.isEmpty else {
+                throw WalletSecurityError.signingFailed("Failed to finalize signed PSBT into raw transaction")
+            }
+
+            txid = try await rpcClient.sendRawTransaction(
+                hex: rawHex,
                 walletName: walletName,
                 authorization: spendAuth
             )
