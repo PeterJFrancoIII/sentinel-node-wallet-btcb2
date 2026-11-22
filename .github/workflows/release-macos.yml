@@ -240,6 +240,16 @@ jobs:
             fi
           fi
 
+          # Bootstrap Completeness Gate (P0-G1B-R1-02):
+          # On minimal bootstrap main, only Phase A ('stage-draft') is authorized and qualified.
+          # Phases B & C require 'scripts/publish_production_appcast.sh' which is not present in the 6-file baseline.
+          if [ "${EFFECTIVE_PHASE}" != "stage-draft" ]; then
+            echo "ERROR: Release phase '${EFFECTIVE_PHASE}' is blocked fail-closed in minimal bootstrap release-macos.yml." >&2
+            echo "Option 1 Policy B minimal bootstrap authorizes only 'stage-draft' (Phase A)." >&2
+            echo "Phases 'promote-feed' and 'verify-deployed' require 'scripts/publish_production_appcast.sh' which is not present on main and requires separate operator qualification under future G5." >&2
+            exit 1
+          fi
+
           echo "verified_tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           echo "verified_commit_sha=${APPROVED_SHA}" >> "$GITHUB_OUTPUT"
           echo "short_version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -255,14 +265,13 @@ jobs:
       - name: Verify release broadcast lock and spend gate enforcement
         run: swift run -c release VerifyReleaseBroadcastLock
 
-      # Gating Stage 4: Packaging Shell Syntax Validation
+      # Gating Stage 4: Packaging Shell Syntax Validation (P0-G1B-R1-02: minimal bootstrap allowlist only)
       - name: Validate script syntax
         run: |
           bash -n scripts/build_app.sh \
                   scripts/build_dmg.sh \
                   scripts/build_production_dmg.sh \
                   scripts/sign_appcast_enclosure.sh \
-                  scripts/publish_production_appcast.sh \
                   scripts/fetch-verify-knots.sh \
                   scripts/package_appstore_archive.sh
 
@@ -303,6 +312,28 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      # The exact Sparkle tool bytes are transported as UNTRUSTED DATA from
+      # the secret-free job. The trusted main signer must verify these bytes
+      # against an independently operator-approved SHA-256 before executing.
+      - name: Prepare Sparkle tool transport (unprivileged, no signing keys)
+        run: |
+          TOOL=".build/artifacts/sparkle/Sparkle/bin/sign_update"
+          if [ ! -f "$TOOL" ] || [ ! -x "$TOOL" ]; then
+            echo "ERROR: SwiftPM Sparkle sign_update missing at expected artifact path." >&2
+            exit 1
+          fi
+          mkdir -p dist/sparkle-tool-transport
+          cp "$TOOL" dist/sparkle-tool-transport/sign_update
+          echo "Untrusted Sparkle tool staged for isolated hash validation; NOT executed."
+
+      - name: Upload untrusted Sparkle tool bytes for isolated verification
+        uses: actions/upload-artifact@v4
+        with:
+          name: untrusted-sparkle-sign-update
+          path: dist/sparkle-tool-transport/sign_update
+          retention-days: 1
+          if-no-files-found: error
+
   # =========================================================================
   # Phase A: Privileged Signing, Notarization & Draft Release Staging (WO-115)
   # =========================================================================
@@ -316,11 +347,19 @@ jobs:
     permissions:
       contents: write
     steps:
-      # Immutable Checkout pinned to verified candidate commit SHA (O1-G1A-02)
-      - name: Checkout repository at verified candidate commit SHA
+      # Assert trigger ref is protected main (P0-G1B-R1-01)
+      - name: Assert release-control trigger ref is protected main
+        run: |
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "ERROR: Privileged release workflow can only be executed from protected main (ref was '${{ github.ref }}')." >&2
+            exit 1
+          fi
+
+      # Trusted Checkout pinned to reviewed release-control source revision on main (P0-G1B-R1-01)
+      - name: Checkout trusted release-control source revision on main
         uses: actions/checkout@v4
         with:
-          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       # Pre-Credentials Artifact Verification & Safe Extraction (O1-G1A-02/03 P0 Rework)
@@ -329,6 +368,12 @@ jobs:
         with:
           name: unsigned-app-bundle
           path: dist
+
+      - name: Download untrusted Sparkle tool bytes
+        uses: actions/download-artifact@v4
+        with:
+          name: untrusted-sparkle-sign-update
+          path: dist/trusted-tools
 
       - name: Verify and Safely Extract Unsigned App Bundle Artifact
         env:
@@ -376,6 +421,31 @@ jobs:
           test -d "dist/Sentinel Node Wallet.app" || { echo "ERROR: Extraction failed." >&2; exit 1; }
           echo "✓ Successfully extracted verified application bundle."
 
+      # The downloaded tool is NEVER run until a digest controlled outside
+      # the candidate checkout is checked. No signing secrets in this step.
+      - name: Verify Sparkle sign_update tool bytes before credential access
+        env:
+          EXPECTED_TOOL_SHA256: ${{ vars.SPARKLE_SIGN_UPDATE_SHA256 }}
+        run: |
+          set -euo pipefail
+          TOOL="dist/trusted-tools/sign_update"
+          if [[ ! "$EXPECTED_TOOL_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "ERROR: Missing or malformed independently approved Sparkle tool digest." >&2
+            exit 1
+          fi
+          if [ ! -f "$TOOL" ] || [ -L "$TOOL" ]; then
+            echo "ERROR: Sparkle tool artifact missing or is a symbolic link." >&2
+            exit 1
+          fi
+          ACTUAL_TOOL_SHA256="$(shasum -a 256 "$TOOL" | awk '{print $1}')"
+          if [ "$ACTUAL_TOOL_SHA256" != "$EXPECTED_TOOL_SHA256" ]; then
+            echo "ERROR: Transported Sparkle tool does not match owner-controlled digest." >&2
+            exit 1
+          fi
+          chmod 500 "$TOOL"
+          test -x "$TOOL" || { echo "ERROR: Verified Sparkle tool is not executable." >&2; exit 1; }
+          echo "Verified transported Sparkle sign_update bytes against trusted release configuration."
+
       # Gating Stage 6: Environment & Secrets Verification (Fail-Closed)
       - name: Verify production signing prerequisites (Fail-Closed)
         env:
@@ -386,6 +456,7 @@ jobs:
           NOTARY_ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
           SPARKLE_PRIV_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
           SPARKLE_PUB_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          SPARKLE_TOOL_HASH: "${{ vars.SPARKLE_SIGN_UPDATE_SHA256 }}"
         run: |
           MISSING=""
           if [ -z "${APPLE_CERT_B64}" ] || [ -z "${APPLE_CERT_PASS}" ]; then
@@ -400,12 +471,24 @@ jobs:
           if [ -z "${SPARKLE_PUB_KEY}" ]; then
             MISSING="${MISSING} SPARKLE_PUBLIC_KEY"
           fi
+          if [ -z "${SPARKLE_TOOL_HASH}" ]; then
+            MISSING="${MISSING} SPARKLE_SIGN_UPDATE_SHA256(vars)"
+          fi
 
           if [ -n "${MISSING}" ]; then
-            echo "ERROR: Production release blocked fail-closed. Missing mandatory signing credentials:${MISSING}." >&2
-            echo "Official production distribution requires an Apple Developer ID Application certificate, Apple Notary credentials, and Sparkle Ed25519 keypair." >&2
+            echo "ERROR: Production release blocked fail-closed. Missing mandatory signing credentials or tool digest:${MISSING}." >&2
+            echo "Official production distribution requires Apple Developer ID, Apple Notary, Sparkle Ed25519 keypair, and verified Sparkle tool hash." >&2
             exit 1
           fi
+
+          python3 - "${SPARKLE_TOOL_HASH}" <<'PY' || exit 1
+          import re, sys
+          h = sys.argv[1].strip()
+          if not re.match(r'^[0-9a-f]{64}$', h):
+              print(f"ERROR: SPARKLE_SIGN_UPDATE_SHA256 is not a valid 64-character lowercase hex digest: '{h}'", file=sys.stderr)
+              sys.exit(1)
+          print(f"✓ Verified SPARKLE_SIGN_UPDATE_SHA256 format: {h}")
+          PY
 
           python3 - "${SPARKLE_PUB_KEY}" <<'PY' || exit 1
           import base64, sys
@@ -471,21 +554,26 @@ jobs:
         run: |
           bash scripts/build_production_dmg.sh --sign-only
 
-      # Sparkle Signing & Appcast Enclosure Generation with Verified Tool Provenance (O1-G1A-03 P0 Rework)
+      # Sparkle Signing & Appcast Enclosure Generation with Verified Tool Provenance (O1-G1A-03 / P0-G1B-R1-03)
       - name: Sign DMG with Sparkle EdDSA Key (Verified Tool Provenance)
         env:
           SPARKLE_PRIVATE_ED_KEY: "${{ secrets.SPARKLE_PRIVATE_ED_KEY }}"
-          SPARKLE_TOOL_HASH: "${{ vars.SPARKLE_SIGN_UPDATE_SHA256 || '43c249771bafc3aa581228abae00731a012d324691b8292860896635050be76b' }}"
+          SPARKLE_TOOL_HASH: "${{ vars.SPARKLE_SIGN_UPDATE_SHA256 }}"
         run: |
+          if [ -z "${SPARKLE_TOOL_HASH}" ]; then
+            echo "ERROR: SPARKLE_SIGN_UPDATE_SHA256 repository variable is required for privileged signing." >&2
+            exit 1
+          fi
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           bash scripts/sign_appcast_enclosure.sh sign "${DMG_FILE}" \
             --require-trusted-tool-hash \
+            --sign-update-bin dist/trusted-tools/sign_update \
             --trusted-tool-hash "${SPARKLE_TOOL_HASH}" \
             --signature-file-output dist/SPARKLE_SIGNATURE.base64 > dist/SPARKLE_ENCLOSURE.txt
           cat dist/SPARKLE_ENCLOSURE.txt
           test -s dist/SPARKLE_SIGNATURE.base64 || { echo "ERROR: dist/SPARKLE_SIGNATURE.base64 is missing or empty." >&2; exit 1; }
 
-      # Generate Authenticated Release Attestation (WO-117, WO-121, WO-122-R3, O1-G1A-02)
+      # Generate Authenticated Release Attestation (WO-117, WO-121, WO-122-R3, O1-G1A-02, P0-G1B-R1-01)
       - name: Generate Authenticated Release Attestation
         env:
           TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
@@ -494,11 +582,9 @@ jobs:
           BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
-          HEAD_COMMIT="$(git rev-parse HEAD)"
-          if [ "${HEAD_COMMIT}" != "${VERIFIED_COMMIT_SHA}" ]; then
-            echo "ERROR: Checked-out HEAD (${HEAD_COMMIT}) does not match verified candidate commit SHA (${VERIFIED_COMMIT_SHA})." >&2
-            exit 1
-          fi
+          RELEASE_CONTROL_COMMIT="$(git rev-parse HEAD)"
+          echo "✓ Verified trusted release-control commit on main: ${RELEASE_CONTROL_COMMIT}"
+          echo "✓ Target candidate commit to be released: ${VERIFIED_COMMIT_SHA}"
 
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
           DMG_NAME="$(basename "${DMG_FILE}")"
@@ -568,8 +654,9 @@ jobs:
           attestation = {
               "tag": "${TAG}",
               "approved_commit_sha": "${VERIFIED_COMMIT_SHA}",
+              "release_control_sha": "${RELEASE_CONTROL_COMMIT}",
+              "release_control_ref": "${{ github.ref }}",
               "release_phase": "stage-draft",
-              "git_commit": "${HEAD_COMMIT}",
               "bundle_version": "${SHORT_VERSION}",
               "build_number": int("${BUILD_NUM}"),
               "appcast_enclosure": {
@@ -589,7 +676,7 @@ jobs:
           with open("dist/RELEASE_ATTESTATION.json", "w") as f:
               json.dump(attestation, f, indent=2)
 
-          print("✓ Generated authenticated RELEASE_ATTESTATION.json (WO-122-R3 / O1-G1A-02):")
+          print("✓ Generated authenticated RELEASE_ATTESTATION.json (WO-122-R3 / O1-G1A-02 / P0-G1B-R1-01):")
           print(json.dumps(attestation, indent=2))
           PY
 
@@ -601,7 +688,8 @@ jobs:
           VERIFIED_COMMIT_SHA: "${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}"
           IS_PRERELEASE: "${{ github.event.inputs.is_prerelease }}"
         run: |
-          echo "Staging Candidate Draft Release for ${TAG} at ${VERIFIED_COMMIT_SHA}..."
+          RELEASE_CONTROL_COMMIT="$(git rev-parse HEAD)"
+          echo "Staging Candidate Draft Release for ${TAG} at candidate commit ${VERIFIED_COMMIT_SHA} (control: ${RELEASE_CONTROL_COMMIT})..."
           DMG_FILE="$(ls -1 dist/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
 
           PRERELEASE_FLAG=""
@@ -617,7 +705,8 @@ jobs:
 
           ### Authenticated Release Manifest
           - **Release Tag:** \`${TAG}\`
-          - **Approved Source Commit:** \`${VERIFIED_COMMIT_SHA}\`
+          - **Approved Candidate Commit:** \`${VERIFIED_COMMIT_SHA}\`
+          - **Release Control Source Commit (main):** \`${RELEASE_CONTROL_COMMIT}\`
           - **DMG Package:** \`$(basename "${DMG_FILE}")\`
           - **DMG SHA-256:** \`$(shasum -a 256 "${DMG_FILE}" | awk '{print $1}')\`
           - **Sparkle 2 EdDSA Signature:** Verified via Swift CryptoKit (see attached sidecar \`SPARKLE_SIGNATURE.base64\`)
@@ -676,80 +765,12 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Checkout repository at verified candidate commit SHA
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
-          fetch-depth: 0
-
-      # Step 1: Download Staged Assets from Draft Release
-      - name: Download Staged Release Assets
-        env:
-          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+      - name: Fail closed on unbootstrapped dependency (P0-G1B-R1-02)
         run: |
-          echo "Downloading staged draft assets for ${TAG}..."
-          mkdir -p dist/staged-assets
-          gh release download "${TAG}" --dir dist/staged-assets
-          ls -la dist/staged-assets
-
-      # Step 2: Preflight Verification before Promotion (WO-120)
-      - name: Run Feed Staging Preflight Verification (WO-120)
-        env:
-          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
-        run: |
-          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
-          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
-          bash scripts/publish_production_appcast.sh \
-            --tag "${TAG}" \
-            --archive "${DMG_PATH}" \
-            --signature "${ED_SIG}" \
-            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
-            --prune-unsigned-legacy \
-            --preflight
-          echo "✓ Pre-promotion preflight validation succeeded (WO-120): Live feed publish prerequisites and binary verifiers satisfied before public promotion."
-
-      # Step 3: Promote Verified Draft Release to Public (WO-115, WO-117)
-      - name: Promote Draft Release to Public
-        env:
-          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-        run: |
-          echo "Promoting verified draft release ${TAG} to public..."
-          gh release edit "${TAG}" --draft=false
-          echo "✓ Release ${TAG} promoted to public."
-
-      # Step 4: Stage Sparkle Production Appcast Feed for PR Review (WO-118, WO-122-R1)
-      - name: Stage Candidate Production Appcast Feed to Feed Branch
-        env:
-          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
-        run: |
-          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
-          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
-          bash scripts/publish_production_appcast.sh \
-            --tag "${TAG}" \
-            --archive "${DMG_PATH}" \
-            --signature "${ED_SIG}" \
-            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
-            --operator-approval "${OPERATOR_APPROVAL}" \
-            --stage-feed-branch \
-            --prune-unsigned-legacy
-          echo "✓ Candidate appcast feed staged to feed/${TAG} branch (WO-122-R1). Awaiting operator PR review and merge to main."
-
-      # Step 5: Output Release Status Summary (WO-122-R2)
-      - name: Output Release Status Summary
-        run: |
-          echo "### Release Status: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING" >> $GITHUB_STEP_SUMMARY
-          echo "The GitHub Release **${{ needs.unprivileged-qualification.outputs.verified_tag }}** is now PUBLIC." >> $GITHUB_STEP_SUMMARY
-          echo "Candidate Sparkle appcast has been staged to branch **feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}**." >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Operator Actions Required to Complete Live Deployment:**" >> $GITHUB_STEP_SUMMARY
-          echo "1. Review and merge Pull Request from \`feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}\` into \`main\`." >> $GITHUB_STEP_SUMMARY
-          echo "2. Re-dispatch this workflow with \`release_phase: verify-deployed\` to verify live CDN readback fail-closed." >> $GITHUB_STEP_SUMMARY
+          echo "ERROR: Phase B (promote-public-feed) is blocked fail-closed on minimal bootstrap main." >&2
+          echo "Required helper 'scripts/publish_production_appcast.sh' is not present in the G1-B minimal baseline." >&2
+          echo "Public promotion requires separate operator review and qualification under future G5." >&2
+          exit 1
 
   # =========================================================================
   # Phase C: Post-Merge Live Deployed Feed Verification (WO-122-R2)
@@ -763,29 +784,9 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout repository at verified candidate commit SHA
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
-          fetch-depth: 0
-
-      - name: Download Staged Release Assets and Verify Deployed Feed
-        env:
-          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
-          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
-          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+      - name: Fail closed on unbootstrapped dependency (P0-G1B-R1-02)
         run: |
-          echo "Downloading public release assets for ${TAG}..."
-          mkdir -p dist/staged-assets
-          gh release download "${TAG}" --dir dist/staged-assets
-
-          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
-          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
-
-          echo "Verifying deployed feed on main via CDN readback (fail-closed, WO-122-R2)..."
-          bash scripts/publish_production_appcast.sh \
-            --tag "${TAG}" \
-            --archive "${DMG_PATH}" \
-            --signature "${ED_SIG}" \
-            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
-            --verify-deployed-feed
+          echo "ERROR: Phase C (verify-deployed-feed) is blocked fail-closed on minimal bootstrap main." >&2
+          echo "Required helper 'scripts/publish_production_appcast.sh' is not present in the G1-B minimal baseline." >&2
+          echo "Public promotion requires separate operator review and qualification under future G5." >&2
+          exit 1

@@ -71,63 +71,88 @@ The three-phase workflow strictly isolates secret access:
 
 ---
 
-## 2. GitHub Branch Protection Setup for `main` (WO-114)
+## 2. Strictly Ordered Operator Release Gates (G2, G3, G4, G5)
+
+To guarantee that no privileged execution occurs without non-bypassable governance, operator actions MUST follow this exact chronological sequence:
+
+### Gate G2-0: Pre-Merge Non-Bypassable Branch Protection on `main` (BEFORE ANY MERGE)
+> [!CRITICAL]
+> **Branch protection MUST be enforced on `main` BEFORE merging PR #30 or any release-control code.**
 Navigate to **GitHub Repository Settings -> Branches -> Add branch ruleset / protection rule**:
 1. Branch pattern: `main`
 2. Enforce:
-   - **Require a pull request before merging** (Require approvals: 1).
-   - **Require status checks to pass before merging** (Require `swift-test` on `macOS-latest`).
-   - **Require signed commits** (Recommended).
-   - **Restrict direct pushes** to repository administrator only.
+   - **Require a pull request before merging** (Require approvals: at least 1 independent review).
+   - **Require status checks to pass before merging** (Require check: `swift-test` on `macOS-latest`).
+   - **Do not allow bypassing the above settings** (Enforce ruleset on administrators).
+   - **Block force pushes** and **Block branch deletions**.
+
+### Gate G2-1: Human Operator Review & Merge of G1-B Minimal Bootstrap PR #30
+- Independently review Draft [PR #30](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/30).
+- Confirm that PR #30 contains ONLY the 6 authorized release-control files with zero application code changes (`Sources/`), zero test changes (`Tests/`), zero package edits (`Package.swift`, `Package.resolved`), and zero self-approving records (`docs/RELEASE_APPROVAL.json`).
+- Merge PR #30 into protected `main` via reviewed pull request.
+
+### Gate G2-2: Configure Protected GitHub Environments & Human Reviewers
+Navigate to **GitHub Repository Settings -> Environments**:
+1. **`production-release`** (Phase A Signing):
+   - Deployment branches and tags: restricted to `main` and release tags `v*`.
+   - Required reviewers: add human operator (`PeterJFrancoIII`).
+   - Environment secrets: add Developer ID certificate, Notary API keys, and Sparkle private Ed25519 key (as detailed in Section 1).
+2. **`production-promotion`** (Phase B Promotion):
+   - Deployment branches and tags: restricted to `main` and release tags `v*`.
+   - Required reviewers: add human operator (`PeterJFrancoIII`).
+   - Environment secrets: ZERO private signing keys.
+
+### Gate G2-3: Configure Public Actions Variables (No Hardcoded Fallbacks)
+Navigate to **GitHub Repository Settings -> Secrets and variables -> Actions -> Variables**:
+1. `SPARKLE_PUBLIC_ED_KEY`: Base64-encoded 32-byte Ed25519 public key.
+2. `SPARKLE_SIGN_UPDATE_SHA256`: Verified SHA-256 digest of official Sparkle `sign_update` binary (`43c249771bafc3aa581228abae00731a012d324691b8292860896635050be76b`).
+   *(The release workflow requires this variable and fails closed if missing or invalid).*
+
+### Gate G2-4: Discrete Release Approval PR on Protected `main`
+- Open a discrete pull request against protected `main` adding `docs/RELEASE_APPROVAL.json`.
+- Pin the immutable release target tuple:
+  - `approved_commit_sha`: exact 40-character candidate commit SHA (e.g. `d11bc1122851599313f06e857cf143a9d1605361`).
+  - `target_tag`: exact tag (e.g. `v1.0.0-build5`).
+  - `bundle_version`: exact short version (e.g. `1.0.0`).
+  - `build_number`: exact integer build number (e.g. `5`).
+  - Security attestations confirming $0.00 spending limit and 12 blocked RPC methods.
+- Undergo PR review and pass `swift-test` on protected `main`. Merge to `main`.
+
+### Gate G3: Privileged Signing & Notarization Trial on Disposable Machine
+- Trigger GitHub Actions `release-macos.yml` for Phase A (`release_phase: stage-draft`).
+- Verify unprivileged Phase 0 build, hash attestation, trusted `main` checkout, signing, notarization, and draft GitHub release creation.
+
+### Gate G4: Zero-Funds Build 5 -> 6 OTA Trial on Disposable Machine
+- Perform manual installation and Sparkle update trial on a dedicated test Mac without user funds.
+
+### Gate G5: Public Release Promotion
+- Public promotion requires separate human operator authorization, introduction of `scripts/publish_production_appcast.sh` to `main`, and separate G5 execution gate.
 
 ---
 
-## 3. Coherent Release-Only Default-Branch Bootstrap Package (WO-107)
-To enable manual `workflow_dispatch` execution in GitHub Actions, the workflow file `.github/workflows/release-macos.yml` must exist on the default branch (`main`).
-
-To ensure that the release pipeline operates with 100% coherence and does not suffer from tag-HEAD mismatch or missing script dependencies, the release workflow implements a **pinned candidate tag checkout architecture**:
-- The workflow runner checks out the exact target tag (`ref: ${{ github.event.inputs.tag_name }}`) with `fetch-depth: 0`.
-- Every script (`scripts/publish_production_appcast.sh`, `scripts/build_production_dmg.sh`, etc.), pinned dependency (`Package.resolved`), and release documentation (`docs/RELEASE_NOTES_CANDIDATE.md`) is guaranteed to match the exact reviewed commit of that tag.
-
-If the operator chooses to stage a separate, minimal release-only bootstrap PR onto `main` rather than merging full PR #27, the following cohesive file set must be included:
-```bash
-# From local repository clone:
-git checkout main
-git pull origin main
-git checkout -b chore/bootstrap-release-pipeline
-
-# Check out complete release pipeline package from integration branch:
-git checkout integration/pre-release-qualification-20261116 -- \
-  .github/workflows/release-macos.yml \
-  scripts/build_app.sh \
-  scripts/build_dmg.sh \
-  scripts/build_production_dmg.sh \
-  scripts/sign_appcast_enclosure.sh \
-  scripts/publish_production_appcast.sh \
-  scripts/fetch-verify-knots.sh \
-  scripts/package_appstore_archive.sh \
-  Package.resolved \
-  docs/RELEASE_NOTES_CANDIDATE.md \
-  docs/OPERATOR_RELEASE_BOOTSTRAP_AND_SECRETS_CHECKLIST.md
-
-git commit -m "chore(ci): bootstrap coherent macOS release pipeline on main branch (WO-107)"
-git push origin chore/bootstrap-release-pipeline
-# Open and merge minimal release pipeline PR into main
-```
-
-Until `.github/workflows/release-macos.yml` exists on `origin/main`, GitHub Actions UI will report `workflow_dispatch` as **DISPATCH UNAVAILABLE**.
+## 3. Trusted Signer Isolation Architecture (P0-G1B-R1-01)
+The release workflow (`.github/workflows/release-macos.yml`) enforces strict cryptographic isolation between unprivileged candidate compilation and privileged signing:
+1. **Unprivileged Qualification (Phase 0):**
+   - Runs with zero secrets and zero environment bindings.
+   - Checks out the candidate commit, compiles the application bundle, runs tests, and packages `dist/unsigned-app-bundle.tar.gz`.
+   - Records the SHA-256 hash in workflow step outputs.
+2. **Privileged Signing (Phase A):**
+   - Runs in `production-release` environment with signing secrets.
+   - **Checks out the reviewed release-control source revision on protected `main` (`${{ github.sha }}`)**, NEVER candidate code!
+   - Asserts `github.ref == 'refs/heads/main'`.
+   - Downloads `unsigned-app-bundle.tar.gz` and verifies SHA-256 matches Phase 0 output.
+   - Inspects archive members before extraction (rejecting absolute paths, `..` traversals, and symlink escapes).
+   - Executes trusted signing scripts (`scripts/build_production_dmg.sh --sign-only` and `scripts/sign_appcast_enclosure.sh`) loaded exclusively from the trusted `main` checkout.
+   - Produces `dist/RELEASE_ATTESTATION.json` binding both `approved_commit_sha` (candidate) and `release_control_sha` (`main`).
+   - Creates GitHub Draft Release targeting `approved_commit_sha`.
 
 ---
 
-## 4. Three-Phase Immutable Release Promotion & Feed Activation (WO-108, WO-115, WO-122-R1, WO-122-R2)
-To eliminate collision errors, avoid re-signing verified binaries, and ensure immutable asset provenance, production releases follow a strict **Three-Phase Promotion** process with separated runner privileges:
-
-### Phase A: Candidate Draft Staging (`release_phase: stage-draft`, WO-115, O1-G1A-01, O1-G1A-02, O1-G1A-03)
-*Decoupled secret-free build in Phase 0 (unprivileged) and isolated signing in Phase A (`environment: production-release`).*
-
-1. **Policy B Release Approval Record Prerequisite on Protected Main:**
-   - Before triggering Phase A, an authenticated release approval manifest `docs/RELEASE_APPROVAL.json` must be committed and merged to `origin/main` via protected PR review.
-   - The approval manifest binds the exact 40-character candidate commit SHA, release tag, version, and security attestation (confirming $0.00 spending limit and 12 blocked RPC methods).
+## 4. Bootstrap Dependency Completeness & Fail-Closed Safeguards (P0-G1B-R1-02, P0-G1B-R1-03)
+On the minimal bootstrap baseline (`main`), the release pipeline operates under strict fail-closed constraints:
+1. **Phase A Only:** Minimal bootstrap authorizes only `stage-draft`. If `promote-feed` or `verify-deployed` is requested, the workflow halts immediately in `unprivileged-qualification` because `scripts/publish_production_appcast.sh` is not present in the 6-file baseline.
+2. **Mandatory Sparkle Tool Hash:** `SPARKLE_TOOL_HASH` must be explicitly provided via `vars.SPARKLE_SIGN_UPDATE_SHA256` matching a valid 64-char hex digest. Hardcoded fallback digests in workflow definitions are strictly prohibited.
+3. **Inert Promotion Phases:** If Phase B or Phase C jobs are reached, they fail closed at step 1 with explicit error messaging.
    - If `docs/RELEASE_APPROVAL.json` is missing on `origin/main` or the target commit does not match `approved_commit_sha`, the workflow fails closed in `unprivileged-qualification`.
 
 2. **Tag Candidate Commit:**
