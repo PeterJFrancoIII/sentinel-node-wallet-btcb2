@@ -64,6 +64,33 @@ final class WalletIntegrationTests: XCTestCase {
         XCTAssertFalse(canSend, "Sending must fail-closed when tip is unverified or wallet locked")
     }
 
+    func testStartupSpendVerifierRegistersSuccessfullyOnInitialization() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_reg_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd")
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered, "Verifier must not be registered before WalletManager init")
+
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: authCoord,
+            walletInventory: inv
+        )
+
+        XCTAssertTrue(rpcClient.isAuthorizationVerifierRegistered, "CoordinatorSpendAuthVerifier must be registered upon WalletManager initialization")
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNil(regErr, "verifierRegistrationErrorDescription must be nil on successful initialization")
+    }
+
     func testLegacySendCannotBypassApproval() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_legacy_send_guard_\(UUID().uuidString)")

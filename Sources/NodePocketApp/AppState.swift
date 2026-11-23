@@ -110,6 +110,10 @@ public final class AppState: ObservableObject {
         let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.walletInventory = inv
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
+        // Verify authentic coordinator verifier registration (R236-02)
+        guard self.nodeManager.rpcClient.isAuthorizationVerifierRegistered else {
+            fatalError("CRITICAL SECURITY FAILURE: CoordinatorSpendAuthVerifier failed registration during AppState initialization")
+        }
         // Unlock transaction broadcast for live wallet operation in the native app
         self.nodeManager.rpcClient.isBroadcastRestricted = false
         self.accountPurgeCoordinator = OperatorAccountPurgeCoordinator(

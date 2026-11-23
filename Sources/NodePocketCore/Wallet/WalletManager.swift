@@ -300,6 +300,7 @@ public actor WalletManager {
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     public private(set) var isCreatingWallet = false
+    public private(set) var verifierRegistrationErrorDescription: String?
     private var activeStagingSessionIDs = Set<String>()
 
     public struct PendingFundedPsbtRecord: Sendable {
@@ -439,7 +440,18 @@ public actor WalletManager {
             allowUnauthenticatedForTesting: allowUnauthenticatedForTesting
         )
         if let coord = authCoordinator {
-            try? rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+            do {
+                try rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+                self.verifierRegistrationErrorDescription = nil
+            } catch let err as RPCClientError {
+                if case .verifierAlreadyRegistered = err, rpcClient.isAuthorizationVerifierRegistered {
+                    self.verifierRegistrationErrorDescription = nil
+                } else {
+                    self.verifierRegistrationErrorDescription = err.localizedDescription
+                }
+            } catch {
+                self.verifierRegistrationErrorDescription = error.localizedDescription
+            }
         }
     }
 
@@ -1265,7 +1277,7 @@ public actor WalletManager {
         approval: HighRiskApproval? = nil
     ) async throws -> String {
         try await ensureAuthenticated(capability: capability)
-        if rpcClient.isBroadcastRestricted {
+        if rpcClient.isBroadcastRestricted || !rpcClient.isAuthorizationVerifierRegistered || verifierRegistrationErrorDescription != nil {
             throw WalletSecurityError.signingPathUnverified
         }
 
@@ -1828,7 +1840,7 @@ public actor WalletManager {
     /// bypassing single-use HighRiskApproval, funded preview validation, and address allowlist checks.
     public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil, capability: WalletAuthCapability? = nil) async throws -> String {
         try await ensureAuthenticated(capability: capability)
-        if rpcClient.isBroadcastRestricted {
+        if rpcClient.isBroadcastRestricted || !rpcClient.isAuthorizationVerifierRegistered || verifierRegistrationErrorDescription != nil {
             throw WalletSecurityError.signingPathUnverified
         }
         guard let walletName = currentWalletName, !walletName.isEmpty else {
