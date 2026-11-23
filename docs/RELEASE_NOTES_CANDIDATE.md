@@ -17,7 +17,7 @@ Sentinel Node Wallet is an autonomous, self-sovereign Bitcoin Knots node and mul
 ### 2. 🔐 Hardened Release & Credential Boundaries
 - **Keychain Isolation:** Independent custom Keychain service namespaces preventing any cross-wallet or cross-operator credential collisions.
 - **Permanent Account Deletion Release Lock:** Permanent account and wallet data deletion operations are strictly disabled in production release binaries (`releaseModeDisabled`). Self-service deletion remains fail-closed pending offline restore qualification (Issues #28, #29).
-- **Operator Choice B Spend Authority Enabled:** Authenticated, transaction-specific operator signing and broadcast is enabled via funded PSBT preview, single-use high-risk approval, and temporary wallet passphrase unlock, with automatic deterministic relock. Unauthorized generic spend and signing RPC methods remain strictly prohibited ($0.00 agent-delegated spend authority; 12 restricted RPCs fail closed without explicit operator approval).
+- **Operator Choice B Spend Authority Enabled:** Authenticated, transaction-specific operator signing and broadcast is enabled via funded PSBT preview, single-use high-risk approval, and temporary wallet passphrase unlock, with immediate attempted relock (and explicit critical failure alerting). Unauthorized generic spend and signing RPC methods remain strictly prohibited ($0.00 agent-delegated spend authority; 12 restricted RPCs fail closed without explicit operator approval).
 - **Consensus & Replay Protection:** Pinned Bitcoin Knots consensus validator enforcing replay protection on the BTCB2 network.
 
 ---
