@@ -148,12 +148,16 @@ The release workflow (`.github/workflows/release-macos.yml`) enforces strict cry
 
 ---
 
-## 4. Bootstrap Dependency Completeness & Fail-Closed Safeguards (P0-G1B-R1-02, P0-G1B-R1-03)
-On the minimal bootstrap baseline (`main`), the release pipeline operates under strict fail-closed constraints:
-1. **Phase A Only:** Minimal bootstrap authorizes only `stage-draft`. If `promote-feed` or `verify-deployed` is requested, the workflow halts immediately in `unprivileged-qualification` because `scripts/publish_production_appcast.sh` is not present in the 6-file baseline.
+## 4. Release Pipeline Architecture & Fail-Closed Safeguards (R221)
+On `main`, the release pipeline operates under strict fail-closed constraints:
+1. **Three-Phase Release Workflow:**
+   - **Phase A (`stage-draft`):** Unprivileged qualification, secret-free compilation, privileged signing/notarization, and staging of a GitHub Draft Release with cryptographically bound attestation.
+   - **Phase B (`promote-feed`):** Gated by `production-promotion` environment, promotes verified draft release to public, preflights appcast generation, and stages candidate appcast to isolated `feed/${TAG}` branch for operator PR review.
+   - **Phase C (`verify-deployed`):** Read-only verification of live CDN feed (`appcast.xml`), ensuring HTTP 200, exact version/build match, signature validation, and enclosure byte integrity.
 2. **Mandatory Sparkle Tool Hash:** `SPARKLE_TOOL_HASH` must be explicitly provided via `vars.SPARKLE_SIGN_UPDATE_SHA256` matching a valid 64-char hex digest. Hardcoded fallback digests in workflow definitions are strictly prohibited.
-3. **Inert Promotion Phases:** If Phase B or Phase C jobs are reached, they fail closed at step 1 with explicit error messaging.
-   - If `docs/RELEASE_APPROVAL.json` is missing on `origin/main` or the target commit does not match `approved_commit_sha`, the workflow fails closed in `unprivileged-qualification`.
+3. **Policy B Immutable Approval Binding:**
+   - `docs/RELEASE_APPROVAL.json` must exist on `origin/main` matching the exact candidate commit SHA, target tag, version, build number, and disarmed spending authority.
+   - If `docs/RELEASE_APPROVAL.json` is missing or the target commit does not match `approved_commit_sha`, the workflow fails closed in `unprivileged-qualification`.
 
 2. **Tag Candidate Commit:**
    ```bash
