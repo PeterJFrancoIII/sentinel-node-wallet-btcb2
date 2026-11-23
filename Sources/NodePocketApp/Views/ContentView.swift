@@ -148,10 +148,13 @@ public struct ContentView: View {
         }
         .navigationTitle("Sentinel Node Wallet - BTCB2")
         .sheet(isPresented: $showAdvancedSheet) {
-            AdvancedSheet()
+            AdvancedSheet(initialTab: 0)
+        }
+        .sheet(isPresented: $state.showSettingsSheet) {
+            AdvancedSheet(initialTab: state.activeSettingsTab)
         }
         .sheet(isPresented: $state.showUninstallWipeSheet) {
-            AdvancedSheet()
+            AdvancedSheet(initialTab: 2)
         }
         .alert(isPresented: $state.showAlert) {
             Alert(

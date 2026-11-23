@@ -222,9 +222,20 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
     case restoreSourceNotFound(String)
     case restoreSourceEmpty(String)
     case restoreTargetWalletAlreadyExists(String)
+    case invalidAmount(String)
+    case signingFailed(String)
+    case walletRelockFailed(wallet: String, underlyingError: String, txid: String)
 
     public var errorDescription: String? {
         switch self {
+        case .walletRelockFailed(let wallet, let underlying, let txid):
+            if !txid.isEmpty {
+                return "Transaction was broadcast (txid: \(txid)), but wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
+            } else {
+                return "Transaction was NOT broadcast or broadcast status is UNKNOWN. Wallet '\(wallet)' failed immediate relock: \(underlying). Passphrase timeout (15s) remains active."
+            }
+        case .signingFailed(let reason):
+            return "Transaction signing or finalization failed: \(reason)"
         case .noWalletLoaded:
             return "No wallet is currently loaded in memory. Load or create an encrypted wallet first."
         case .backupDestinationAlreadyExists(let path):
@@ -269,6 +280,8 @@ public enum WalletSecurityError: Error, LocalizedError, Sendable {
             return "Insufficient spendable balance. Available: \(SatoshiMath.toBTC(sats: avail)) BTCB2, Required: \(SatoshiMath.toBTC(sats: req)) BTCB2."
         case .passphrasesDoNotMatch:
             return "Passphrase confirmation does not match."
+        case .invalidAmount(let reason):
+            return "Invalid transaction amount: \(reason)"
         }
     }
 }
@@ -286,12 +299,95 @@ public actor WalletManager {
     public let walletInventory: WalletInventory
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
-    private var isCreatingWallet = false
+    public private(set) var isCreatingWallet = false
     private var activeStagingSessionIDs = Set<String>()
+
+    public struct PendingFundedPsbtRecord: Sendable {
+        public let psbt: String
+        public let psbtDigest: String
+        public let destination: String
+        public let amountSats: Int64
+        public let feeSats: Int64
+        public let totalInputSats: Int64
+        public let expectedOutputFingerprint: String
+        public let inputs: [String]
+        public let walletName: String
+        public let username: String?
+        public let createdAt: Date
+
+        public init(
+            psbt: String,
+            psbtDigest: String = "",
+            destination: String,
+            amountSats: Int64,
+            feeSats: Int64,
+            totalInputSats: Int64 = 0,
+            expectedOutputFingerprint: String = "",
+            inputs: [String],
+            walletName: String = "",
+            username: String? = nil,
+            createdAt: Date = Date()
+        ) {
+            self.psbt = psbt
+            self.psbtDigest = psbtDigest
+            self.destination = destination
+            self.amountSats = amountSats
+            self.feeSats = feeSats
+            self.totalInputSats = totalInputSats
+            self.expectedOutputFingerprint = expectedOutputFingerprint
+            self.inputs = inputs
+            self.walletName = walletName
+            self.username = username
+            self.createdAt = createdAt
+        }
+    }
+
+    private var pendingFundedPsbts: [UUID: PendingFundedPsbtRecord] = [:]
+
+    public func recordPendingFundedPsbt(
+        id: UUID,
+        psbt: String,
+        destination: String,
+        amountSats: Int64,
+        feeSats: Int64,
+        inputs: [String],
+        psbtDigest: String = "",
+        totalInputSats: Int64 = 0,
+        expectedOutputFingerprint: String = "",
+        walletName: String = "",
+        username: String? = nil
+    ) {
+        guard pendingFundedPsbts[id] == nil else {
+            return // Immutable: prevent post-approval replacement for the same preview UUID
+        }
+        let digest = !psbtDigest.isEmpty ? psbtDigest : SHA256.hash(data: Data(psbt.utf8)).map { String(format: "%02x", $0) }.joined()
+        pendingFundedPsbts[id] = PendingFundedPsbtRecord(
+            psbt: psbt,
+            psbtDigest: digest,
+            destination: destination,
+            amountSats: amountSats,
+            feeSats: feeSats,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint,
+            inputs: inputs,
+            walletName: walletName,
+            username: username,
+            createdAt: Date()
+        )
+    }
+
+    public func getPendingFundedPsbt(id: UUID) -> PendingFundedPsbtRecord? {
+        return pendingFundedPsbts[id]
+    }
+
+    public func consumePendingFundedPsbt(id: UUID) -> PendingFundedPsbtRecord? {
+        return pendingFundedPsbts.removeValue(forKey: id)
+    }
 
     public func resetActiveWallet() {
         self.currentWalletName = nil
         self.latestSnapshot = nil
+        self.pendingFundedPsbts.removeAll()
     }
 
     public func registerStagingSession(_ id: String) {
@@ -342,6 +438,9 @@ public actor WalletManager {
             authCoordinator: authCoordinator,
             allowUnauthenticatedForTesting: allowUnauthenticatedForTesting
         )
+        if let coord = authCoordinator {
+            try? rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+        }
     }
 
     /// Purges any abandoned staging session directories from previous unexpected terminations.
@@ -415,15 +514,26 @@ public actor WalletManager {
         // STRICT MULTI-OPERATOR ISOLATION:
         // When an authenticated capability is provided, load ONLY a wallet owned by this operator.
         if let user = capability?.username, !user.isEmpty {
+            let userKey = user.lowercased()
             let summaries = try await walletInventory.refreshInventory(capability: capability)
-            if let firstOwned = summaries.first(where: { !$0.isArchived })?.name ?? summaries.first?.name {
+            let savedPreferred = UserDefaults.standard.string(forKey: "nodepocket_selected_wallet_\(userKey)")
+
+            let selectedCandidate: String?
+            if let pref = savedPreferred, summaries.contains(where: { $0.name == pref && !$0.isArchived }) {
+                selectedCandidate = pref
+            } else {
+                selectedCandidate = summaries.first(where: { !$0.isArchived })?.name ?? summaries.first?.name
+            }
+
+            if let targetWallet = selectedCandidate {
                 let loaded = try await rpcClient.listWallets()
-                if !loaded.contains(firstOwned) {
-                    _ = try await rpcClient.loadWallet(name: firstOwned)
+                if !loaded.contains(targetWallet) {
+                    _ = try await rpcClient.loadWallet(name: targetWallet)
                 }
-                self.currentWalletName = firstOwned
+                self.currentWalletName = targetWallet
+                UserDefaults.standard.set(targetWallet, forKey: "nodepocket_selected_wallet_\(userKey)")
                 _ = try? await refreshWalletInfo(capability: capability)
-                return firstOwned
+                return targetWallet
             } else {
                 // This operator owns no wallets yet. Do NOT load another operator's wallet!
                 self.currentWalletName = nil
@@ -556,12 +666,23 @@ public actor WalletManager {
             throw WalletCreationError.nodeUnreachable("Failed checking existing wallets: \(err.localizedDescription)")
         }
 
-        let isLoaded = loaded.contains(name)
-        let existsOnDisk = walletDir.wallets.contains(where: { $0.name == name })
+        let isLoaded = loaded.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame })
+        let existsOnDisk = walletDir.wallets.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame })
+        let isNameInUse = await walletInventory.isWalletNameInUse(name)
 
-        if isLoaded || existsOnDisk {
-            // Idempotent recovery: If an interrupted previous attempt succeeded on bitcoind,
-            // verify whether it is a valid encrypted descriptor wallet matching this passphrase.
+        if isLoaded || existsOnDisk || isNameInUse {
+            let caller = capability?.username ?? ""
+            let existingOwner = await walletInventory.getOwner(for: name)
+
+            // Foreign, unassigned, or quarantined wallet: reject immediately!
+            // Never attempt to adopt, unlock, or overwrite!
+            if existingOwner == nil || existingOwner?.lowercased() != caller.lowercased() || caller.isEmpty {
+                throw WalletCreationError.walletAlreadyExists(
+                    "A wallet named '\(name)' already exists. Please choose a different wallet name."
+                )
+            }
+
+            // Same operator recovering an interrupted creation:
             if !isLoaded && existsOnDisk {
                 _ = try? await rpcClient.loadWallet(name: name)
             }
@@ -572,11 +693,13 @@ public actor WalletManager {
                 do {
                     try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 1, walletName: name)
                     try await rpcClient.walletLock(walletName: name)
-                    // Successfully unlocked with matching passphrase! Adopt idempotently.
+                    // Successfully unlocked with matching passphrase! Adopt idempotently for the SAME operator.
                     if storeInKeychain {
                         try await ensurePassphraseCustody(passphrase, account: name)
                     }
+                    try await walletInventory.setOwner(for: name, owner: caller)
                     self.currentWalletName = name
+                    UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(caller.lowercased())")
                     _ = try await refreshWalletInfo(capability: capability)
                     return WalletCreationResult(
                         walletName: name,
@@ -589,10 +712,14 @@ public actor WalletManager {
                 } catch let custodyError as WalletCreationError {
                     throw custodyError
                 } catch {
-                    throw WalletSecurityError.walletAlreadyExists(name)
+                    throw WalletCreationError.walletAlreadyExists(
+                        "A wallet named '\(name)' already exists. Please choose a different wallet name."
+                    )
                 }
             } else {
-                throw WalletSecurityError.walletAlreadyExists(name)
+                throw WalletCreationError.walletAlreadyExists(
+                    "A wallet named '\(name)' already exists. Please choose a different wallet name."
+                )
             }
         }
 
@@ -641,15 +768,16 @@ public actor WalletManager {
             throw WalletSecurityError.walletCreationVerificationFailed
         }
 
+        // Record operator ownership for multi-operator isolation BEFORE refreshWalletInfo
+        if let user = capability?.username, !user.isEmpty {
+            try await walletInventory.setOwner(for: name, owner: user)
+            UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
+        }
+
         self.currentWalletName = name
         let snapshot = try await refreshWalletInfo(capability: capability)
         guard snapshot.isEncrypted, snapshot.descriptors else {
             throw WalletSecurityError.walletCreationVerificationFailed
-        }
-
-        // Record operator ownership for multi-operator isolation
-        if let user = capability?.username, !user.isEmpty {
-            await walletInventory.setOwner(for: name, owner: user)
         }
 
         // Generate and lock Canonical Receive Address for new wallet
@@ -685,7 +813,13 @@ public actor WalletManager {
         if !loaded.contains(name) {
             _ = try await rpcClient.loadWallet(name: name)
         }
+        if let old = self.currentWalletName, old != name {
+            self.pendingFundedPsbts.removeAll()
+        }
         self.currentWalletName = name
+        if let user = capability?.username, !user.isEmpty {
+            UserDefaults.standard.set(name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
+        }
         _ = try await refreshWalletInfo(capability: capability)
     }
 
@@ -752,7 +886,7 @@ public actor WalletManager {
         receiveAddressStore.migrateWallet(from: cleanOld, to: cleanNew)
 
         // Migrate metadata registry ownership
-        await walletInventory.renameWalletMetadata(from: cleanOld, to: cleanNew)
+        try await walletInventory.renameWalletMetadata(from: cleanOld, to: cleanNew)
 
         // Reload under new name
         if wasLoaded {
@@ -952,7 +1086,13 @@ public actor WalletManager {
     ) async throws -> FundedTxPreview {
         try await ensureAuthenticated(capability: capability)
 
-        // 1. Destination address validation
+        // 1. Transaction amount validation with supply bounds (R218-P0-02)
+        let maxSatoshis: Int64 = 2_100_000_000_000_000
+        guard amountSats > 0 && amountSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction amount must be strictly positive and within valid supply limits.")
+        }
+
+        // 2. Destination address validation
         let trimmedAddr = destinationAddress.trimmingCharacters(in: .whitespacesAndNewlines)
         guard AddressBook.isValidBTCB2MainnetAddress(trimmedAddr) else {
             throw WalletSecurityError.invalidMainnetAddress(trimmedAddr)
@@ -982,33 +1122,126 @@ public actor WalletManager {
             throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats)
         }
 
-        // 4. Determine exact or estimated fee & vsize
+        // 4. Determine exact funded PSBT fee, vsize, and UTXO inputs
         let btcAmount = SatoshiMath.toBTC(sats: amountSats)
-        var feeSats: Int64
-        var estimatedVSize: Int
-        var changeSats: Int64
-        let selectedInputs: [String] = []
+        let funded: FundedPsbtResponse
+        do {
+            funded = try await rpcClient.walletCreateFundedPsbt(
+                outputs: [trimmedAddr: btcAmount],
+                feeRateSatPerVB: feeQuote.satPerVB,
+                walletName: walletName
+            )
+        } catch {
+            throw WalletSecurityError.invalidAmount("Failed to construct exact funded PSBT for transaction preview: \(error.localizedDescription)")
+        }
 
-        if let funded = try? await rpcClient.walletCreateFundedPsbt(
-            outputs: [trimmedAddr: btcAmount],
-            feeRateSatPerVB: feeQuote.satPerVB,
-            walletName: walletName
-        ) {
-            feeSats = SatoshiMath.toSats(btc: funded.fee)
-            estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
-            changeSats = max(0, spendableSats - amountSats - feeSats)
+        let selectedInputs = Self.extractInputsFromPsbtBase64(funded.psbt)
+        guard !selectedInputs.isEmpty else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        guard let psbtDetails = Self.parsePsbtDetails(funded.psbt) else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        let feeSats = SatoshiMath.toSats(btc: funded.fee)
+        guard feeSats > 0 && feeSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction fee must be strictly positive and within valid supply limits.")
+        }
+        guard psbtDetails.calculatedFeeSats == feeSats else {
+            throw WalletSecurityError.previewTampered
+        }
+        guard psbtDetails.totalInputSats > 0 && psbtDetails.totalInputSats <= maxSatoshis else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        let (requiredSats, reqOverflow) = amountSats.addingReportingOverflow(feeSats)
+        guard !reqOverflow && requiredSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction amount and fee sum exceeds valid supply limits.")
+        }
+
+        guard let destScript = RawTransactionDecoder.decodeScriptPubKey(for: trimmedAddr) else {
+            throw WalletSecurityError.invalidMainnetAddress(trimmedAddr)
+        }
+
+        // Validate changepos and change output ownership (R217-P0-02, R218-P0-02)
+        let changeSats: Int64
+        if funded.changepos == -1 {
+            // No change: exactly 1 output matching destination
+            guard psbtDetails.outputs.count == 1 else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.outputs[0].scriptPubKey == destScript && psbtDetails.outputs[0].valueSats == amountSats else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.totalInputSats == requiredSats else {
+                throw WalletSecurityError.previewTampered
+            }
+            changeSats = 0
+        } else if funded.changepos >= 0 && funded.changepos < psbtDetails.outputs.count {
+            // Send with change: exactly 2 outputs
+            guard psbtDetails.outputs.count == 2 else {
+                throw WalletSecurityError.previewTampered
+            }
+            let changeOutput = psbtDetails.outputs[funded.changepos]
+            let recipientIndex = (funded.changepos == 0) ? 1 : 0
+            let recipientOutput = psbtDetails.outputs[recipientIndex]
+
+            guard recipientOutput.scriptPubKey == destScript && recipientOutput.valueSats == amountSats else {
+                throw WalletSecurityError.previewTampered
+            }
+
+            changeSats = changeOutput.valueSats
+            guard changeSats > 0 && changeSats <= maxSatoshis else {
+                throw WalletSecurityError.previewTampered
+            }
+            let (expectedTotal, totOverflow) = requiredSats.addingReportingOverflow(changeSats)
+            guard !totOverflow && expectedTotal <= maxSatoshis else {
+                throw WalletSecurityError.previewTampered
+            }
+            guard psbtDetails.totalInputSats == expectedTotal else {
+                throw WalletSecurityError.previewTampered
+            }
+
+            // Verify change script ownership via getaddressinfo
+            guard let changeAddr = RawTransactionDecoder.encodeAddress(for: changeOutput.scriptPubKey) else {
+                throw WalletSecurityError.previewTampered
+            }
+            let addressInfo = try await rpcClient.getAddressInfo(address: changeAddr, walletName: walletName)
+            guard addressInfo.ismine == true && addressInfo.ischange == true else {
+                throw WalletSecurityError.previewTampered
+            }
         } else {
-            // Standard Native SegWit 1-input 2-output transaction: ~141 vB
-            estimatedVSize = 141
-            feeSats = Int64(max(1, feeQuote.satPerVB) * estimatedVSize)
-            changeSats = max(0, spendableSats - amountSats - feeSats)
+            // Invalid changepos (out of bounds or negative other than -1)
+            throw WalletSecurityError.previewTampered
         }
 
-        guard spendableSats >= (amountSats + feeSats) else {
-            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: amountSats + feeSats)
+        let estimatedVSize = max(110, Int(round(Double(feeSats) / Double(max(1, feeQuote.satPerVB)))))
+
+        guard spendableSats >= requiredSats else {
+            throw WalletSecurityError.insufficientFunds(availableSats: spendableSats, requiredSats: requiredSats)
         }
+
+        let outputFingerprint = psbtDetails.outputs.map { "\($0.valueSats):\($0.scriptPubKey.map { String(format: "%02x", $0) }.joined())" }.joined(separator: ";")
+        let psbtDigest = SHA256.hash(data: Data(funded.psbt.utf8)).map { String(format: "%02x", $0) }.joined()
+
+        let previewId = UUID()
+        self.recordPendingFundedPsbt(
+            id: previewId,
+            psbt: funded.psbt,
+            destination: trimmedAddr,
+            amountSats: amountSats,
+            feeSats: feeSats,
+            inputs: psbtDetails.inputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: psbtDetails.totalInputSats,
+            expectedOutputFingerprint: outputFingerprint,
+            walletName: walletName,
+            username: capability?.username
+        )
 
         return FundedTxPreview(
+            id: previewId,
             destinationAddress: trimmedAddr,
             recipientName: recipientName,
             amountSats: amountSats,
@@ -1016,15 +1249,15 @@ public actor WalletManager {
             satPerVB: feeQuote.satPerVB,
             estimatedVSize: estimatedVSize,
             changeSats: changeSats,
-            selectedInputs: selectedInputs,
+            selectedInputs: psbtDetails.inputs,
             createdAt: Date(),
             validityWindowSeconds: 60.0
         )
     }
 
-    /// Production safety HOLD: no signing, wallet unlock, or broadcast is permitted
     /// Authorizes and executes an outbound BTCB2 transaction.
-    /// When rpcClient.isBroadcastRestricted is true, fails closed with signingPathUnverified.
+    /// Strictly requires a valid preview, single-use high-risk approval with bound transaction spend context,
+    /// valid allowlisted address, wallet ownership verification, and issues a single-use SpendAuthorization to BitcoinRPCClient.
     public func executeAuthorizedSend(
         preview: FundedTxPreview,
         explicitPassphrase: String? = nil,
@@ -1036,19 +1269,25 @@ public actor WalletManager {
             throw WalletSecurityError.signingPathUnverified
         }
 
-        if !allowUnauthenticatedForTesting {
-            guard let coord = authCoordinator, let app = approval else {
-                throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
-            }
-            try await coord.consumeHighRiskApproval(app, action: "send", target: preview.destinationAddress)
-        }
-
         // 1. Expiry check
         guard !preview.isExpired else {
             throw WalletSecurityError.previewExpired
         }
 
-        // 2. Re-verify destination and allowlist
+        // 2. Validate amount & fee with checked overflow and supply limits (R218-P0-02)
+        let maxSatoshis: Int64 = 2_100_000_000_000_000
+        guard preview.amountSats > 0 && preview.amountSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction amount must be strictly greater than 0 and within valid supply limits.")
+        }
+        guard preview.feeSats >= 0 && preview.feeSats <= maxSatoshis else {
+            throw WalletSecurityError.invalidAmount("Transaction fee must be non-negative and within valid supply limits.")
+        }
+        let (_, execOverflow) = preview.amountSats.addingReportingOverflow(preview.feeSats)
+        guard !execOverflow else {
+            throw WalletSecurityError.invalidAmount("Transaction amount and fee sum exceeds valid bounds.")
+        }
+
+        // 3. Re-verify destination and allowlist
         guard AddressBook.isValidBTCB2MainnetAddress(preview.destinationAddress) else {
             throw WalletSecurityError.invalidMainnetAddress(preview.destinationAddress)
         }
@@ -1058,7 +1297,7 @@ public actor WalletManager {
             }
         }
 
-        // 3. Resolve passphrase & verify ownership
+        // 4. Resolve passphrase & verify ownership
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
@@ -1069,6 +1308,102 @@ public actor WalletManager {
             }
         }
 
+        // 5. High-risk approval verification
+        guard let coord = authCoordinator, let app = approval else {
+            throw WalletAuthError.unauthorizedHighRiskAction("Missing verified high-risk approval for send execution.")
+        }
+        if let boundContext = app.txContext {
+            guard boundContext.satPerVB == preview.satPerVB else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval satPerVB mismatch.")
+            }
+            guard boundContext.amountSats == preview.amountSats else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval amount mismatch.")
+            }
+            guard boundContext.destinationAddress.lowercased() == preview.destinationAddress.lowercased() else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval destination mismatch.")
+            }
+            guard boundContext.previewId == preview.id else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval preview ID mismatch.")
+            }
+            guard boundContext.walletName == walletName else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Approval wallet mismatch.")
+            }
+        }
+
+        // 6. Validate inputs and spend context
+        guard !preview.selectedInputs.isEmpty else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        // 7. Validate pending funded PSBT matches preview and approved context
+        guard let pending = consumePendingFundedPsbt(id: preview.id) else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        // Validate origin wallet binding (R219-P0-01)
+        if !pending.walletName.isEmpty {
+            guard pending.walletName == walletName else {
+                throw WalletSecurityError.previewTampered
+            }
+        }
+        if let boundUser = pending.username, !boundUser.isEmpty, let execUser = capability?.username, !execUser.isEmpty {
+            guard boundUser.lowercased() == execUser.lowercased() else {
+                throw WalletAuthError.unauthorizedHighRiskAction("Operator mismatch on authorized send.")
+            }
+        }
+
+        guard pending.destination.lowercased() == preview.destinationAddress.lowercased(),
+              pending.amountSats == preview.amountSats,
+              pending.feeSats == preview.feeSats,
+              pending.inputs == preview.selectedInputs else {
+            throw WalletSecurityError.previewTampered
+        }
+
+        if let boundContext = app.txContext {
+            if !boundContext.fundedPsbtDigest.isEmpty {
+                guard pending.psbtDigest == boundContext.fundedPsbtDigest else {
+                    throw WalletSecurityError.previewTampered
+                }
+            }
+            if boundContext.totalInputSats > 0 {
+                guard pending.totalInputSats == boundContext.totalInputSats else {
+                    throw WalletSecurityError.previewTampered
+                }
+            }
+            if !boundContext.expectedOutputFingerprint.isEmpty {
+                guard pending.expectedOutputFingerprint == boundContext.expectedOutputFingerprint else {
+                    throw WalletSecurityError.previewTampered
+                }
+            }
+        }
+
+        let utxoFingerprint = preview.selectedInputs.sorted().joined(separator: ",")
+        let txContext = TransactionSpendContext(
+            walletName: walletName,
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: utxoFingerprint,
+            chain: "main",
+            nonce: app.txContext?.nonce ?? preview.id.uuidString,
+            fundedPsbtDigest: pending.psbtDigest,
+            totalInputSats: pending.totalInputSats,
+            expectedOutputFingerprint: pending.expectedOutputFingerprint
+        )
+
+        let spendAuth = try await coord.consumeHighRiskApprovalAndIssueSpendAuthorization(
+            app,
+            action: "send",
+            target: preview.destinationAddress,
+            authorizedMethod: "sendrawtransaction",
+            expectedTxContext: txContext,
+            fundedPsbtDigest: pending.psbtDigest,
+            totalInputSats: pending.totalInputSats,
+            expectedOutputFingerprint: pending.expectedOutputFingerprint
+        )
+
         let passphrase: String
         if let explicit = explicitPassphrase, !explicit.isEmpty {
             passphrase = explicit
@@ -1076,38 +1411,421 @@ public actor WalletManager {
             passphrase = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
         }
 
-        // 4. Temporarily unlock wallet for 15 seconds to sign and broadcast
-        try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
-
-        // 5. Always immediately re-lock wallet on completion or error
-        defer {
-            Task { [rpcClient, walletName] in
-                try? await rpcClient.walletLock(walletName: walletName)
-            }
-        }
-
-        // 6. Broadcast via sendtoaddress with explicit sat/vB fee rate and BIP-125 replacement enabled
-        let btcAmount = SatoshiMath.toBTC(sats: preview.amountSats)
-        let txid: String
+        // 7. Temporarily unlock wallet for 15 seconds to sign and broadcast
         do {
-            txid = try await rpcClient.sendToAddress(
-                address: preview.destinationAddress,
-                amount: btcAmount,
-                comment: "Sentinel Node Wallet",
-                feeRateSatPerVB: preview.satPerVB,
-                replaceable: true,
-                walletName: walletName
-            )
+            try await rpcClient.walletPassphrase(passphrase: passphrase, timeout: 15, walletName: walletName)
         } catch {
-            try? await rpcClient.walletLock(walletName: walletName)
+            // Attempt cancellation-independent relock cleanup in case unlock reached node before transport failure (R219-P0-02)
+            let isDeterministicAuthFailure: Bool
+            if let rpcErr = error as? RPCClientError, case .serverError(let code, _) = rpcErr, code == -14 {
+                isDeterministicAuthFailure = true
+            } else {
+                isDeterministicAuthFailure = false
+            }
+            if !isDeterministicAuthFailure {
+                _ = await Task.detached { [rpcClient, walletName] in
+                    try? await rpcClient.walletLock(walletName: walletName)
+                }.value
+            }
             throw error
         }
 
-        try? await rpcClient.walletLock(walletName: walletName)
+        // 8. Sign, finalize, and broadcast the exact funded PSBT via sendrawtransaction
+        var txid: String = ""
+        var sendError: Error?
+        do {
+            let processed = try await rpcClient.walletProcessPsbt(
+                psbt: pending.psbt,
+                walletName: walletName,
+                authorization: spendAuth
+            )
+            guard processed.complete else {
+                throw WalletSecurityError.signingFailed("Wallet failed to sign funded PSBT inputs")
+            }
+
+            let finalized = try await rpcClient.finalizePsbt(
+                psbt: processed.psbt,
+                walletName: walletName,
+                authorization: spendAuth
+            )
+            guard finalized.complete, let rawHex = finalized.hex, !rawHex.isEmpty else {
+                throw WalletSecurityError.signingFailed("Failed to finalize signed PSBT into raw transaction")
+            }
+
+            txid = try await rpcClient.sendRawTransaction(
+                hex: rawHex,
+                walletName: walletName,
+                authorization: spendAuth
+            )
+        } catch {
+            sendError = error
+        }
+
+        // 9. Awaited wallet relock cleanup (cancellation-independent, R219-P0-02)
+        var relockError: Error?
+        let lockResult = await Task.detached { [rpcClient, walletName] () -> Result<Void, Error> in
+            do {
+                try await rpcClient.walletLock(walletName: walletName)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        if case .failure(let err) = lockResult {
+            relockError = err
+        }
+
+        // Handle dual error or relock failure:
+        if let rErr = relockError {
+            if let sErr = sendError {
+                throw WalletSecurityError.walletRelockFailed(
+                    wallet: walletName,
+                    underlyingError: "Dual failure: Broadcast failed (\(sErr.localizedDescription)) AND immediate wallet relock failed: \(rErr.localizedDescription)",
+                    txid: ""
+                )
+            } else {
+                throw WalletSecurityError.walletRelockFailed(
+                    wallet: walletName,
+                    underlyingError: rErr.localizedDescription,
+                    txid: txid
+                )
+            }
+        }
+
+        // If relock succeeded, but send failed, rethrow send error
+        if let err = sendError {
+            throw err
+        }
+
         return txid
     }
 
+    public struct ParsedPsbtDetails: Sendable {
+        public let inputs: [String]
+        public let outputs: [DecodedRawTransaction.Output]
+        public let totalInputSats: Int64
+        public let totalOutputSats: Int64
+        public let calculatedFeeSats: Int64
+        public let skeletonFingerprint: String
+        public let baseTx: DecodedRawTransaction
+
+        public init(
+            inputs: [String],
+            outputs: [DecodedRawTransaction.Output],
+            totalInputSats: Int64,
+            totalOutputSats: Int64,
+            calculatedFeeSats: Int64,
+            skeletonFingerprint: String = "",
+            baseTx: DecodedRawTransaction? = nil
+        ) {
+            self.inputs = inputs
+            self.outputs = outputs
+            self.totalInputSats = totalInputSats
+            self.totalOutputSats = totalOutputSats
+            self.calculatedFeeSats = calculatedFeeSats
+            let resolvedBaseTx = baseTx ?? DecodedRawTransaction(inputs: inputs, outputs: outputs)
+            self.baseTx = resolvedBaseTx
+            self.skeletonFingerprint = skeletonFingerprint.isEmpty ? resolvedBaseTx.skeletonFingerprint : skeletonFingerprint
+        }
+    }
+
+    public static func parsePsbtDetails(_ base64: String) -> ParsedPsbtDetails? {
+        guard let data = Data(base64Encoded: base64), data.count >= 5 else { return nil }
+        guard data[0] == 0x70 && data[1] == 0x73 && data[2] == 0x62 && data[3] == 0x74 && data[4] == 0xff else {
+            return nil
+        }
+        var offset = 5
+        var rawTxData: Data?
+        var seenGlobalKeys = Set<Data>()
+
+        // 1. Global map
+        while offset < data.count {
+            guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
+            offset += kLen
+            if keyLen == 0 { break } // Global map ends
+            guard keyLen <= UInt64(data.count - offset) else { return nil }
+            let keyData = data.subdata(in: offset..<(offset + Int(keyLen)))
+            guard seenGlobalKeys.insert(keyData).inserted else { return nil } // Reject duplicate global keys
+            let keyType = data[offset]
+            offset += Int(keyLen)
+            guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
+            offset += vLen
+            guard valLen <= UInt64(data.count - offset) else { return nil }
+            let valData = data.subdata(in: offset..<(offset + Int(valLen)))
+            offset += Int(valLen)
+            if keyType == 0x00 && keyLen == 1 { // PSBT_GLOBAL_UNSIGNED_TX
+                guard rawTxData == nil else { return nil } // Reject duplicate unsigned tx key
+                rawTxData = valData
+            }
+        }
+
+        guard let unsignedTx = rawTxData else { return nil }
+        guard let baseTx = RawTransactionDecoder.decodeUnsignedTx(data: unsignedTx) else { return nil }
+        let inputs = baseTx.inputs
+        let outputs = baseTx.outputs
+        guard !inputs.isEmpty && !outputs.isEmpty else { return nil }
+
+        var totalOutputSats: Int64 = 0
+        for out in outputs {
+            guard out.valueSats > 0 else { return nil }
+            let (newSum, overflow) = totalOutputSats.addingReportingOverflow(out.valueSats)
+            guard !overflow else { return nil }
+            totalOutputSats = newSum
+        }
+
+        // 2. Input maps: exactly baseTx.inputRecords.count input maps
+        var inputPrevoutSats: [Int64] = Array(repeating: 0, count: inputs.count)
+
+        for i in 0..<inputs.count {
+            var seenInputKeys = Set<Data>()
+            var witnessUtxo: (amount: Int64, script: Data)?
+            var nonWitnessUtxo: (amount: Int64, script: Data)?
+            var redeemScript: Data?
+            var inputMapTerminated = false
+
+            while offset < data.count {
+                guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += kLen
+                if keyLen == 0 {
+                    inputMapTerminated = true
+                    break // This input map ends
+                }
+                guard keyLen <= UInt64(data.count - offset) else { return nil }
+                let keyData = data.subdata(in: offset..<(offset + Int(keyLen)))
+                guard seenInputKeys.insert(keyData).inserted else { return nil } // Reject duplicate key in input map
+                let keyType = data[offset]
+                offset += Int(keyLen)
+                guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += vLen
+                guard valLen <= UInt64(data.count - offset) else { return nil }
+                let valData = data.subdata(in: offset..<(offset + Int(valLen)))
+                offset += Int(valLen)
+
+                if keyType == 0x01 && keyLen == 1 { // PSBT_IN_WITNESS_UTXO
+                    guard valData.count >= 9 else { return nil }
+                    var satVal: UInt64 = 0
+                    for b in 0..<8 {
+                        satVal |= UInt64(valData[b]) << (b * 8)
+                    }
+                    guard satVal <= UInt64(Int64.max) && satVal > 0 else { return nil }
+                    guard let (spkLen, spkVarLen) = parseVarInt(valData, at: 8) else { return nil }
+                    // Safe remaining byte bounds and checked conversion/arithmetic BEFORE Int(spkLen) (R217-P0-01)
+                    guard valData.count >= 8 + spkVarLen else { return nil }
+                    let remainingBytes = valData.count - 8 - spkVarLen
+                    guard spkLen <= UInt64(remainingBytes) else { return nil }
+                    guard Int(spkLen) == remainingBytes else { return nil }
+                    let spk = valData.subdata(in: (8 + spkVarLen)..<valData.count)
+                    witnessUtxo = (Int64(satVal), spk)
+                } else if keyType == 0x00 && keyLen == 1 { // PSBT_IN_NON_WITNESS_UTXO
+                    guard let prevTx = RawTransactionDecoder.decode(data: valData) else { return nil }
+                    guard let prevTxid = RawTransactionDecoder.computeTxid(for: valData) else { return nil }
+                    guard prevTxid.lowercased() == baseTx.inputRecords[i].txidHex.lowercased() else { return nil }
+                    let vout = Int(baseTx.inputRecords[i].vout)
+                    guard vout >= 0 && vout < prevTx.outputs.count else { return nil }
+                    let satVal = prevTx.outputs[vout].valueSats
+                    guard satVal > 0 else { return nil }
+                    nonWitnessUtxo = (satVal, prevTx.outputs[vout].scriptPubKey)
+                } else if keyType == 0x04 && keyLen == 1 { // PSBT_IN_REDEEM_SCRIPT
+                    redeemScript = valData
+                }
+            }
+
+            guard inputMapTerminated else { return nil }
+
+            // BIP-174 UTXO resolution
+            if let w = witnessUtxo, let nw = nonWitnessUtxo {
+                // Both are present: verify consistent value and script, do not double-count (R216-P0-02)
+                guard w.amount == nw.amount else { return nil }
+                guard w.script == nw.script else { return nil }
+                if RawTransactionDecoder.isP2SH(w.script) && redeemScript != nil {
+                    guard RawTransactionDecoder.hash160(redeemScript!) == w.script.subdata(in: 2..<22) else { return nil }
+                }
+                inputPrevoutSats[i] = w.amount
+            } else if let w = witnessUtxo {
+                // Witness-only UTXO: MUST be SegWit! (native SegWit or P2SH-wrapped SegWit with valid redeemScript) (R217-P0-01)
+                guard RawTransactionDecoder.isValidSegWit(scriptPubKey: w.script, redeemScript: redeemScript) else {
+                    return nil
+                }
+                inputPrevoutSats[i] = w.amount
+            } else if let nw = nonWitnessUtxo {
+                inputPrevoutSats[i] = nw.amount
+            } else {
+                return nil // Missing prevout!
+            }
+        }
+
+        // 3. Output maps: exactly baseTx.outputs.count output maps
+        for _ in 0..<outputs.count {
+            var seenOutputKeys = Set<Data>()
+            var outputMapTerminated = false
+            while offset < data.count {
+                guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += kLen
+                if keyLen == 0 {
+                    outputMapTerminated = true
+                    break // This output map ends
+                }
+                guard keyLen <= UInt64(data.count - offset) else { return nil }
+                let keyData = data.subdata(in: offset..<(offset + Int(keyLen)))
+                guard seenOutputKeys.insert(keyData).inserted else { return nil } // Reject duplicate key in output map
+                offset += Int(keyLen)
+                guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return nil }
+                offset += vLen
+                guard valLen <= UInt64(data.count - offset) else { return nil }
+                offset += Int(valLen)
+            }
+            guard outputMapTerminated else { return nil }
+        }
+
+        // 4. Exact byte consumption: fail closed on unparsed trailing bytes (R216-P0-02)
+        guard offset == data.count else { return nil }
+
+        // 5. Total input calculation and fee check
+        var totalInputSats: Int64 = 0
+        for inVal in inputPrevoutSats {
+            guard inVal > 0 else { return nil }
+            let (newSum, overflow) = totalInputSats.addingReportingOverflow(inVal)
+            guard !overflow else { return nil }
+            totalInputSats = newSum
+        }
+
+        guard totalInputSats > totalOutputSats else { return nil }
+        let calculatedFeeSats = totalInputSats - totalOutputSats
+
+        return ParsedPsbtDetails(
+            inputs: inputs,
+            outputs: outputs,
+            totalInputSats: totalInputSats,
+            totalOutputSats: totalOutputSats,
+            calculatedFeeSats: calculatedFeeSats,
+            skeletonFingerprint: baseTx.skeletonFingerprint,
+            baseTx: baseTx
+        )
+    }
+
+    public static func extractInputsFromPsbtBase64(_ base64: String) -> [String] {
+        guard let data = Data(base64Encoded: base64), data.count >= 5 else { return [] }
+        guard data[0] == 0x70 && data[1] == 0x73 && data[2] == 0x62 && data[3] == 0x74 && data[4] == 0xff else {
+            return []
+        }
+        var offset = 5
+        var rawTxData: Data?
+        while offset < data.count {
+            guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return [] }
+            offset += kLen
+            if keyLen == 0 { break }
+            guard keyLen <= UInt64(data.count - offset) else { return [] }
+            let keyType = data[offset]
+            offset += Int(keyLen)
+            guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return [] }
+            offset += vLen
+            guard valLen <= UInt64(data.count - offset) else { return [] }
+            let valData = data.subdata(in: offset..<(offset + Int(valLen)))
+            offset += Int(valLen)
+            if keyType == 0x00 && keyLen == 1 { // PSBT_GLOBAL_UNSIGNED_TX
+                guard rawTxData == nil else { return [] }
+                rawTxData = valData
+            }
+        }
+        guard let raw = rawTxData, let baseTx = RawTransactionDecoder.decodeUnsignedTx(data: raw) else {
+            return []
+        }
+        return baseTx.inputs
+    }
+
+    public static func extractOutputsFromPsbtBase64(_ base64: String) -> [DecodedRawTransaction.Output] {
+        guard let data = Data(base64Encoded: base64), data.count >= 5 else { return [] }
+        guard data[0] == 0x70 && data[1] == 0x73 && data[2] == 0x62 && data[3] == 0x74 && data[4] == 0xff else {
+            return []
+        }
+        var offset = 5
+        var rawTxData: Data?
+        while offset < data.count {
+            guard let (keyLen, kLen) = parseVarInt(data, at: offset) else { return [] }
+            offset += kLen
+            if keyLen == 0 { break }
+            guard keyLen <= UInt64(data.count - offset) else { return [] }
+            let keyType = data[offset]
+            offset += Int(keyLen)
+            guard let (valLen, vLen) = parseVarInt(data, at: offset) else { return [] }
+            offset += vLen
+            guard valLen <= UInt64(data.count - offset) else { return [] }
+            let valData = data.subdata(in: offset..<(offset + Int(valLen)))
+            offset += Int(valLen)
+            if keyType == 0x00 && keyLen == 1 { // PSBT_GLOBAL_UNSIGNED_TX
+                guard rawTxData == nil else { return [] }
+                rawTxData = valData
+            }
+        }
+        guard let raw = rawTxData, let baseTx = RawTransactionDecoder.decodeUnsignedTx(data: raw) else {
+            return []
+        }
+        return baseTx.outputs
+    }
+
+    private static func parseRawTxInputs(_ data: Data) -> [String] {
+        guard data.count >= 5 else { return [] }
+        var offset = 4 // skip version (4 bytes)
+        if offset + 2 <= data.count && data[offset] == 0x00 && data[offset + 1] == 0x01 {
+            offset += 2
+        }
+        guard offset < data.count else { return [] }
+        guard let (inCount, varintLen) = parseVarInt(data, at: offset), inCount > 0, inCount <= UInt64(data.count / 41) else { return [] }
+        offset += varintLen
+        var inputs: [String] = []
+        for _ in 0..<inCount {
+            guard offset + 36 <= data.count else { break }
+            let txidBytes = data.subdata(in: offset..<(offset + 32))
+            let txidHex = txidBytes.reversed().map { String(format: "%02x", $0) }.joined()
+            offset += 32
+            let vout = UInt32(data[offset]) | (UInt32(data[offset + 1]) << 8) | (UInt32(data[offset + 2]) << 16) | (UInt32(data[offset + 3]) << 24)
+            offset += 4
+            guard let (scriptLen, sLen) = parseVarInt(data, at: offset) else { break }
+            offset += sLen
+            // Safe remaining-length guard before subtraction/casting (R216-P0-04)
+            guard data.count - offset >= 4 else { break }
+            guard scriptLen <= UInt64(data.count - offset - 4) else { break }
+            guard offset + Int(scriptLen) + 4 <= data.count else { break }
+            offset += Int(scriptLen) + 4 // script + sequence
+            inputs.append("\(txidHex):\(vout)")
+        }
+        return inputs
+    }
+
+    private static func parseRawTxOutputs(_ data: Data) -> [DecodedRawTransaction.Output] {
+        guard let decoded = RawTransactionDecoder.decode(data: data) else { return [] }
+        return decoded.outputs
+    }
+
+    public static func parseVarInt(_ data: Data, at offset: Int) -> (value: UInt64, length: Int)? {
+        guard offset < data.count else { return nil }
+        let first = data[offset]
+        if first < 0xfd {
+            return (UInt64(first), 1)
+        } else if first == 0xfd {
+            guard offset + 3 <= data.count else { return nil }
+            let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8)
+            guard val >= 0xfd else { return nil }
+            return (val, 3)
+        } else if first == 0xfe {
+            guard offset + 5 <= data.count else { return nil }
+            let val = UInt64(data[offset + 1]) | (UInt64(data[offset + 2]) << 8) | (UInt64(data[offset + 3]) << 16) | (UInt64(data[offset + 4]) << 24)
+            guard val >= 0x10000 else { return nil }
+            return (val, 5)
+        } else {
+            guard offset + 9 <= data.count else { return nil }
+            var val: UInt64 = 0
+            for i in 0..<8 {
+                val |= UInt64(data[offset + 1 + i]) << (i * 8)
+            }
+            guard val >= 0x100000000 else { return nil }
+            return (val, 9)
+        }
+    }
+
     /// Legacy compatibility send method with strict V7 guards.
+    /// In Choice B production release, this unapproved legacy path is disabled to prevent
+    /// bypassing single-use HighRiskApproval, funded preview validation, and address allowlist checks.
     public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil, capability: WalletAuthCapability? = nil) async throws -> String {
         try await ensureAuthenticated(capability: capability)
         if rpcClient.isBroadcastRestricted {
@@ -1116,19 +1834,20 @@ public actor WalletManager {
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }
-        let pass: String
-        if let explicit = passphrase {
-            pass = explicit
-        } else {
-            pass = try await passphraseCustody.retrievePassphraseInteractively(account: walletName)
+        guard amount > 0 else {
+            throw WalletSecurityError.invalidAmount("Send amount must be greater than 0.")
         }
-        try await rpcClient.walletPassphrase(passphrase: pass, timeout: 15, walletName: walletName)
-        defer {
-            Task { [rpcClient, walletName] in
-                try? await rpcClient.walletLock(walletName: walletName)
+        guard AddressBook.isValidBTCB2MainnetAddress(destinationAddress) else {
+            throw WalletSecurityError.invalidMainnetAddress(destinationAddress)
+        }
+        if addressBook.isAllowlistEnabled {
+            guard addressBook.isAllowed(address: destinationAddress) else {
+                throw WalletSecurityError.allowlistBlocked(destinationAddress)
             }
         }
-        return try await rpcClient.sendToAddress(address: destinationAddress, amount: amount, walletName: walletName)
+        // Legacy send() lacks single-use HighRiskApproval and is disabled to prevent authorization bypass.
+        // All outbound transfers must execute via executeAuthorizedSend with a funded preview and user approval.
+        throw WalletAuthError.unauthorizedHighRiskAction("Legacy send() is disabled. Outbound transfers require a funded preview and single-use HighRiskApproval via executeAuthorizedSend.")
     }
 
     /// Restores a wallet from an existing backup file.
@@ -1165,7 +1884,8 @@ public actor WalletManager {
         }
         let resp = try await rpcClient.restoreWallet(name: trimmedName, backupFile: backupFile.path)
         if let user = capability?.username, !user.isEmpty {
-            await walletInventory.setOwner(for: resp.name, owner: user)
+            try await walletInventory.setOwner(for: resp.name, owner: user)
+            UserDefaults.standard.set(resp.name, forKey: "nodepocket_selected_wallet_\(user.lowercased())")
         }
         self.currentWalletName = resp.name
         _ = try await refreshWalletInfo(capability: capability)

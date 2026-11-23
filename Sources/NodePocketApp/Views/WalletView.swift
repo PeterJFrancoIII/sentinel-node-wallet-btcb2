@@ -6,12 +6,21 @@ public struct WalletView: View {
 
     // Wallet Lifecycle Sheets
     @State private var showCreateModal = false
-    @State private var walletNameInput = "main_wallet"
+    @State private var createModalToken = UUID()
+    @State private var walletNameInput = ""
     @State private var passphraseInput = ""
     @State private var passphraseConfirmInput = ""
     @State private var storeInKeychain = true
     @State private var showWalletPassphrase = false
     @State private var isCreatingWallet = false
+    @State private var showAccountSettingsModal = false
+    @State private var purgePasswordInput = ""
+    @State private var purgeTotpInput = ""
+    @State private var purgeConfirmationInput = ""
+    @State private var purgeErrorMessage: String? = nil
+    @State private var isPurgingAccount = false
+    @State private var purgePreflightInventory: OperatorPurgePreflightInventory? = nil
+    @State private var isPreflightRunning = false
 
     // Send Form Fields
     @State private var sendAddressInput = ""
@@ -73,9 +82,12 @@ public struct WalletView: View {
     @State private var selectedTxFilter: String = "all"
 
     // V13 Local Login & 2FA State
+    @AppStorage("lastSelectedOperatorUsername") private var lastOperatorUsername: String = ""
+    @State private var createWalletErrorMessage: String? = nil
     @State private var loginUsername: String = ""
     @State private var loginPassword: String = ""
     @State private var appleSavedPasswordCoordinator: AppleSavedPasswordCoordinator? = nil
+    @State private var autofillSessionToken: UInt64 = 0
     @State private var isApplePasswordSaved: Bool = false
     @State private var loginTotpCode: String = ""
     @State private var loginRecoveryCode: String = ""
@@ -88,6 +100,10 @@ public struct WalletView: View {
     @State private var isAuthActionInProgress: Bool = false
     @State private var authLocalError: String? = nil
     @State private var showEnrollmentCard: Bool = false
+
+    private var cleanLoginTotp: String {
+        loginTotpCode.filter { !$0.isWhitespace && $0 != "-" }
+    }
 
     // Price Service & Override Sheet
     @State private var showPriceOverrideSheet: Bool = false
@@ -129,7 +145,7 @@ public struct WalletView: View {
         }
         .onAppear {
             state.refreshAuthState()
-            if loginUsername.isEmpty { loginUsername = state.enrolledUsername ?? state.enrolledUsernames.first ?? "" }
+            reconcileOperatorSelection(with: state.enrolledUsernames)
             state.refreshFeeQuotes()
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
@@ -147,13 +163,24 @@ public struct WalletView: View {
                 showNodePromptSheet = false
             }
         }
+        .onChange(of: state.enrolledUsernames) { names in
+            reconcileOperatorSelection(with: names)
+        }
         .onChange(of: state.enrolledUsername) { newName in
             if loginUsername.isEmpty { loginUsername = newName ?? "" }
         }
-        .onChange(of: loginUsername) { _ in
+        .onChange(of: loginUsername) { newUser in
+            if !newUser.isEmpty {
+                lastOperatorUsername = newUser
+            }
+            autofillSessionToken &+= 1
+            appleSavedPasswordCoordinator?.cancel()
+            appleSavedPasswordCoordinator = nil
+            isAuthActionInProgress = false
             loginPassword = ""
             loginTotpCode = ""
             isApplePasswordSaved = false
+            authLocalError = nil
         }
         .onChange(of: state.isWalletTabUnlocked) { unlocked in
             if !unlocked {
@@ -179,6 +206,28 @@ public struct WalletView: View {
         }
         .onChange(of: state.walletSnapshot?.trustedBalance) { _ in
             recheckAndClampSendAmount()
+        }
+        .onChange(of: showCreateModal) { isOpen in
+            if isOpen {
+                let token = UUID()
+                self.createModalToken = token
+                let sessionID = state.authSession?.id
+                let currentUser = state.authSession?.username
+                Task { @MainActor in
+                    let suggested = await state.generateDefaultWalletName()
+                    guard self.showCreateModal,
+                          self.createModalToken == token,
+                          state.authSession?.id == sessionID,
+                          state.authSession?.username == currentUser,
+                          walletNameInput.isEmpty else {
+                        return
+                    }
+                    walletNameInput = suggested
+                }
+            }
+        }
+        .sheet(isPresented: $showAccountSettingsModal) {
+            accountSettingsSheet
         }
         .sheet(isPresented: $showNodePromptSheet) {
             nodeStartupPromptSheet
@@ -247,6 +296,14 @@ public struct WalletView: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 4)
                     .background(RoundedRectangle(cornerRadius: 6).fill(Color.green.opacity(0.1)))
+
+                    Button(action: {
+                        showAccountSettingsModal = true
+                    }) {
+                        Label("Account", systemImage: "gearshape")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
 
                     Button(action: {
                         state.lockWallet()
@@ -565,7 +622,9 @@ public struct WalletView: View {
                 .frame(maxWidth: 480)
             }
 
-            if !state.isAuthEnrolled || showEnrollmentCard {
+            if let registryError = state.authRegistryError {
+                registryErrorCard(error: registryError)
+            } else if !state.isAuthEnrolled || showEnrollmentCard {
                 enrollmentCard
             } else {
                 loginCard
@@ -573,6 +632,47 @@ public struct WalletView: View {
         }
         .padding(32)
         .frame(maxWidth: .infinity)
+    }
+
+    private func registryErrorCard(error: String) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.octagon.fill")
+                    .foregroundColor(.red)
+                    .font(.title2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Authentication Registry Error")
+                        .font(.headline)
+                        .foregroundColor(.red)
+                    Text("The authentication registry cannot be loaded securely. Setup and login are blocked to protect existing operator credentials.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Error Details").font(.caption).bold()
+                Text(error)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                    .padding(8)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color(NSColor.textBackgroundColor)))
+            }
+
+            HStack {
+                Button("Retry Reloading Registry") {
+                    state.refreshAuthState()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+        }
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color(NSColor.controlBackgroundColor)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.red.opacity(0.3), lineWidth: 1)
+        )
+        .frame(maxWidth: 480)
     }
 
     private var enrollmentCard: some View {
@@ -734,10 +834,8 @@ public struct WalletView: View {
                     authLocalError = nil
                     defer { isAuthActionInProgress = false }
                     do {
-                        let enrolledName = enrollUsername
-                        let passToSave = enrollPassword
                         try await state.enrollUser(password: enrollPassword, totpCode: enrollTotpCode)
-                        try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: enrolledName, password: passToSave)
+                        isApplePasswordSaved = await state.isLastPasswordSavedToKeychain
                         enrollUsername = ""
                         enrollPassword = ""
                         enrollTotpCode = ""
@@ -813,17 +911,40 @@ public struct WalletView: View {
                     .stroke(Color.blue.opacity(0.3), lineWidth: 1)
             )
 
+            if let regErr = state.authRegistryError {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auth Registry Storage Notice").bold().font(.caption)
+                        Text(regErr).font(.caption2)
+                        Text("Existing accounts remain protected on disk. Do not reinstall or re-enroll.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.1)))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+            }
+
             if !showRecoveryLogin {
                 if state.enrolledUsernames.count > 1 {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Select Operator Account").font(.caption).bold()
-                        Picker("Account", selection: $loginUsername) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Select Operator Account").font(.caption).bold()
+                            Spacer()
+                            Text("Selected: \(loginUsername.isEmpty ? "None" : loginUsername)")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                                .bold()
+                        }
+                        Picker("Operator Account", selection: $loginUsername) {
                             ForEach(state.enrolledUsernames, id: \.self) { u in
                                 Text(u).tag(u)
                             }
                         }
-                        .pickerStyle(.menu)
-                        .frame(maxWidth: .infinity)
+                        .pickerStyle(.segmented)
                     }
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
@@ -871,12 +992,12 @@ public struct WalletView: View {
                 .accessibilityIdentifier("user-login-apple-passwords")
                 .disabled(isAuthActionInProgress)
 
-                if isApplePasswordSaved || !loginPassword.isEmpty {
+                if isApplePasswordSaved {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.shield.fill")
                             .foregroundColor(.green)
                             .font(.caption)
-                        Text("Credentials authenticated and loaded from Keychain")
+                        Text("Credentials authenticated and loaded from Keychain / Apple Passwords")
                             .font(.caption2)
                             .foregroundColor(.green)
                     }
@@ -899,10 +1020,9 @@ public struct WalletView: View {
                             authLocalError = nil
                             defer { isAuthActionInProgress = false }
                             do {
-                                let userToSave = loginUsername
-                                let passToSave = loginPassword
-                                try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
-                                try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: userToSave, password: passToSave)
+                                try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: cleanLoginTotp)
+                                lastOperatorUsername = loginUsername
+                                isApplePasswordSaved = await state.isLastPasswordSavedToKeychain
                                 loginPassword = ""
                                 loginTotpCode = ""
                             } catch {
@@ -918,7 +1038,7 @@ public struct WalletView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .accessibilityIdentifier("user-login-submit")
-                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || loginTotpCode.count != 6 || isAuthActionInProgress)
+                    .disabled(loginUsername.isEmpty || loginPassword.isEmpty || cleanLoginTotp.count != 6 || isAuthActionInProgress)
 
                     Button(action: {
                         requestAutofillWithBiometrics(for: loginUsername, andLogin: true)
@@ -1002,6 +1122,16 @@ public struct WalletView: View {
 
     // MARK: - Apple Passwords & macOS Keychain Biometric Autofill
 
+    private func reconcileOperatorSelection(with names: [String]) {
+        guard !names.isEmpty else { return }
+        if !lastOperatorUsername.isEmpty,
+           let match = names.first(where: { $0.caseInsensitiveCompare(lastOperatorUsername) == .orderedSame }) {
+            loginUsername = match
+        } else if loginUsername.isEmpty || !names.contains(where: { $0.caseInsensitiveCompare(loginUsername) == .orderedSame }) {
+            loginUsername = state.enrolledUsername ?? names.first ?? ""
+        }
+    }
+
     private func requestAutofillWithBiometrics(for username: String? = nil, andLogin: Bool = false) {
         let target = (username?.isEmpty ?? true)
             ? (state.enrolledUsername ?? state.enrolledUsernames.first ?? "")
@@ -1015,14 +1145,30 @@ public struct WalletView: View {
             loginUsername = target
         }
 
+        // Cancel any previous in-flight credential picker to avoid race conditions
+        appleSavedPasswordCoordinator?.cancel()
+        appleSavedPasswordCoordinator = nil
+
+        // WO-28 Generation-token single-flight state machine:
+        // Invalidate any previously launched async requests or callbacks
+        autofillSessionToken &+= 1
+        let currentSessionToken = autofillSessionToken
+        let cleanTarget = target.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
         isAuthActionInProgress = true
         authLocalError = nil
 
         Task { @MainActor in
-            defer { isAuthActionInProgress = false }
+            defer {
+                if autofillSessionToken == currentSessionToken && appleSavedPasswordCoordinator == nil {
+                    isAuthActionInProgress = false
+                }
+            }
             do {
                 // Prompt user for fingerprint (Touch ID) or Mac password
-                let creds = try await state.retrieveOperatorCredentialsWithBiometrics(username: target)
+                let creds = try await state.retrieveOperatorCredentialsWithBiometrics(username: cleanTarget)
+                guard autofillSessionToken == currentSessionToken else { return }
+
                 var credentialsFound = false
 
                 if let pass = creds.password, !pass.isEmpty {
@@ -1039,20 +1185,53 @@ public struct WalletView: View {
                 if !credentialsFound || loginPassword.isEmpty {
                     let picker = AppleSavedPasswordCoordinator()
                     picker.onCredential = { user, pass in
-                        loginUsername = user
+                        guard autofillSessionToken == currentSessionToken else { return }
+                        let cleanReturnedUser = user.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+                        // WO-28 Selected-Operator Immutability: When Apple Passwords returns an account that differs
+                        // from target, MUST NOT silently switch operators or populate password—reject and require
+                        // deliberate operator selection.
+                        if cleanReturnedUser != cleanTarget {
+                            authLocalError = "Autofilled credentials for '\(user)' do not match selected operator '\(target)'. Please select operator '\(user)' directly or choose the matching account in Apple Passwords."
+                            loginPassword = ""
+                            loginTotpCode = ""
+                            isApplePasswordSaved = false
+                            appleSavedPasswordCoordinator?.cancel()
+                            appleSavedPasswordCoordinator = nil
+                            isAuthActionInProgress = false
+                            return
+                        }
+
+                        // Bind to cleanTarget without mutating loginUsername (avoids triggering .onChange wipe)
                         loginPassword = pass
-                        isApplePasswordSaved = true
                         authLocalError = nil
+                        appleSavedPasswordCoordinator?.cancel()
                         appleSavedPasswordCoordinator = nil
-                        try? WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: user, password: pass)
+
+                        // WO-28: Set isApplePasswordSaved only on verified save; zero secrets in logs
+                        do {
+                            try WalletAuthCoordinator.saveOperatorPasswordToKeychain(username: cleanTarget, password: pass)
+                            isApplePasswordSaved = true
+                        } catch {
+                            isApplePasswordSaved = false
+                        }
+
                         Task { @MainActor in
-                            if let refreshed = try? await state.retrieveOperatorCredentialsWithBiometrics(username: user),
-                               let c = refreshed.totpCode {
+                            defer { isAuthActionInProgress = false }
+                            guard autofillSessionToken == currentSessionToken else { return }
+                            if let refreshed = try? await state.retrieveOperatorCredentialsWithBiometrics(username: cleanTarget),
+                               let c = refreshed.totpCode, !c.isEmpty {
+                                guard autofillSessionToken == currentSessionToken else { return }
                                 loginTotpCode = c
                             }
-                            if andLogin && !loginPassword.isEmpty && loginTotpCode.count == 6 {
+                            if andLogin {
+                                guard autofillSessionToken == currentSessionToken else { return }
+                                let passToLogin = loginPassword
+                                let codeToLogin = cleanLoginTotp
+                                guard !passToLogin.isEmpty && codeToLogin.count == 6 else { return }
                                 do {
-                                    try await state.loginUser(username: loginUsername, password: loginPassword, totpCode: loginTotpCode)
+                                    try await state.loginUser(username: cleanTarget, password: passToLogin, totpCode: codeToLogin)
+                                    lastOperatorUsername = cleanTarget
                                     loginPassword = ""
                                     loginTotpCode = ""
                                 } catch {
@@ -1061,11 +1240,20 @@ public struct WalletView: View {
                             }
                         }
                     }
+                    picker.onCancel = {
+                        guard autofillSessionToken == currentSessionToken else { return }
+                        appleSavedPasswordCoordinator?.cancel()
+                        appleSavedPasswordCoordinator = nil
+                        isAuthActionInProgress = false
+                    }
                     picker.onFailure = { err in
+                        guard autofillSessionToken == currentSessionToken else { return }
                         if loginPassword.isEmpty {
                             authLocalError = err
                         }
+                        appleSavedPasswordCoordinator?.cancel()
                         appleSavedPasswordCoordinator = nil
+                        isAuthActionInProgress = false
                     }
                     appleSavedPasswordCoordinator = picker
                     picker.requestSavedLogin(isInteractive: true)
@@ -1073,16 +1261,18 @@ public struct WalletView: View {
                 }
 
                 if andLogin {
-                    if !loginUsername.isEmpty && !loginPassword.isEmpty && loginTotpCode.count == 6 {
-                        let userToLogin = loginUsername
-                        let passToLogin = loginPassword
-                        let codeToLogin = loginTotpCode
-                        try await state.loginUser(username: userToLogin, password: passToLogin, totpCode: codeToLogin)
+                    guard autofillSessionToken == currentSessionToken else { return }
+                    let passToLogin = loginPassword
+                    let codeToLogin = cleanLoginTotp
+                    if !passToLogin.isEmpty && codeToLogin.count == 6 {
+                        try await state.loginUser(username: cleanTarget, password: passToLogin, totpCode: codeToLogin)
+                        lastOperatorUsername = cleanTarget
                         loginPassword = ""
                         loginTotpCode = ""
                     }
                 }
             } catch {
+                guard autofillSessionToken == currentSessionToken else { return }
                 if case WalletAuthError.deviceOwnerAuthCanceled = error {
                     authLocalError = "Autofill canceled: Fingerprint (Touch ID) or Mac password required."
                 } else {
@@ -3615,8 +3805,23 @@ public struct WalletView: View {
             .background(Color(NSColor.controlBackgroundColor).opacity(0.6))
             .cornerRadius(6)
 
+            if let errorMsg = createWalletErrorMessage {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(errorMsg)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.red.opacity(0.1))
+                .cornerRadius(6)
+            }
+
             HStack {
                 Button("Cancel") {
+                    createWalletErrorMessage = nil
                     passphraseInput = ""
                     passphraseConfirmInput = ""
                     showWalletPassphrase = false
@@ -3626,6 +3831,7 @@ public struct WalletView: View {
                 .buttonStyle(.bordered)
 
                 Button("Open / Restore Existing Wallet…") {
+                    createWalletErrorMessage = nil
                     showCreateModal = false
                     showOpenRestoreModal = true
                 }
@@ -3636,12 +3842,14 @@ public struct WalletView: View {
 
                 Button("Create Encrypted Wallet") {
                     guard !isCreatingWallet else { return }
+                    createWalletErrorMessage = nil
                     let name = walletNameInput.trimmingCharacters(in: .whitespacesAndNewlines)
                     let passphrase = passphraseInput
                     let save = storeInKeychain
                     guard WalletManager.isValidWalletName(name),
                           !passphrase.isEmpty,
                           passphrase == passphraseConfirmInput else {
+                        createWalletErrorMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.alertMessage = "Enter a unique wallet name and matching encryption passphrases."
                         state.showAlert = true
                         return
@@ -3654,7 +3862,9 @@ public struct WalletView: View {
                             let result = try await state.createEncryptedWallet(
                                 name: name, passphrase: passphrase, storeInKeychain: save
                             )
+                            createWalletErrorMessage = nil
                             showCreateModal = false
+                            selectedWalletToOpen = result.walletName
                             passphraseInput = ""
                             passphraseConfirmInput = ""
                             showWalletPassphrase = false
@@ -3666,9 +3876,11 @@ public struct WalletView: View {
                             }
                             state.showAlert = true
                         } catch let creationErr as WalletCreationError {
+                            createWalletErrorMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.alertMessage = "Wallet creation failed: \(creationErr.localizedDescription)"
                             state.showAlert = true
                         } catch {
+                            createWalletErrorMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.alertMessage = "Wallet creation failed: \(error.localizedDescription)"
                             state.showAlert = true
                         }
@@ -4199,5 +4411,179 @@ public struct WalletView: View {
         }
         .padding(24)
         .frame(width: 460)
+    }
+
+    private var accountSettingsSheet: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("Operator Account Settings")
+                    .font(.headline)
+                Spacer()
+                Button("Done") {
+                    showAccountSettingsModal = false
+                    purgePasswordInput = ""
+                    purgeTotpInput = ""
+                    purgeConfirmationInput = ""
+                    purgeErrorMessage = nil
+                }
+                .buttonStyle(.bordered)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Active Operator:")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: "person.crop.circle.fill")
+                        .foregroundColor(.green)
+                    Text(state.enrolledUsername ?? "Unknown")
+                        .font(.subheadline)
+                        .bold()
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(NSColor.controlBackgroundColor))
+            .cornerRadius(6)
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundColor(.red)
+                    Text("Permanent Account & Wallet Data Deletion")
+                        .font(.subheadline)
+                        .bold()
+                        .foregroundColor(.red)
+                }
+
+                Text("Permanently removes your operator account, all Keychain credentials, and all exclusively owned encrypted wallet files. Unrecoverable. Only permitted if all your owned wallets have exactly zero balance.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if isPreflightRunning {
+                    ProgressView("Analyzing owned wallets and balances…")
+                        .controlSize(.small)
+                } else if let inventory = purgePreflightInventory {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Owned Wallets: \(inventory.ownedWallets.count) (\(inventory.ownedWallets.joined(separator: ", ")))")
+                            .font(.caption)
+                        Text("Total Balance: \(WalletSummary.satsToBTCB2(inventory.totalBalanceSats)) BTCB2 (\(inventory.totalBalanceSats) sats)")
+                            .font(.caption)
+                            .foregroundColor(inventory.totalBalanceSats > 0 ? .red : .primary)
+                        if let reason = inventory.blockingReason {
+                            Text("HOLD: \(reason)")
+                                .font(.caption)
+                                .foregroundColor(.red)
+                                .bold()
+                        }
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08))
+                    .cornerRadius(6)
+                }
+
+                SecureField("Current Password", text: $purgePasswordInput)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Fresh 6-digit TOTP or Recovery Code", text: $purgeTotpInput)
+                    .textFieldStyle(.roundedBorder)
+
+                TextField("Type '\(state.enrolledUsername ?? "")' to confirm", text: $purgeConfirmationInput)
+                    .textFieldStyle(.roundedBorder)
+
+                #if !DEBUG
+                HStack(spacing: 8) {
+                    Image(systemName: "lock.shield.fill")
+                        .foregroundColor(.orange)
+                    Text("Permanent account & wallet deletion is strictly disabled in production builds pending independent security qualification.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.1))
+                .cornerRadius(6)
+                #endif
+
+                if let err = purgeErrorMessage {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundColor(.red)
+                }
+
+                HStack {
+                    Button("Check Deletion Eligibility") {
+                        Task {
+                            isPreflightRunning = true
+                            purgeErrorMessage = nil
+                            do {
+                                purgePreflightInventory = try await state.accountPurgeCoordinator.preflight(
+                                    username: state.enrolledUsername ?? "",
+                                    capability: state.authSession
+                                )
+                            } catch {
+                                purgeErrorMessage = error.localizedDescription
+                            }
+                            isPreflightRunning = false
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isPurgingAccount)
+
+                    Spacer()
+
+                    Button("Delete Account & Wallets Permanently") {
+                        guard !isPurgingAccount else { return }
+                        isPurgingAccount = true
+                        purgeErrorMessage = nil
+                        Task { @MainActor in
+                            defer { isPurgingAccount = false }
+                            do {
+                                let purged = try await state.purgeCurrentOperatorAccount(
+                                    password: purgePasswordInput,
+                                    totpOrRecoveryCode: purgeTotpInput,
+                                    typedConfirmation: purgeConfirmationInput
+                                )
+                                showAccountSettingsModal = false
+                                state.alertMessage = "Account '\(purgeConfirmationInput)' and \(purged.count) wallet(s) have been permanently deleted."
+                                state.showAlert = true
+                            } catch {
+                                purgeErrorMessage = error.localizedDescription
+                            }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red)
+                    #if !DEBUG
+                    .disabled(true)
+                    #else
+                    .disabled(
+                        isPurgingAccount ||
+                        purgePasswordInput.isEmpty ||
+                        purgeTotpInput.isEmpty ||
+                        purgeConfirmationInput != state.enrolledUsername ||
+                        (purgePreflightInventory?.isEligibleForPermanentDeletion == false)
+                    )
+                    #endif
+                }
+            }
+            .padding(12)
+            .background(RoundedRectangle(cornerRadius: 8).stroke(Color.red.opacity(0.3), lineWidth: 1))
+        }
+        .padding(20)
+        .frame(width: 520)
+        .onAppear {
+            Task {
+                if let user = state.enrolledUsername {
+                    purgePreflightInventory = try? await state.accountPurgeCoordinator.preflight(
+                        username: user,
+                        capability: state.authSession
+                    )
+                }
+            }
+        }
     }
 }

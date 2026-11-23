@@ -68,6 +68,23 @@ public struct SystemHealthSnapshot: Sendable {
         return freeDiskGB < 10.0
     }
 
+    public var isDiskSpaceCritical: Bool {
+        guard !isDiskSpaceUnknown else { return false }
+        return freeDiskGB < 2.0
+    }
+
+    public var diskCapacityDescription: String {
+        if isDiskSpaceUnknown {
+            return "Unknown disk capacity"
+        } else if freeDiskBytes == 0 {
+            return "0 B available (Critical: full)"
+        } else if isDiskSpaceLow {
+            return String(format: "%.1f GB available (Low disk space)", freeDiskGB)
+        } else {
+            return String(format: "%.1f GB available", freeDiskGB)
+        }
+    }
+
     public var thermalDescription: String {
         switch thermalState {
         case .nominal: return "Nominal"
@@ -91,11 +108,16 @@ public final class SystemHealthMonitor: @unchecked Sendable {
         // Disk space
         let freeBytes: Int64
         if let values = try? dataDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-           let avail = values.volumeAvailableCapacityForImportantUsage {
+           let avail = values.volumeAvailableCapacityForImportantUsage,
+           avail > 0 {
             freeBytes = avail
         } else if let values = try? dataDirectory.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
-                  let avail = values.volumeAvailableCapacity {
+                  let avail = values.volumeAvailableCapacity,
+                  avail > 0 {
             freeBytes = Int64(avail)
+        } else if let attrs = try? FileManager.default.attributesOfFileSystem(forPath: dataDirectory.path),
+                  let fsAvail = attrs[.systemFreeSize] as? NSNumber {
+            freeBytes = fsAvail.int64Value
         } else {
             freeBytes = -1 // Unknown / unmeasured - do not invent fallback
         }

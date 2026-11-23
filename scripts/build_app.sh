@@ -8,6 +8,10 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 cd "${ROOT_DIR}"
 
+BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
+SHORT_VERSION="${SENTINEL_SHORT_VERSION:-1.0.0}"
+BUILD_NUMBER="${SENTINEL_BUILD_NUMBER:-4}"
+
 # Build release configuration with Swift Package Manager
 swift build -c release --arch arm64
 
@@ -57,6 +61,14 @@ if [ -f "${ROOT_DIR}/Resources/AppIcon.icns" ]; then
     cp "${ROOT_DIR}/Resources/AppIcon.icns" "${APP_BUNDLE}/Contents/Resources/AppIcon.icns"
 fi
 
+# Embed Sparkle.framework if present in binary output directory
+if [ -d "${BIN_DIR}/Sparkle.framework" ]; then
+    echo "Embedding Sparkle.framework into bundle..."
+    mkdir -p "${APP_BUNDLE}/Contents/Frameworks"
+    cp -R "${BIN_DIR}/Sparkle.framework" "${APP_BUNDLE}/Contents/Frameworks/"
+    install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP_BUNDLE}/Contents/MacOS/SentinelNodeWallet" 2>/dev/null || true
+fi
+
 # Create Info.plist
 cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
 <?xml version="1.0" encoding="UTF-8"?>
@@ -66,7 +78,7 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundleExecutable</key>
     <string>SentinelNodeWallet</string>
     <key>CFBundleIdentifier</key>
-    <string>pool.sentineldefensetechnologies.co.za</string>
+    <string>${BUNDLE_ID}</string>
     <key>CFBundleName</key>
     <string>Sentinel Node Wallet</string>
     <key>CFBundleDisplayName</key>
@@ -76,26 +88,77 @@ cat <<EOF > "${APP_BUNDLE}/Contents/Info.plist"
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${SHORT_VERSION}</string>
     <key>CFBundleVersion</key>
-    <string>3</string>
+    <string>${BUILD_NUMBER}</string>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.finance</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUAllowsAutomaticUpdates</key>
+    <true/>
+    <key>SUFeedURL</key>
+    <string>https://raw.githubusercontent.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/main/dist/appcast.xml</string>
 </dict>
 </plist>
 EOF
 
+if [ -n "${SPARKLE_PUBLIC_ED_KEY:-}" ]; then
+    echo "Injecting SUPublicEDKey into Info.plist..."
+    /usr/libexec/PlistBuddy -c "Add :SUPublicEDKey string ${SPARKLE_PUBLIC_ED_KEY}" "${APP_BUNDLE}/Contents/Info.plist"
+elif [ "${SENTINEL_REQUIRE_SPARKLE_KEY:-0}" = "1" ]; then
+    echo "ERROR: SUPublicEDKey is strictly required for production release but SPARKLE_PUBLIC_ED_KEY is not set." >&2
+    exit 1
+fi
+
 # Code sign with Apple Development identity or ad-hoc fallback
-DEV_IDENTITY="Apple Development: Peter Franco (89V8F6QJC2)"
-if security find-identity -v -p codesigning | grep -q "${DEV_IDENTITY}"; then
+DEV_IDENTITY="${SENTINEL_DEVELOPER_IDENTITY:-Apple Development: Peter Franco (89V8F6QJC2)}"
+# Provisioned or explicit entitlements handling:
+# On macOS, keychain-access-groups requires an Apple-signed embedded provisioning profile.
+# Without a provisioning profile, embedding keychain-access-groups causes AMFI code signature
+# validation failure (exit code 137 SIGKILL) under hardened runtime on Apple Silicon.
+ENTITLEMENTS_PATH=""
+if [ -n "${SENTINEL_ENTITLEMENTS_FILE:-}" ] && [ -f "${SENTINEL_ENTITLEMENTS_FILE}" ]; then
+    ENTITLEMENTS_PATH="${SENTINEL_ENTITLEMENTS_FILE}"
+elif [ -f "${APP_BUNDLE}/Contents/embedded.provisionprofile" ]; then
+    DEV_TEAM_ID="${SENTINEL_APPLE_TEAM_ID:-S8QMQZA656}"
+    DEV_ENTITLEMENTS="${ROOT_DIR}/dist/Development.entitlements.plist"
+    cat <<EOF > "${DEV_ENTITLEMENTS}"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>${DEV_TEAM_ID}.${BUNDLE_ID}</string>
+    </array>
+</dict>
+</plist>
+EOF
+    ENTITLEMENTS_PATH="${DEV_ENTITLEMENTS}"
+fi
+
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "${DEV_IDENTITY}"; then
     echo "Signing with Developer Identity: ${DEV_IDENTITY}"
-    codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
+    if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
+        find "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" -type f -perm +111 -exec \
+            codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" {} +
+        codesign --force --options runtime --timestamp --sign "${DEV_IDENTITY}" "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
+    fi
+    if [ -n "${ENTITLEMENTS_PATH}" ]; then
+        codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime --entitlements "${ENTITLEMENTS_PATH}" "${APP_BUNDLE}"
+    else
+        codesign --force --deep --sign "${DEV_IDENTITY}" --options runtime "${APP_BUNDLE}"
+    fi
 else
     echo "Signing with ad-hoc identity"
+    if [ -d "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework" ]; then
+        codesign --force --sign - "${APP_BUNDLE}/Contents/Frameworks/Sparkle.framework"
+    fi
     codesign --force --deep --sign - "${APP_BUNDLE}"
 fi
 

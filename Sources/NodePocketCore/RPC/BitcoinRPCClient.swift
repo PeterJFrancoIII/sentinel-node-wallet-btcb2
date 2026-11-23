@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public enum RPCClientError: Error, LocalizedError, Sendable {
     case invalidURL
@@ -8,6 +9,8 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
     case serializationError(String)
     case unverifiedDaemon(String)
     case transactionBroadcastDisabled
+    case unauthorizedVerifier
+    case verifierAlreadyRegistered
 
     public var errorDescription: String? {
         switch self {
@@ -25,7 +28,123 @@ public enum RPCClientError: Error, LocalizedError, Sendable {
             return "Daemon verification rejected: \(msg)"
         case .transactionBroadcastDisabled:
             return "Wallet signing, broadcasting and fee replacement are disabled pending independent BTCB2 SIGHASH_UNIFIED security approval."
+        case .unauthorizedVerifier:
+            return "Spend authorization verifier rejected: Untrusted or unauthorized verifier implementation."
+        case .verifierAlreadyRegistered:
+            return "Spend authorization verifier is immutable and cannot be replaced or re-registered."
         }
+    }
+}
+
+public struct ProcessedPsbtResponse: Codable, Sendable {
+    public let psbt: String
+    public let complete: Bool
+
+    public init(psbt: String, complete: Bool) {
+        self.psbt = psbt
+        self.complete = complete
+    }
+}
+
+public struct FinalizedPsbtResponse: Codable, Sendable {
+    public let psbt: String?
+    public let hex: String?
+    public let complete: Bool
+
+    public init(psbt: String? = nil, hex: String? = nil, complete: Bool) {
+        self.psbt = psbt
+        self.hex = hex
+        self.complete = complete
+    }
+}
+
+public struct AddressInfo: Codable, Sendable {
+    public let address: String?
+    public let ismine: Bool
+    public let ischange: Bool?
+    public let solvable: Bool?
+    public let desc: String?
+
+    public init(address: String? = nil, ismine: Bool = false, ischange: Bool? = nil, solvable: Bool? = nil, desc: String? = nil) {
+        self.address = address
+        self.ismine = ismine
+        self.ischange = ischange
+        self.solvable = solvable
+        self.desc = desc
+    }
+}
+
+public protocol SpendAuthorizationVerifier: Sendable {
+    func verify(
+        authorization: SpendAuthorization,
+        method: String,
+        params: [Any],
+        walletName: String?
+    ) -> Bool
+}
+
+public struct SpendAuthorization: Sendable, Equatable {
+    public let approvalId: UUID
+    public let sessionId: UUID
+    public let walletName: String
+    public let authorizedMethod: String
+    public let destinationAddress: String
+    public let amountSats: Int64
+    public let maxFeeSats: Int64
+    public let satPerVB: Int
+    public let chain: String
+    public let previewId: UUID
+    public let utxoFingerprint: String
+    public let fundedPsbtDigest: String
+    public let totalInputSats: Int64
+    public let expectedOutputFingerprint: String
+    public let token: String
+    public let issuedAt: Date
+    public let expiresAt: Date
+    public let nonce: String
+
+    public init(
+        approvalId: UUID = UUID(),
+        sessionId: UUID = UUID(),
+        walletName: String,
+        authorizedMethod: String = "sendrawtransaction",
+        destinationAddress: String,
+        amountSats: Int64,
+        maxFeeSats: Int64,
+        satPerVB: Int = 1,
+        chain: String = "main",
+        previewId: UUID = UUID(),
+        utxoFingerprint: String = "",
+        fundedPsbtDigest: String = "",
+        totalInputSats: Int64 = 0,
+        expectedOutputFingerprint: String = "",
+        token: String,
+        issuedAt: Date = Date(),
+        expiresAt: Date = Date().addingTimeInterval(60),
+        nonce: String = UUID().uuidString
+    ) {
+        self.approvalId = approvalId
+        self.sessionId = sessionId
+        self.walletName = walletName
+        self.authorizedMethod = authorizedMethod
+        self.destinationAddress = destinationAddress
+        self.amountSats = amountSats
+        self.maxFeeSats = maxFeeSats
+        self.satPerVB = satPerVB
+        self.chain = chain
+        self.previewId = previewId
+        self.utxoFingerprint = utxoFingerprint
+        self.fundedPsbtDigest = fundedPsbtDigest
+        self.totalInputSats = totalInputSats
+        self.expectedOutputFingerprint = expectedOutputFingerprint
+        self.token = token
+        self.issuedAt = issuedAt
+        self.expiresAt = expiresAt
+        self.nonce = nonce
+    }
+
+    public var isExpired: Bool {
+        Date() > expiresAt
     }
 }
 
@@ -34,14 +153,102 @@ public final class BitcoinRPCClient: @unchecked Sendable {
     public let port: Int
     public private(set) var user: String
     public private(set) var password: String
-    public var isBroadcastRestricted: Bool
+    private var _isBroadcastRestricted: Bool
+    public var isBroadcastRestricted: Bool {
+        get { _isBroadcastRestricted }
+        set { _isBroadcastRestricted = newValue }
+    }
     private let credLock = NSLock()
+    private let authLock = NSLock()
+    private var consumedAuthorizationTokens = Set<String>()
+    private let verifierLock = NSLock()
+    private var authorizationVerifier: (any SpendAuthorizationVerifier)?
+
+    public func registerAuthorizationVerifier(_ verifier: any SpendAuthorizationVerifier) throws {
+        verifierLock.lock()
+        defer { verifierLock.unlock() }
+        guard authorizationVerifier == nil else {
+            throw RPCClientError.verifierAlreadyRegistered
+        }
+        guard let trusted = verifier as? WalletAuthCoordinator.CoordinatorSpendAuthVerifier else {
+            throw RPCClientError.unauthorizedVerifier
+        }
+        self.authorizationVerifier = trusted
+    }
+
+    public var isAuthorizationVerifierRegistered: Bool {
+        verifierLock.lock()
+        defer { verifierLock.unlock() }
+        return authorizationVerifier != nil
+    }
+
+    private func getRegisteredVerifier() -> (any SpendAuthorizationVerifier)? {
+        verifierLock.lock()
+        defer { verifierLock.unlock() }
+        return authorizationVerifier
+    }
+
+    private enum SpendAuthPhase: String, Sendable {
+        case issued
+        case processed
+        case finalized
+        case broadcast
+    }
+    private var authPhases: [String: SpendAuthPhase] = [:]
+
+    private func advancePhaseAndVerifyToken(tokenKey: String, method: String, authMethod: String) -> Bool {
+        authLock.lock()
+        defer { authLock.unlock() }
+
+        if authMethod == "sendrawtransaction" {
+            let current = authPhases[tokenKey]
+            switch method {
+            case "walletprocesspsbt":
+                // Must be first step: phase either not recorded yet or .issued
+                guard current == nil || current == .issued else { return false }
+                authPhases[tokenKey] = .processed
+                return true
+            case "finalizepsbt":
+                // Must be second step: phase must be .processed
+                guard current == .processed else { return false }
+                authPhases[tokenKey] = .finalized
+                return true
+            case "sendrawtransaction":
+                // Must be final step: phase must be strictly .finalized
+                guard current == .finalized else { return false }
+                guard !consumedAuthorizationTokens.contains(tokenKey) else { return false }
+                authPhases[tokenKey] = .broadcast
+                consumedAuthorizationTokens.insert(tokenKey)
+                return true
+            default:
+                return false
+            }
+        } else {
+            // Non-sendrawtransaction methods: single-use immediate consumption
+            if consumedAuthorizationTokens.contains(tokenKey) {
+                return false
+            }
+            consumedAuthorizationTokens.insert(tokenKey)
+            return true
+        }
+    }
+
+    private func recordAndVerifyToken(tokenKey: String) -> Bool {
+        authLock.lock()
+        defer { authLock.unlock() }
+        if consumedAuthorizationTokens.contains(tokenKey) {
+            return false
+        }
+        consumedAuthorizationTokens.insert(tokenKey)
+        return true
+    }
     private let session: URLSession
 
     // Defense-in-depth: the generic RPC API is publicly callable by other first-party
     // modules. Do not rely solely on SwiftUI or WalletManager to block fund outflow.
     // When isBroadcastRestricted is true (default for tests/isolated safety mode),
-    // these methods fail closed unconditionally.
+    // these methods fail closed unconditionally. When false, they strictly require
+    // a valid, unexpired, single-use SpendAuthorization.
     private static let restrictedSpendMethods: Set<String> = [
         "sendtoaddress", "sendmany", "send", "sendall", "sendrawtransaction",
         "submitpackage", "bumpfee", "psbtbumpfee", "walletprocesspsbt",
@@ -61,7 +268,7 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         self.port = port
         self.user = user
         self.password = password
-        self.isBroadcastRestricted = isBroadcastRestricted
+        self._isBroadcastRestricted = isBroadcastRestricted
 
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeoutInterval
@@ -93,9 +300,40 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         return "Basic \(data.base64EncodedString())"
     }
 
-    public func call<T: Decodable>(method: String, params: [Any] = [], walletName: String? = nil) async throws -> T {
-        if isBroadcastRestricted {
-            guard !Self.restrictedSpendMethods.contains(method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()) else {
+    public func call<T: Decodable>(
+        method: String,
+        params: [Any] = [],
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> T {
+        let normalizedMethod = method.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if Self.restrictedSpendMethods.contains(normalizedMethod) {
+            guard !isBroadcastRestricted else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+            guard let auth = authorization else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+            guard !auth.isExpired else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+
+            guard let activeVerifier = getRegisteredVerifier() else {
+                // Fail closed: No authentic coordinator verifier has been registered!
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+
+            guard activeVerifier.verify(
+                authorization: auth,
+                method: normalizedMethod,
+                params: params,
+                walletName: walletName
+            ) else {
+                throw RPCClientError.transactionBroadcastDisabled
+            }
+
+            let tokenKey = "\(auth.approvalId.uuidString):\(auth.authorizedMethod):\(auth.token):\(auth.nonce)"
+            guard advancePhaseAndVerifyToken(tokenKey: tokenKey, method: normalizedMethod, authMethod: auth.authorizedMethod.lowercased()) else {
                 throw RPCClientError.transactionBroadcastDisabled
             }
         }
@@ -108,11 +346,18 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(basicAuthHeader, forHTTPHeaderField: "Authorization")
 
+        let wireParams: [Any]
+        if normalizedMethod == "sendtoaddress" && params.count > 10 {
+            wireParams = Array(params.prefix(10))
+        } else {
+            wireParams = params
+        }
+
         let payload: [String: Any] = [
             "jsonrpc": "1.0",
             "id": UUID().uuidString,
             "method": method,
-            "params": params
+            "params": wireParams
         ]
 
         guard let httpBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
@@ -231,6 +476,10 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "restorewallet", params: [name, backupFile])
     }
 
+    public func getAddressInfo(address: String, walletName: String? = nil) async throws -> AddressInfo {
+        try await call(method: "getaddressinfo", params: [address], walletName: walletName)
+    }
+
     public func createWallet(name: String, passphrase: String, descriptors: Bool = true, loadOnStartup: Bool = true) async throws -> CreateWalletResponse {
         let params: [Any] = [name, false, false, passphrase, false, descriptors, loadOnStartup]
         return try await call(method: "createwallet", params: params)
@@ -255,11 +504,16 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         try await call(method: "listtransactions", params: ["*", count, 0, true], walletName: walletName)
     }
 
-    public func bumpFee(txid: String, options: [String: Any]? = nil, walletName: String? = nil) async throws -> BumpFeeResponse {
+    public func bumpFee(
+        txid: String,
+        options: [String: Any]? = nil,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> BumpFeeResponse {
         if let options = options {
-            return try await call(method: "bumpfee", params: [txid, options], walletName: walletName)
+            return try await call(method: "bumpfee", params: [txid, options], walletName: walletName, authorization: authorization)
         } else {
-            return try await call(method: "bumpfee", params: [txid], walletName: walletName)
+            return try await call(method: "bumpfee", params: [txid], walletName: walletName, authorization: authorization)
         }
     }
 
@@ -273,16 +527,67 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         comment: String = "",
         feeRateSatPerVB: Int? = nil,
         replaceable: Bool = true,
-        walletName: String? = nil
+        maxFeeSats: Int64? = nil,
+        utxoFingerprint: String? = nil,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
     ) async throws -> String {
         // Enforce 8-decimal fixed-point string representation for Bitcoin Core RPC compatibility
         // Prevents floating-point scientific notation (e.g. 9.718e-05) which causes "RPC Server Error (-3): Invalid amount"
         let amountStr = SatoshiMath.toBTCString(btc: amount)
         var params: [Any] = [address, amountStr, comment, "", false, replaceable]
         if let feeRate = feeRateSatPerVB, feeRate > 0 {
-            params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate]
+            let effectiveMaxFee: Int64 = maxFeeSats ?? authorization?.maxFeeSats ?? 0
+            let effectiveUtxo: String = utxoFingerprint ?? authorization?.utxoFingerprint ?? ""
+            params = [address, amountStr, comment, "", false, replaceable, NSNull(), "unset", NSNull(), feeRate, effectiveMaxFee, effectiveUtxo]
         }
-        return try await call(method: "sendtoaddress", params: params, walletName: walletName)
+        return try await call(method: "sendtoaddress", params: params, walletName: walletName, authorization: authorization)
+    }
+
+    public func walletProcessPsbt(
+        psbt: String,
+        sign: Bool = true,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> ProcessedPsbtResponse {
+        return try await call(
+            method: "walletprocesspsbt",
+            params: [psbt, sign],
+            walletName: walletName,
+            authorization: authorization
+        )
+    }
+
+    public func finalizePsbt(
+        psbt: String,
+        extract: Bool = true,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> FinalizedPsbtResponse {
+        return try await call(
+            method: "finalizepsbt",
+            params: [psbt, extract],
+            walletName: walletName,
+            authorization: authorization
+        )
+    }
+
+    public func sendRawTransaction(
+        hex: String,
+        maxFeeRate: Double? = nil,
+        walletName: String? = nil,
+        authorization: SpendAuthorization? = nil
+    ) async throws -> String {
+        var params: [Any] = [hex]
+        if let maxRate = maxFeeRate {
+            params.append(maxRate)
+        }
+        return try await call(
+            method: "sendrawtransaction",
+            params: params,
+            walletName: walletName,
+            authorization: authorization
+        )
     }
 
     public func walletCreateFundedPsbt(

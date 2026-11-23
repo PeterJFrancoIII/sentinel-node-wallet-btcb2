@@ -14,9 +14,15 @@ let package = Package(
         .executable(
             name: "NodePocketApp",
             targets: ["NodePocketApp"]
+        ),
+        .executable(
+            name: "VerifyReleaseBroadcastLock",
+            targets: ["VerifyReleaseBroadcastLock"]
         )
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0")
+    ],
     targets: [
         .target(
             name: "NodePocketCore",
@@ -25,8 +31,16 @@ let package = Package(
         ),
         .executableTarget(
             name: "NodePocketApp",
-            dependencies: ["NodePocketCore"],
+            dependencies: [
+                "NodePocketCore",
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources/NodePocketApp"
+        ),
+        .executableTarget(
+            name: "VerifyReleaseBroadcastLock",
+            dependencies: ["NodePocketCore"],
+            path: "scripts/VerifyReleaseBroadcastLock"
         ),
         .testTarget(
             name: "NodePocketCoreTests",
@@ -35,3 +49,4 @@ let package = Package(
         )
     ]
 )
+
