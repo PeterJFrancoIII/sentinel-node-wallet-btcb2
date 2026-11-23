@@ -132,7 +132,7 @@ public struct WalletView: View {
     }
 
     public var isSendAllowed: Bool {
-        isNodeReadyForWallet && state.walletSnapshot != nil
+        isNodeReadyForWallet && state.walletSnapshot != nil && state.spendDegradedReason == nil
     }
 
     public var body: some View {
@@ -3139,13 +3139,34 @@ public struct WalletView: View {
                         }
                         .buttonStyle(.plain)
 
-                        Text(isSendAllowed ? "Active Wallet" : "Node Inactive")
+                        let statusText: String = {
+                            if state.spendDegradedReason != nil {
+                                return "Send Disabled (Degraded)"
+                            } else if isSendAllowed {
+                                return "Active Wallet"
+                            } else {
+                                return "Node Inactive"
+                            }
+                        }()
+                        Text(statusText)
                             .font(.caption2)
                             .bold()
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
                             .background(Capsule().fill((isSendAllowed ? Color.green : Color.orange).opacity(0.15)))
                             .foregroundColor(isSendAllowed ? .green : .orange)
+                    }
+
+                    if let degraded = state.spendDegradedReason {
+                        HStack(spacing: 8) {
+                            Image(systemName: "exclamationmark.shield.fill")
+                                .foregroundColor(.orange)
+                            Text(degraded)
+                                .font(.caption)
+                                .foregroundColor(.primary)
+                        }
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.12)))
                     }
 
                     Text("Active BTCB2 Wallet: Transactions are validated against native BTCB2 consensus, previewed with live fee rates, and signed upon operator authorization.")

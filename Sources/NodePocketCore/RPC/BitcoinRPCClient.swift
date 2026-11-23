@@ -176,10 +176,20 @@ public final class BitcoinRPCClient: @unchecked Sendable {
         self.authorizationVerifier = trusted
     }
 
-    public var isAuthorizationVerifierRegistered: Bool {
+    public func isVerifierRegistered(for coordinatorId: UUID? = nil) -> Bool {
         verifierLock.lock()
         defer { verifierLock.unlock() }
-        return authorizationVerifier != nil
+        guard let existing = authorizationVerifier as? WalletAuthCoordinator.CoordinatorSpendAuthVerifier else {
+            return false
+        }
+        if let targetId = coordinatorId {
+            return existing.coordinatorId == targetId
+        }
+        return true
+    }
+
+    public var isAuthorizationVerifierRegistered: Bool {
+        isVerifierRegistered()
     }
 
     private func getRegisteredVerifier() -> (any SpendAuthorizationVerifier)? {

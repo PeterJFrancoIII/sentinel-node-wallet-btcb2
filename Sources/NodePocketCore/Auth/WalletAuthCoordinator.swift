@@ -510,6 +510,7 @@ public actor WalletAuthCoordinator {
         }
     }
 
+    public nonisolated let id: UUID = UUID()
     private let customAuthKeychainHelper: KeychainHelper?
     private let deviceOwnerChallenger: DeviceOwnerChallenger
     private let spendSigningKey: SymmetricKey = SymmetricKey(size: .bits256)
@@ -559,10 +560,12 @@ public actor WalletAuthCoordinator {
     }
 
     public struct CoordinatorSpendAuthVerifier: SpendAuthorizationVerifier, Sendable {
+        public let coordinatorId: UUID
         private let signingKey: SymmetricKey
         private let continuityTracker: ContinuityStateTracker
 
-        fileprivate init(signingKey: SymmetricKey, continuityTracker: ContinuityStateTracker = ContinuityStateTracker()) {
+        fileprivate init(coordinatorId: UUID, signingKey: SymmetricKey, continuityTracker: ContinuityStateTracker = ContinuityStateTracker()) {
+            self.coordinatorId = coordinatorId
             self.signingKey = signingKey
             self.continuityTracker = continuityTracker
         }
@@ -704,7 +707,7 @@ public actor WalletAuthCoordinator {
     }
 
     public nonisolated var spendAuthorizationVerifier: any SpendAuthorizationVerifier {
-        CoordinatorSpendAuthVerifier(signingKey: self.spendSigningKey, continuityTracker: self.continuityTracker)
+        CoordinatorSpendAuthVerifier(coordinatorId: self.id, signingKey: self.spendSigningKey, continuityTracker: self.continuityTracker)
     }
 
     public init(

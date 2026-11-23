@@ -87,8 +87,122 @@ final class WalletIntegrationTests: XCTestCase {
         )
 
         XCTAssertTrue(rpcClient.isAuthorizationVerifierRegistered, "CoordinatorSpendAuthVerifier must be registered upon WalletManager initialization")
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: authCoord.id), "Verifier must match authCoord identity")
         let regErr = await walletManager.verifierRegistrationErrorDescription
         XCTAssertNil(regErr, "verifierRegistrationErrorDescription must be nil on successful initialization")
+    }
+
+    func testStartupSpendVerifierAllowsIdempotentRegistrationForSameCoordinator() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_idempotent_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd")
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Pre-register verifier from authCoord
+        try rpcClient.registerAuthorizationVerifier(authCoord.spendAuthorizationVerifier)
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: authCoord.id))
+
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: authCoord,
+            walletInventory: inv
+        )
+
+        // Idempotent registration should succeed without error
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNil(regErr, "verifierRegistrationErrorDescription must be nil for idempotent registration of same coordinator")
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: authCoord.id))
+    }
+
+    func testStartupSpendVerifierRejectsMismatchedCoordinatorDomainAndFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_mismatch_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", isBroadcastRestricted: false)
+        let coordA = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coordA"))
+        let coordB = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coordB"))
+
+        // Register coordA on rpcClient
+        try rpcClient.registerAuthorizationVerifier(coordA.spendAuthorizationVerifier)
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: coordA.id))
+        XCTAssertFalse(rpcClient.isVerifierRegistered(for: coordB.id))
+
+        // Initialize WalletManager with coordB on same rpcClient
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: coordB)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: coordB,
+            allowUnauthenticatedForTesting: true,
+            walletInventory: inv
+        )
+
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNotNil(regErr, "verifierRegistrationErrorDescription must be set when conflicting coordinator domain is registered")
+        XCTAssertTrue(regErr?.contains("Spend verifier conflict") == true, "Expected conflict description, got: \(String(describing: regErr))")
+        XCTAssertFalse(rpcClient.isVerifierRegistered(for: coordB.id), "Client must not report verifier registered for mismatched coordB")
+
+        // Assert fail-closed behavior: send must throw signingPathUnverified
+        do {
+            _ = try await walletManager.send(to: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 1.0)
+            XCTFail("Send must fail closed when coordinator domain is mismatched")
+        } catch let err as WalletSecurityError {
+            if case .signingPathUnverified = err {
+                // Expected fail-closed error
+            } else {
+                XCTFail("Expected signingPathUnverified, got \(err)")
+            }
+        }
+    }
+
+    func testStartupSpendVerifierMissingVerifierFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_missing_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", isBroadcastRestricted: false)
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered)
+
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: nil)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: nil,
+            allowUnauthenticatedForTesting: true,
+            walletInventory: inv
+        )
+
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered)
+        do {
+            _ = try await walletManager.send(to: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 1.0)
+            XCTFail("Send must fail closed when no verifier is registered")
+        } catch let err as WalletSecurityError {
+            if case .signingPathUnverified = err {
+                // Expected fail-closed error
+            } else {
+                XCTFail("Expected signingPathUnverified, got \(err)")
+            }
+        }
     }
 
     func testLegacySendCannotBypassApproval() async throws {
