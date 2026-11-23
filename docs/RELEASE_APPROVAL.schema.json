@@ -93,7 +93,8 @@
       "properties": {
         "spending_authority_disarmed": {
           "type": "boolean",
-          "enum": [true]
+          "enum": [true],
+          "description": "Attests that AI agents and automated CI harnesses possess zero delegated spending authority ($0.00). Does not disable operator-authorized Choice B transaction signing."
         },
         "authorized_spending_limit_btc": {
           "type": "string",
