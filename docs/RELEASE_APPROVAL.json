@@ -1,0 +1,23 @@
+{
+  "$schema": "./RELEASE_APPROVAL.schema.json",
+  "schema_version": "1.0.0",
+  "release_target": {
+    "target_tag": "v1.0.0-build5",
+    "approved_commit_sha": "f06b81932c6e0c1a069239a1ca73504db1d4b4c8",
+    "bundle_version": "1.0.0",
+    "build_number": 5
+  },
+  "approval_metadata": {
+    "approver_identity": "Peter J. Franco III (Operator)",
+    "approval_policy": "Policy B: Independent Approved Release Commit on Protected Main",
+    "approved_at_utc": "2026-11-23T01:12:00Z",
+    "authorized_scope": "NODEPOCKET_BTCB2_ONLY",
+    "review_reference": "MSG:chatgpt-nodepocket-human-build5-production-go-finite-release-20261122-gpt6-268"
+  },
+  "security_attestation": {
+    "spending_authority_disarmed": true,
+    "authorized_spending_limit_btc": "0.00",
+    "restricted_rpc_methods_blocked": 12,
+    "sparkle_public_ed_key": "pROl7n7gal3i+N6mlyM70kMmkhojh5PqT9YofnhXb/k="
+  }
+}
