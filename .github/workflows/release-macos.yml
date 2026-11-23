@@ -240,16 +240,6 @@ jobs:
             fi
           fi
 
-          # Bootstrap Completeness Gate (P0-G1B-R1-02):
-          # On minimal bootstrap main, only Phase A ('stage-draft') is authorized and qualified.
-          # Phases B & C require 'scripts/publish_production_appcast.sh' which is not present in the 6-file baseline.
-          if [ "${EFFECTIVE_PHASE}" != "stage-draft" ]; then
-            echo "ERROR: Release phase '${EFFECTIVE_PHASE}' is blocked fail-closed in minimal bootstrap release-macos.yml." >&2
-            echo "Option 1 Policy B minimal bootstrap authorizes only 'stage-draft' (Phase A)." >&2
-            echo "Phases 'promote-feed' and 'verify-deployed' require 'scripts/publish_production_appcast.sh' which is not present on main and requires separate operator qualification under future G5." >&2
-            exit 1
-          fi
-
           echo "verified_tag=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           echo "verified_commit_sha=${APPROVED_SHA}" >> "$GITHUB_OUTPUT"
           echo "short_version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -265,13 +255,14 @@ jobs:
       - name: Verify release broadcast lock and spend gate enforcement
         run: swift run -c release VerifyReleaseBroadcastLock
 
-      # Gating Stage 4: Packaging Shell Syntax Validation (P0-G1B-R1-02: minimal bootstrap allowlist only)
+      # Gating Stage 4: Packaging Shell Syntax Validation
       - name: Validate script syntax
         run: |
           bash -n scripts/build_app.sh \
                   scripts/build_dmg.sh \
                   scripts/build_production_dmg.sh \
                   scripts/sign_appcast_enclosure.sh \
+                  scripts/publish_production_appcast.sh \
                   scripts/fetch-verify-knots.sh \
                   scripts/package_appstore_archive.sh
 
@@ -765,12 +756,80 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Fail closed on unbootstrapped dependency (P0-G1B-R1-02)
+      - name: Checkout repository at verified candidate commit SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
+          fetch-depth: 0
+
+      # Step 1: Download Staged Assets from Draft Release
+      - name: Download Staged Release Assets
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
         run: |
-          echo "ERROR: Phase B (promote-public-feed) is blocked fail-closed on minimal bootstrap main." >&2
-          echo "Required helper 'scripts/publish_production_appcast.sh' is not present in the G1-B minimal baseline." >&2
-          echo "Public promotion requires separate operator review and qualification under future G5." >&2
-          exit 1
+          echo "Downloading staged draft assets for ${TAG}..."
+          mkdir -p dist/staged-assets
+          gh release download "${TAG}" --dir dist/staged-assets
+          ls -la dist/staged-assets
+
+      # Step 2: Preflight Verification before Promotion (WO-120)
+      - name: Run Feed Staging Preflight Verification (WO-120)
+        env:
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --prune-unsigned-legacy \
+            --preflight
+          echo "✓ Pre-promotion preflight validation succeeded (WO-120): Live feed publish prerequisites and binary verifiers satisfied before public promotion."
+
+      # Step 3: Promote Verified Draft Release to Public (WO-115, WO-117)
+      - name: Promote Draft Release to Public
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+        run: |
+          echo "Promoting verified draft release ${TAG} to public..."
+          gh release edit "${TAG}" --draft=false
+          echo "✓ Release ${TAG} promoted to public."
+
+      # Step 4: Stage Sparkle Production Appcast Feed for PR Review (WO-118, WO-122-R1)
+      - name: Stage Candidate Production Appcast Feed to Feed Branch
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          OPERATOR_APPROVAL: "${{ github.event.inputs.operator_approval_confirmed }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+        run: |
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --operator-approval "${OPERATOR_APPROVAL}" \
+            --stage-feed-branch \
+            --prune-unsigned-legacy
+          echo "✓ Candidate appcast feed staged to feed/${TAG} branch (WO-122-R1). Awaiting operator PR review and merge to main."
+
+      # Step 5: Output Release Status Summary (WO-122-R2)
+      - name: Output Release Status Summary
+        run: |
+          echo "### Release Status: SIGNED_RELEASE_PUBLIC_FEED_PR_PENDING" >> $GITHUB_STEP_SUMMARY
+          echo "The GitHub Release **${{ needs.unprivileged-qualification.outputs.verified_tag }}** is now PUBLIC." >> $GITHUB_STEP_SUMMARY
+          echo "Candidate Sparkle appcast has been staged to branch **feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}**." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Operator Actions Required to Complete Live Deployment:**" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review and merge Pull Request from \`feed/${{ needs.unprivileged-qualification.outputs.verified_tag }}\` into \`main\`." >> $GITHUB_STEP_SUMMARY
+          echo "2. Re-dispatch this workflow with \`release_phase: verify-deployed\` to verify live CDN readback fail-closed." >> $GITHUB_STEP_SUMMARY
 
   # =========================================================================
   # Phase C: Post-Merge Live Deployed Feed Verification (WO-122-R2)
@@ -784,9 +843,29 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Fail closed on unbootstrapped dependency (P0-G1B-R1-02)
+      - name: Checkout repository at verified candidate commit SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.unprivileged-qualification.outputs.verified_commit_sha }}
+          fetch-depth: 0
+
+      - name: Download Staged Release Assets and Verify Deployed Feed
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+          TAG: "${{ needs.unprivileged-qualification.outputs.verified_tag }}"
+          SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
         run: |
-          echo "ERROR: Phase C (verify-deployed-feed) is blocked fail-closed on minimal bootstrap main." >&2
-          echo "Required helper 'scripts/publish_production_appcast.sh' is not present in the G1-B minimal baseline." >&2
-          echo "Public promotion requires separate operator review and qualification under future G5." >&2
-          exit 1
+          echo "Downloading public release assets for ${TAG}..."
+          mkdir -p dist/staged-assets
+          gh release download "${TAG}" --dir dist/staged-assets
+
+          DMG_PATH="$(ls -1 dist/staged-assets/Sentinel-Node-Wallet-*-macOS-arm64-notarized.dmg | head -n 1)"
+          ED_SIG="$(python3 -c "import json; print(json.load(open('dist/staged-assets/RELEASE_ATTESTATION.json')).get('sparkle_ed_signature'))")"
+
+          echo "Verifying deployed feed on main via CDN readback (fail-closed, WO-122-R2)..."
+          bash scripts/publish_production_appcast.sh \
+            --tag "${TAG}" \
+            --archive "${DMG_PATH}" \
+            --signature "${ED_SIG}" \
+            --public-key "${SPARKLE_PUBLIC_ED_KEY}" \
+            --verify-deployed-feed
