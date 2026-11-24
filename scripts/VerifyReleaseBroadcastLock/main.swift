@@ -396,7 +396,7 @@ struct ReleaseLockVerifier {
             txContext: txContext
         )
 
-        // 5. Execute authorized send (unlock -> walletprocesspsbt -> finalizepsbt -> walletlock -> sendrawtransaction)
+        // 5. Execute authorized send (unlock -> walletprocesspsbt -> finalizepsbt -> sendrawtransaction -> immediate walletlock)
         let txid: String
         do {
             txid = try await walletMgr.executeAuthorizedSend(
@@ -436,7 +436,7 @@ struct ReleaseLockVerifier {
         guard BroadcastLockSpyURLProtocol.sendToAddressCount == 0 else {
             fatalError("FAILURE: sendtoaddress was unexpectedly executed! Expected 0, got \(BroadcastLockSpyURLProtocol.sendToAddressCount)")
         }
-        print("✓ Verified: Complete end-to-end synthetic operator send journey via WalletManager and WalletAuthCoordinator (prepareSendPreview -> getaddressinfo -> approve -> unlock -> process -> finalize -> lock -> broadcast) executed successfully (txid: \(txid)).")
+        print("✓ Verified: Complete end-to-end synthetic operator send journey via WalletManager and WalletAuthCoordinator (prepareSendPreview -> getaddressinfo -> approve -> unlock -> process -> finalize -> broadcast -> immediate lock) executed successfully (txid: \(txid)).")
         print("✓ Verified: Exact call counts asserted: 1 create, 1 getaddressinfo, 1 unlock, 1 process, 1 finalize, 1 lock, 1 broadcast, exactly 0 direct sendtoaddress.")
 
         // -------------------------------------------------------------
