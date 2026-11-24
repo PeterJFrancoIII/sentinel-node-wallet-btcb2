@@ -936,10 +936,35 @@ final class SoftwareUpdateTests: XCTestCase {
             return
         }
 
+        let fixtureAppcastURL = FileManager.default.temporaryDirectory.appendingPathComponent("test-fixture-appcast-\(UUID().uuidString).xml")
+        let fixtureAppcastContent = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+                <title>Sentinel Node Wallet Updates</title>
+                <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
+                <item>
+                    <title>Sentinel Node Wallet 1.0 (Build 4)</title>
+                    <enclosure url="https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build4/Sentinel-Node-Wallet-v1.0.0-Build4-macOS-arm64.dmg"
+                               sparkle:version="4"
+                               sparkle:shortVersionString="1.0"
+                               sparkle:os="macos"
+                               sparkle:cpu="arm64"
+                               sparkle:edSignature="fakeSig1234567890123456789012345678901234567890123456789012345678901234"
+                               length="13927630"
+                               type="application/octet-stream" />
+                </item>
+            </channel>
+        </rss>
+        """
+        try fixtureAppcastContent.write(to: fixtureAppcastURL, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: fixtureAppcastURL) }
+
         func runScript(args: [String], extraEnv: [String: String] = [:]) -> (status: Int32, output: String) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/bin/bash")
-            proc.arguments = [scriptPath] + args
+            let effectiveArgs = args.contains("--appcast") ? args : ["--appcast", fixtureAppcastURL.path] + args
+            proc.arguments = [scriptPath] + effectiveArgs
             if !extraEnv.isEmpty {
                 var env = ProcessInfo.processInfo.environment
                 for (k, v) in extraEnv { env[k] = v }
