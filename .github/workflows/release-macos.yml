@@ -265,6 +265,7 @@ jobs:
                   scripts/publish_production_appcast.sh \
                   scripts/fetch-verify-knots.sh \
                   scripts/package_appstore_archive.sh
+          python3 -m py_compile scripts/verify_production_bundle.py
 
       # Gating Stage 5: Verify Bitcoin Knots Binary Provenance
       - name: Cache & verify official Bitcoin Knots binaries
@@ -442,6 +443,7 @@ jobs:
         env:
           APPLE_CERT_B64: "${{ secrets.APPLE_CERTIFICATE_BASE64 }}"
           APPLE_CERT_PASS: "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
+          APPLE_PROV_B64: "${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}"
           NOTARY_KEY_B64: "${{ secrets.NOTARY_API_KEY_BASE64 }}"
           NOTARY_KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
           NOTARY_ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
@@ -452,6 +454,9 @@ jobs:
           MISSING=""
           if [ -z "${APPLE_CERT_B64}" ] || [ -z "${APPLE_CERT_PASS}" ]; then
             MISSING="${MISSING} APPLE_CERTIFICATE"
+          fi
+          if [ -z "${APPLE_PROV_B64}" ]; then
+            MISSING="${MISSING} APPLE_PROVISIONING_PROFILE_BASE64"
           fi
           if [ -z "${NOTARY_KEY_B64}" ] || [ -z "${NOTARY_KEY_ID}" ] || [ -z "${NOTARY_ISSUER_ID}" ]; then
             MISSING="${MISSING} NOTARY_CREDENTIALS"
@@ -468,9 +473,23 @@ jobs:
 
           if [ -n "${MISSING}" ]; then
             echo "ERROR: Production release blocked fail-closed. Missing mandatory signing credentials or tool digest:${MISSING}." >&2
-            echo "Official production distribution requires Apple Developer ID, Apple Notary, Sparkle Ed25519 keypair, and verified Sparkle tool hash." >&2
+            echo "Official production distribution requires Apple Developer ID, Apple Developer ID Provisioning Profile, Apple Notary, Sparkle Ed25519 keypair, and verified Sparkle tool hash." >&2
             exit 1
           fi
+
+          python3 - <<'PY' || exit 1
+          import base64, os, sys
+          raw_b64 = os.environ.get("APPLE_PROV_B64", "").strip()
+          try:
+              raw = base64.b64decode(raw_b64, validate=True)
+              if len(raw) < 256:
+                  print("ERROR: APPLE_PROVISIONING_PROFILE_BASE64 decoded payload is unexpectedly small.", file=sys.stderr)
+                  sys.exit(1)
+          except Exception as e:
+              print(f"ERROR: APPLE_PROVISIONING_PROFILE_BASE64 is not valid Base64: {e}", file=sys.stderr)
+              sys.exit(1)
+          print(f"✓ Verified APPLE_PROVISIONING_PROFILE_BASE64 format ({len(raw)} bytes).")
+          PY
 
           python3 - "${SPARKLE_TOOL_HASH}" <<'PY' || exit 1
           import re, sys
@@ -529,7 +548,7 @@ jobs:
             --issuer "${ISSUER_ID}"
           rm -f "${API_KEY_PATH}"
 
-      # Production Sign and Notarize (Hardened Runtime, Developer ID, Staple) with --sign-only (O1-G1A-03)
+      # Production Sign and Notarize (Hardened Runtime, Developer ID, Provisioned, Staple) with --sign-only (O1-G1A-03)
       - name: Sign and Notarize Production DMG (--sign-only)
         env:
           SENTINEL_RELEASE_SECURITY_APPROVED: "1"
@@ -538,6 +557,7 @@ jobs:
           SENTINEL_APPLE_TEAM_ID: "${{ secrets.APPLE_TEAM_ID || 'S8QMQZA656' }}"
           SENTINEL_WEBCREDENTIALS_DOMAIN: pool.sentineldefensetechnologies.co.za
           SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
+          APPLE_PROVISIONING_PROFILE_BASE64: "${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
           SENTINEL_REQUIRE_SPARKLE_KEY: "1"
           SENTINEL_SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
@@ -642,6 +662,11 @@ jobs:
           python3 - <<PY
           import json, os, datetime
 
+          manifest = {}
+          if os.path.isfile("dist/BUILD_MANIFEST.json"):
+              with open("dist/BUILD_MANIFEST.json", encoding="utf-8") as mf:
+                  manifest = json.load(mf)
+
           attestation = {
               "tag": "${TAG}",
               "approved_commit_sha": "${VERIFIED_COMMIT_SHA}",
@@ -650,6 +675,11 @@ jobs:
               "release_phase": "stage-draft",
               "bundle_version": "${SHORT_VERSION}",
               "build_number": int("${BUILD_NUM}"),
+              "signing_cert_sha256": manifest.get("signing_cert_sha256"),
+              "provisioning_profile_uuid": manifest.get("provisioning_profile_uuid"),
+              "provisioning_profile_sha256": manifest.get("provisioning_profile_sha256"),
+              "provisioning_profile_expiration": manifest.get("provisioning_profile_expiration"),
+              "entitlements_sha256": manifest.get("entitlements_sha256"),
               "appcast_enclosure": {
                   "filename": "${DMG_NAME}",
                   "length_bytes": int("${DMG_LEN}"),

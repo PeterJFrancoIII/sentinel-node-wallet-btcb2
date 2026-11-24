@@ -3079,4 +3079,263 @@ echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
         XCTAssertTrue(resMatch.output.contains("Verified Sparkle sign_update tool binary hash"),
                       "Output must confirm verified tool hash: \(resMatch.output)")
     }
+
+    func testProvisioningProfileFailClosedGatesAndPermissionsAuditCase40() throws {
+        var currentURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: currentURL.appendingPathComponent("Package.swift").path) {
+            let parent = currentURL.deletingLastPathComponent()
+            if parent.path == currentURL.path { break }
+            currentURL = parent
+        }
+        let rootDir = currentURL
+        let prodScriptPath = rootDir.appendingPathComponent("scripts/build_production_dmg.sh").path
+        let verifierPyPath = rootDir.appendingPathComponent("scripts/verify_production_bundle.py").path
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case40-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        func runCmd(_ exe: String, _ args: [String], cwd: URL? = nil, env: [String: String]? = nil) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            if let cwd = cwd { proc.currentDirectoryURL = cwd }
+            if let env = env {
+                var procEnv = ProcessInfo.processInfo.environment
+                for (k, v) in env { procEnv[k] = v }
+                proc.environment = procEnv
+            }
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // 1. Missing profile in production --sign-only with existing bundle fails BEFORE AASA/signing
+        let dummyApp = tempBase.appendingPathComponent("DummyApp.app")
+        try FileManager.default.createDirectory(at: dummyApp.appendingPathComponent("Contents"), withIntermediateDirectories: true)
+        let missingProfEnv = [
+            "SENTINEL_RELEASE_SECURITY_APPROVED": "1",
+            "SENTINEL_DEVELOPER_ID_APPLICATION": "Developer ID Application: Peter Franco",
+            "SENTINEL_APPLE_TEAM_ID": "S8QMQZA656",
+            "SENTINEL_WEBCREDENTIALS_DOMAIN": "pool.sentineldefensetechnologies.co.za",
+            "SENTINEL_NOTARY_PROFILE": "test-profile",
+            "APPLE_PROVISIONING_PROFILE_BASE64": "",
+            "SENTINEL_PROVISIONING_PROFILE_PATH": ""
+        ]
+        let resMissingProf = runCmd("/bin/bash", [prodScriptPath, "--sign-only", "--app-bundle", dummyApp.path], env: missingProfEnv)
+        XCTAssertNotEqual(resMissingProf.status, 0)
+        XCTAssertTrue(resMissingProf.output.contains("Missing mandatory Developer ID provisioning profile"),
+                      "Expected fail-closed missing profile error, got: \(resMissingProf.output)")
+
+        // 2. Malformed/corrupt CMS profile rejected by verify-profile-cms
+        let badCMS = tempBase.appendingPathComponent("corrupt.provisionprofile")
+        try "not-a-cms-blob".write(to: badCMS, atomically: true, encoding: .utf8)
+        let outPlist = tempBase.appendingPathComponent("out.plist")
+        let resBadCMS = runCmd("/usr/bin/python3", [verifierPyPath, "verify-profile-cms", "--profile", badCMS.path, "--out-plist", outPlist.path])
+        XCTAssertNotEqual(resBadCMS.status, 0, "Corrupt profile must fail CMS check")
+
+        // 3. Untrusted self-signed CMS fixture rejected by verify-profile-cms against macOS SystemRootCertificates
+        let selfKey = tempBase.appendingPathComponent("untrusted.key").path
+        let selfCert = tempBase.appendingPathComponent("untrusted.crt").path
+        let selfPayload = tempBase.appendingPathComponent("payload.plist").path
+        let selfCMS = tempBase.appendingPathComponent("untrusted.provisionprofile").path
+        try "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\"><plist version=\"1.0\"><dict><key>UUID</key><string>11111111-2222-3333-4444-555555555555</string></dict></plist>".write(toFile: selfPayload, atomically: true, encoding: .utf8)
+        _ = runCmd("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", selfKey, "-out", selfCert, "-days", "1", "-subj", "/CN=UntrustedTestSigner"])
+        _ = runCmd("/usr/bin/openssl", ["cms", "-sign", "-binary", "-nodetach", "-in", selfPayload, "-signer", selfCert, "-inkey", selfKey, "-outform", "DER", "-out", selfCMS])
+        let resUntrustedCMS = runCmd("/usr/bin/python3", [verifierPyPath, "verify-profile-cms", "--profile", selfCMS, "--out-plist", outPlist.path])
+        XCTAssertNotEqual(resUntrustedCMS.status, 0, "Untrusted self-signed CMS must fail Apple root verification")
+
+        // 4. Fixture metadata tests (offline, deterministic, no fake CMS in production)
+        let testCertDER = try Data(contentsOf: URL(fileURLWithPath: tempBase.appendingPathComponent("cert.der").path).deletingLastPathComponent().appendingPathComponent("untrusted.crt"))
+        _ = runCmd("/usr/bin/openssl", ["x509", "-in", selfCert, "-outform", "DER", "-out", tempBase.appendingPathComponent("cert.der").path])
+        let derBytes = try Data(contentsOf: tempBase.appendingPathComponent("cert.der"))
+        let expectedCertSHA = SHA256.hash(data: derBytes).map { String(format: "%02X", $0) }.joined()
+        let wrongCertSHA = String(repeating: "A", count: 64)
+        _ = testCertDER
+
+        func writeFixturePlist(
+            name: String = "Test Direct Profile",
+            uuid: String = "8bf87383-c1a9-4e55-a725-02fd376ac6cf",
+            expirationISO: String = "2044-11-19T22:26:30Z",
+            teamId: String = "S8QMQZA656",
+            prefix: String = "S8QMQZA656",
+            platform: String = "OSX",
+            provisionsAllDevices: Bool = true,
+            provisionedDevices: [String]? = nil,
+            appIdClaim: String = "S8QMQZA656.pool.sentineldefensetechnologies.co.za",
+            teamClaim: String = "S8QMQZA656",
+            assocDomains: Any = "*",
+            keychainGroups: [String] = ["S8QMQZA656.*"],
+            getTaskAllow: Bool? = nil,
+            certShaOverride: Data? = nil
+        ) throws -> URL {
+            var ent: [String: Any] = [
+                "com.apple.application-identifier": appIdClaim,
+                "com.apple.developer.team-identifier": teamClaim,
+                "com.apple.developer.associated-domains": assocDomains,
+                "keychain-access-groups": keychainGroups
+            ]
+            if let gta = getTaskAllow {
+                ent["get-task-allow"] = gta
+            }
+            var dict: [String: Any] = [
+                "UUID": uuid,
+                "Name": name,
+                "ExpirationDate": ISO8601DateFormatter().date(from: expirationISO)!,
+                "CreationDate": ISO8601DateFormatter().date(from: "2026-11-24T00:00:00Z")!,
+                "Platform": [platform],
+                "ProvisionsAllDevices": provisionsAllDevices,
+                "TeamIdentifier": [teamId],
+                "ApplicationIdentifierPrefix": [prefix],
+                "Entitlements": ent,
+                "DeveloperCertificates": [certShaOverride ?? derBytes]
+            ]
+            if let devs = provisionedDevices {
+                dict["ProvisionedDevices"] = devs
+            }
+            let data = try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
+            let url = tempBase.appendingPathComponent("fixture-\(UUID().uuidString).plist")
+            try data.write(to: url)
+            return url
+        }
+
+        let validPlist = try writeFixturePlist()
+        let resValidPlist = runCmd("/usr/bin/python3", [
+            verifierPyPath, "validate-profile-plist",
+            "--plist", validPlist.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za",
+            "--cert-sha256", expectedCertSHA
+        ])
+        XCTAssertEqual(resValidPlist.status, 0, "Valid profile fixture must pass: \(resValidPlist.output)")
+
+        let negativeFixtures: [(String, URL, String)] = [
+            ("expired", try writeFixturePlist(expirationISO: "2020-01-01T00:00:00Z"), expectedCertSHA),
+            ("wrongTeam", try writeFixturePlist(teamId: "WRONGTEAM1"), expectedCertSHA),
+            ("wrongBundle", try writeFixturePlist(appIdClaim: "S8QMQZA656.com.other.app"), expectedCertSHA),
+            ("wrongCert", validPlist, wrongCertSHA),
+            ("debugGetTaskAllow", try writeFixturePlist(getTaskAllow: true), expectedCertSHA),
+            ("deviceRestrictedDevProfile", try writeFixturePlist(provisionsAllDevices: false, provisionedDevices: ["00008103-001122334455"]), expectedCertSHA),
+            ("missingAssocDomain", try writeFixturePlist(assocDomains: ["webcredentials:other.example.com"]), expectedCertSHA),
+            ("wrongKeychainPrefix", try writeFixturePlist(keychainGroups: ["OTHERPFX12.*"]), expectedCertSHA),
+            ("wrongAppPrefix", try writeFixturePlist(prefix: "OTHERPFX12"), expectedCertSHA)
+        ]
+
+        for (label, plistURL, certHash) in negativeFixtures {
+            let res = runCmd("/usr/bin/python3", [
+                verifierPyPath, "validate-profile-plist",
+                "--plist", plistURL.path,
+                "--team-id", "S8QMQZA656",
+                "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+                "--domain", "pool.sentineldefensetechnologies.co.za",
+                "--cert-sha256", certHash
+            ])
+            XCTAssertNotEqual(res.status, 0, "Negative fixture '\(label)' must fail closed")
+        }
+
+        // 5. Entitlement allowlist check (valid vs mismatch vs get-task-allow)
+        let validClaimURL = tempBase.appendingPathComponent("valid-claims.plist")
+        let validClaimsDict: [String: Any] = [
+            "com.apple.application-identifier": "S8QMQZA656.pool.sentineldefensetechnologies.co.za",
+            "com.apple.developer.team-identifier": "S8QMQZA656",
+            "com.apple.developer.associated-domains": ["webcredentials:pool.sentineldefensetechnologies.co.za"],
+            "keychain-access-groups": ["S8QMQZA656.pool.sentineldefensetechnologies.co.za"]
+        ]
+        try PropertyListSerialization.data(fromPropertyList: validClaimsDict, format: .xml, options: 0).write(to: validClaimURL)
+        let resClaimOK = runCmd("/usr/bin/python3", [
+            verifierPyPath, "check-entitlements-allowlist",
+            "--profile-plist", validPlist.path,
+            "--entitlements-plist", validClaimURL.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za"
+        ])
+        XCTAssertEqual(resClaimOK.status, 0, "Valid claims must match allowlist: \(resClaimOK.output)")
+
+        let badClaimURL = tempBase.appendingPathComponent("bad-claims.plist")
+        var badClaimsDict = validClaimsDict
+        badClaimsDict["keychain-access-groups"] = ["WRONGTEAM1.pool.sentineldefensetechnologies.co.za"]
+        try PropertyListSerialization.data(fromPropertyList: badClaimsDict, format: .xml, options: 0).write(to: badClaimURL)
+        let resClaimBad = runCmd("/usr/bin/python3", [
+            verifierPyPath, "check-entitlements-allowlist",
+            "--profile-plist", validPlist.path,
+            "--entitlements-plist", badClaimURL.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za"
+        ])
+        XCTAssertNotEqual(resClaimBad.status, 0, "Wrong prefix keychain claim must be rejected against profile")
+
+        // 6. Bundle permission normalization, symlink preservation, and negative permission audit
+        let permApp = tempBase.appendingPathComponent("PermTest.app")
+        let macosDir = permApp.appendingPathComponent("Contents/MacOS")
+        let resDir = permApp.appendingPathComponent("Contents/Resources")
+        let sparkleVerB = permApp.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/B")
+        try FileManager.default.createDirectory(at: macosDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: resDir, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sparkleVerB, withIntermediateDirectories: true)
+
+        // Create tiny valid Mach-O 64-bit header (arm64 magic CF FA ED FE)
+        let machoHeader = Data([0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01])
+        let mainBin = macosDir.appendingPathComponent("SentinelNodeWallet")
+        let sparkleLib = sparkleVerB.appendingPathComponent("Sparkle")
+        let infoPlist = permApp.appendingPathComponent("Contents/Info.plist")
+        let embProf = permApp.appendingPathComponent("Contents/embedded.provisionprofile")
+        try machoHeader.write(to: mainBin)
+        try machoHeader.write(to: sparkleLib)
+        try "<plist/>".write(to: infoPlist, atomically: true, encoding: .utf8)
+        try "profile-bytes".write(to: embProf, atomically: true, encoding: .utf8)
+
+        let profData = try Data(contentsOf: embProf)
+        let profSHA = SHA256.hash(data: profData).map { String(format: "%02x", $0) }.joined()
+
+        // Create Sparkle symlinks
+        _ = runCmd("/bin/ln", ["-s", "B", permApp.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/Current").path])
+        _ = runCmd("/bin/ln", ["-s", "Versions/Current/Sparkle", permApp.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Sparkle").path])
+
+        // Deliberately poison permissions with 0700 / 0600 (simulating umask 077 defect)
+        _ = runCmd("/bin/chmod", ["-R", "go-rwx", permApp.path])
+        let resPoisonAudit = runCmd("/usr/bin/python3", [
+            verifierPyPath, "normalize-and-audit-permissions",
+            "--app", permApp.path,
+            "--audit-only",
+            "--require-profile",
+            "--expected-profile-sha256", profSHA
+        ])
+        XCTAssertNotEqual(resPoisonAudit.status, 0, "0700/0600 poisoned bundle must fail permission audit")
+
+        // Normalize and re-audit -> MUST pass cleanly with symlinks preserved
+        let resNorm = runCmd("/usr/bin/python3", [
+            verifierPyPath, "normalize-and-audit-permissions",
+            "--app", permApp.path,
+            "--require-profile",
+            "--expected-profile-sha256", profSHA
+        ])
+        XCTAssertEqual(resNorm.status, 0, "Permission normalizer must repair permissions cleanly: \(resNorm.output)")
+
+        let resCleanAudit = runCmd("/usr/bin/python3", [
+            verifierPyPath, "normalize-and-audit-permissions",
+            "--app", permApp.path,
+            "--audit-only",
+            "--require-profile",
+            "--expected-profile-sha256", profSHA
+        ])
+        XCTAssertEqual(resCleanAudit.status, 0, "Normalized bundle must pass strict permission audit: \(resCleanAudit.output)")
+
+        // Negative: world-writable resource or missing executable bit on Mach-O must fail audit
+        _ = runCmd("/bin/chmod", ["0666", infoPlist.path])
+        let resWorldWrite = runCmd("/usr/bin/python3", [
+            verifierPyPath, "normalize-and-audit-permissions",
+            "--app", permApp.path,
+            "--audit-only",
+            "--require-profile",
+            "--expected-profile-sha256", profSHA
+        ])
+        XCTAssertNotEqual(resWorldWrite.status, 0, "World-writable Info.plist must fail audit")
+    }
 }
