@@ -458,6 +458,52 @@ struct ReleaseLockVerifier {
             fatalError("FAILURE: Malicious verifier replacement threw unexpected error: \(error)")
         }
 
+        // 3-pre-A2: Idempotent initialization of WalletManager by the exact same coordinator domain succeeds
+        let idempotentWalletMgr = WalletManager(
+            rpcClient: client,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: authCoord,
+            allowUnauthenticatedForTesting: false
+        )
+        let idempotentRegErr = await idempotentWalletMgr.verifierRegistrationErrorDescription
+        guard idempotentRegErr == nil else {
+            fatalError("FAILURE: Idempotent WalletManager initialization with same coordinator domain reported error: \(idempotentRegErr!)")
+        }
+        print("✓ Verified: Idempotent WalletManager initialization by identical coordinator domain succeeded.")
+
+        // 3-pre-A3: Registration from a different coordinator domain fails closed with verifierAlreadyRegistered
+        let differentAuthCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        do {
+            try client.registerAuthorizationVerifier(differentAuthCoord.spendAuthorizationVerifier)
+            fatalError("FAILURE: Verifier from different coordinator domain was accepted on client!")
+        } catch let err as RPCClientError {
+            if case .verifierAlreadyRegistered = err {
+                print("✓ Verified: Verifier from different coordinator domain rejected with verifierAlreadyRegistered.")
+            } else {
+                fatalError("FAILURE: Different coordinator verifier threw unexpected RPCClientError: \(err)")
+            }
+        } catch {
+            fatalError("FAILURE: Different coordinator verifier threw unexpected error: \(error)")
+        }
+
+        // 3-pre-A4: Second WalletManager initialized with different coordinator domain sets failure diagnostic and fails closed
+        let mismatchedWalletMgr = WalletManager(
+            rpcClient: client,
+            dataDirectory: tempDir,
+            addressBook: testAddressBook,
+            authCoordinator: differentAuthCoord,
+            allowUnauthenticatedForTesting: false
+        )
+        let regErr = await mismatchedWalletMgr.verifierRegistrationErrorDescription
+        guard let diagnostic = regErr, diagnostic.contains("Spend verifier conflict") else {
+            fatalError("FAILURE: Second WalletManager did not set expected verifier conflict diagnostic! (got: \(String(describing: regErr)))")
+        }
+        guard !client.isVerifierRegistered(for: differentAuthCoord.id) else {
+            fatalError("FAILURE: Client reported verifier registered for mismatched coordinator!")
+        }
+        print("✓ Verified: Second WalletManager with mismatched coordinator domain failed closed with diagnostic: \(diagnostic)")
+
         // 3-pre-B: Attempt to inject malicious verifier before trusted registration fails closed
         let uninitializedClient = BitcoinRPCClient(user: "ci", password: "ci", urlSession: spySession, isBroadcastRestricted: false)
         do {

@@ -86,6 +86,7 @@ public final class AppState: ObservableObject {
     @Published public var isMigrationPending: Bool = false
     @Published public var authErrorMessage: String? = nil
     @Published public var authRegistryError: String? = nil
+    @Published public var spendDegradedReason: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
     @Published public var showSoftwareUpdatesSheet: Bool = false
     public let accountPurgeCoordinator: OperatorAccountPurgeCoordinator
@@ -110,8 +111,18 @@ public final class AppState: ObservableObject {
         let inv = WalletInventory(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, receiveAddressStore: addrStore, authCoordinator: authCoord)
         self.walletInventory = inv
         self.walletManager = WalletManager(rpcClient: nodeManager.rpcClient, dataDirectory: config.dataDirectory, addressBook: book, receiveAddressStore: addrStore, authCoordinator: authCoord, walletInventory: inv)
-        // Unlock transaction broadcast for live wallet operation in the native app
-        self.nodeManager.rpcClient.isBroadcastRestricted = false
+        // Verify authentic coordinator verifier registration (R237-01 & R237-02)
+        if self.nodeManager.rpcClient.isVerifierRegistered(for: authCoord.id) {
+            // Unlock transaction broadcast for live wallet operation in the native app
+            self.nodeManager.rpcClient.isBroadcastRestricted = false
+            self.spendDegradedReason = nil
+        } else {
+            // Non-crashing fail-closed state: keep GUI balances/history/receive/recovery usable while disabling sign/broadcast
+            self.nodeManager.rpcClient.isBroadcastRestricted = true
+            let reason = "Spend authorization verifier failed registration. NodePocket is running in safe read-only mode with signing and broadcast disabled."
+            self.spendDegradedReason = reason
+            self.authErrorMessage = reason
+        }
         self.accountPurgeCoordinator = OperatorAccountPurgeCoordinator(
             authCoordinator: authCoord,
             walletInventory: inv,
@@ -978,10 +989,16 @@ public final class AppState: ObservableObject {
     }
 
     public func prepareSendPreview(to destinationAddress: String, amountSats: Int64, feeQuote: FeeQuote) async throws -> FundedTxPreview {
-        try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote, capability: self.authSession)
+        if let _ = spendDegradedReason {
+            throw WalletSecurityError.signingPathUnverified
+        }
+        return try await walletManager.prepareSendPreview(to: destinationAddress, amountSats: amountSats, feeQuote: feeQuote, capability: self.authSession)
     }
 
     public func executeAuthorizedSend(preview: FundedTxPreview, explicitPassphrase: String? = nil) async throws -> String {
+        if let _ = spendDegradedReason {
+            throw WalletSecurityError.signingPathUnverified
+        }
         guard isWalletTabUnlocked, let session = self.authSession else {
             throw WalletAuthError.unauthenticated
         }

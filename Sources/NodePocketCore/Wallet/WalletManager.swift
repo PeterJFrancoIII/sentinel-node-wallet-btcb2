@@ -300,6 +300,7 @@ public actor WalletManager {
     public private(set) var currentWalletName: String?
     public private(set) var latestSnapshot: WalletSnapshot?
     public private(set) var isCreatingWallet = false
+    public private(set) var verifierRegistrationErrorDescription: String?
     private var activeStagingSessionIDs = Set<String>()
 
     public struct PendingFundedPsbtRecord: Sendable {
@@ -439,7 +440,24 @@ public actor WalletManager {
             allowUnauthenticatedForTesting: allowUnauthenticatedForTesting
         )
         if let coord = authCoordinator {
-            try? rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+            do {
+                try rpcClient.registerAuthorizationVerifier(coord.spendAuthorizationVerifier)
+                self.verifierRegistrationErrorDescription = nil
+            } catch let err as RPCClientError {
+                if case .verifierAlreadyRegistered = err {
+                    if rpcClient.isVerifierRegistered(for: coord.id) {
+                        // Idempotent registration: exact same coordinator domain is already registered
+                        self.verifierRegistrationErrorDescription = nil
+                    } else {
+                        // Conflicting registration: RPC client is registered to a different coordinator domain
+                        self.verifierRegistrationErrorDescription = "Spend verifier conflict: RPC client is already registered to a different coordinator domain."
+                    }
+                } else {
+                    self.verifierRegistrationErrorDescription = err.localizedDescription
+                }
+            } catch {
+                self.verifierRegistrationErrorDescription = error.localizedDescription
+            }
         }
     }
 
@@ -1264,10 +1282,16 @@ public actor WalletManager {
         capability: WalletAuthCapability? = nil,
         approval: HighRiskApproval? = nil
     ) async throws -> String {
-        try await ensureAuthenticated(capability: capability)
-        if rpcClient.isBroadcastRestricted {
+        let isVerifierValid: Bool
+        if let coord = authCoordinator {
+            isVerifierValid = rpcClient.isVerifierRegistered(for: coord.id)
+        } else {
+            isVerifierValid = rpcClient.isAuthorizationVerifierRegistered
+        }
+        if rpcClient.isBroadcastRestricted || !isVerifierValid || verifierRegistrationErrorDescription != nil {
             throw WalletSecurityError.signingPathUnverified
         }
+        try await ensureAuthenticated(capability: capability)
 
         // 1. Expiry check
         guard !preview.isExpired else {
@@ -1827,10 +1851,16 @@ public actor WalletManager {
     /// In Choice B production release, this unapproved legacy path is disabled to prevent
     /// bypassing single-use HighRiskApproval, funded preview validation, and address allowlist checks.
     public func send(to destinationAddress: String, amount: Double, passphrase: String? = nil, capability: WalletAuthCapability? = nil) async throws -> String {
-        try await ensureAuthenticated(capability: capability)
-        if rpcClient.isBroadcastRestricted {
+        let isVerifierValid: Bool
+        if let coord = authCoordinator {
+            isVerifierValid = rpcClient.isVerifierRegistered(for: coord.id)
+        } else {
+            isVerifierValid = rpcClient.isAuthorizationVerifierRegistered
+        }
+        if rpcClient.isBroadcastRestricted || !isVerifierValid || verifierRegistrationErrorDescription != nil {
             throw WalletSecurityError.signingPathUnverified
         }
+        try await ensureAuthenticated(capability: capability)
         guard let walletName = currentWalletName, !walletName.isEmpty else {
             throw WalletSecurityError.noWalletLoaded
         }

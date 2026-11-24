@@ -64,6 +64,522 @@ final class WalletIntegrationTests: XCTestCase {
         XCTAssertFalse(canSend, "Sending must fail-closed when tip is unverified or wallet locked")
     }
 
+    func testStartupSpendVerifierRegistersSuccessfullyOnInitialization() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_reg_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd")
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered, "Verifier must not be registered before WalletManager init")
+
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: authCoord,
+            walletInventory: inv
+        )
+
+        XCTAssertTrue(rpcClient.isAuthorizationVerifierRegistered, "CoordinatorSpendAuthVerifier must be registered upon WalletManager initialization")
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: authCoord.id), "Verifier must match authCoord identity")
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNil(regErr, "verifierRegistrationErrorDescription must be nil on successful initialization")
+    }
+
+    func testStartupSpendVerifierAllowsIdempotentRegistrationForSameCoordinator() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_idempotent_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd")
+        let authCoord = WalletAuthCoordinator(dataDirectory: tempDir)
+
+        // Pre-register verifier from authCoord
+        try rpcClient.registerAuthorizationVerifier(authCoord.spendAuthorizationVerifier)
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: authCoord.id))
+
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: authCoord)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: authCoord,
+            walletInventory: inv
+        )
+
+        // Idempotent registration should succeed without error
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNil(regErr, "verifierRegistrationErrorDescription must be nil for idempotent registration of same coordinator")
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: authCoord.id))
+    }
+
+    func testStartupSpendVerifierRejectsMismatchedCoordinatorDomainAndFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_mismatch_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", isBroadcastRestricted: false)
+        let coordA = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coordA"))
+        let coordB = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coordB"))
+
+        // Register coordA on rpcClient
+        try rpcClient.registerAuthorizationVerifier(coordA.spendAuthorizationVerifier)
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: coordA.id))
+        XCTAssertFalse(rpcClient.isVerifierRegistered(for: coordB.id))
+
+        // Initialize WalletManager with coordB on same rpcClient
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: coordB)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: coordB,
+            allowUnauthenticatedForTesting: true,
+            walletInventory: inv
+        )
+
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNotNil(regErr, "verifierRegistrationErrorDescription must be set when conflicting coordinator domain is registered")
+        XCTAssertTrue(regErr?.contains("Spend verifier conflict") == true, "Expected conflict description, got: \(String(describing: regErr))")
+        XCTAssertFalse(rpcClient.isVerifierRegistered(for: coordB.id), "Client must not report verifier registered for mismatched coordB")
+
+        // Assert fail-closed behavior: send must throw signingPathUnverified
+        do {
+            _ = try await walletManager.send(to: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 1.0)
+            XCTFail("Send must fail closed when coordinator domain is mismatched")
+        } catch let err as WalletSecurityError {
+            if case .signingPathUnverified = err {
+                // Expected fail-closed error
+            } else {
+                XCTFail("Expected signingPathUnverified, got \(err)")
+            }
+        }
+    }
+
+    func testStartupSpendVerifierMissingVerifierFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("verifier_missing_test_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", isBroadcastRestricted: false)
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered)
+
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let inv = WalletInventory(rpcClient: rpcClient, dataDirectory: tempDir, receiveAddressStore: addrStore, authCoordinator: nil)
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: nil,
+            allowUnauthenticatedForTesting: true,
+            walletInventory: inv
+        )
+
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered)
+        do {
+            _ = try await walletManager.send(to: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", amount: 1.0)
+            XCTFail("Send must fail closed when no verifier is registered")
+        } catch let err as WalletSecurityError {
+            if case .signingPathUnverified = err {
+                // Expected fail-closed error
+            } else {
+                XCTFail("Expected signingPathUnverified, got \(err)")
+            }
+        }
+    }
+
+    func testExecuteAuthorizedSendRejectsMismatchedCoordinatorDomainAndFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("exec_verifier_mismatch_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        DualFailureRPCURLProtocol.reset()
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", urlSession: session, isBroadcastRestricted: false)
+        let coordA = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coordA"))
+        let coordB = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coordB"))
+
+        // Register coordA on rpcClient
+        try rpcClient.registerAuthorizationVerifier(coordA.spendAuthorizationVerifier)
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: coordA.id))
+        XCTAssertFalse(rpcClient.isVerifierRegistered(for: coordB.id))
+
+        // Set up operator on coordB
+        await coordB.setMockDeviceOwnerSuccessForTesting(true)
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let (secret, _, codes) = try await coordB.generateEnrollmentSecret(username: "operator_mismatch")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coordB.enroll(
+            username: "operator_mismatch",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let validDest = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+        _ = try book.addRecipient(name: "Test Recipient", address: validDest)
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: coordB,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "test_vault"
+        )
+        try await walletManager.walletInventory.setOwner(for: "test_vault", owner: "operator_mismatch")
+
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNotNil(regErr)
+        XCTAssertTrue(regErr?.contains("Spend verifier conflict") == true)
+        XCTAssertFalse(rpcClient.isVerifierRegistered(for: coordB.id))
+
+        // Create well-shaped synthetic funded preview and record it
+        let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
+        let preview = FundedTxPreview(
+            destinationAddress: validDest,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: [expectedInput]
+        )
+
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
+        await walletManager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint,
+            walletName: "test_vault",
+            username: "operator_mismatch"
+        )
+
+        let txContext = TransactionSpendContext(
+            walletName: "test_vault",
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: expectedInput,
+            chain: "main",
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
+        )
+
+        let approval = try await coordB.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Mismatch coordinator executeAuthorizedSend negative test",
+            txContext: txContext
+        )
+
+        DualFailureRPCURLProtocol.reset()
+
+        // Calling executeAuthorizedSend under mismatched coordinator MUST fail closed with signingPathUnverified
+        do {
+            _ = try await walletManager.executeAuthorizedSend(
+                preview: preview,
+                explicitPassphrase: "mock_passphrase",
+                capability: capability,
+                approval: approval
+            )
+            XCTFail("executeAuthorizedSend must fail closed when coordinator domain is mismatched")
+        } catch let err as WalletSecurityError {
+            guard case .signingPathUnverified = err else {
+                XCTFail("Expected signingPathUnverified, got \(err)")
+                return
+            }
+        }
+
+        // Assert ZERO outbound RPC transport egress (no unlock, process, finalize, broadcast, or lock)
+        XCTAssertEqual(DualFailureRPCURLProtocol.requestsReceived.count, 0, "No RPC calls must reach transport on verifier mismatch")
+
+        // Assert approval remains unconsumed because execution failed closed before auth consumption
+        do {
+            try await coordB.consumeHighRiskApproval(
+                approval,
+                action: "send",
+                target: preview.destinationAddress,
+                expectedTxContext: txContext
+            )
+        } catch {
+            XCTFail("Approval must not have been consumed by the failed executeAuthorizedSend call: \(error)")
+        }
+    }
+
+    func testExecuteAuthorizedSendMissingVerifierFailsClosed() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("exec_verifier_missing_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        DualFailureRPCURLProtocol.reset()
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", urlSession: session, isBroadcastRestricted: false)
+        XCTAssertFalse(rpcClient.isAuthorizationVerifierRegistered)
+
+        let coord = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coord"))
+        await coord.setMockDeviceOwnerSuccessForTesting(true)
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let (secret, _, codes) = try await coord.generateEnrollmentSecret(username: "operator_missing")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coord.enroll(
+            username: "operator_missing",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let validDest = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+        _ = try book.addRecipient(name: "Test Recipient", address: validDest)
+
+        // Manager initialized with authCoordinator: nil
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: nil,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "test_vault"
+        )
+        try await walletManager.walletInventory.setOwner(for: "test_vault", owner: "operator_missing")
+
+        let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
+        let preview = FundedTxPreview(
+            destinationAddress: validDest,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: [expectedInput]
+        )
+
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
+        await walletManager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint,
+            walletName: "test_vault",
+            username: "operator_missing"
+        )
+
+        let txContext = TransactionSpendContext(
+            walletName: "test_vault",
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: expectedInput,
+            chain: "main",
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
+        )
+
+        let approval = try await coord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Missing verifier executeAuthorizedSend negative test",
+            txContext: txContext
+        )
+
+        DualFailureRPCURLProtocol.reset()
+
+        do {
+            _ = try await walletManager.executeAuthorizedSend(
+                preview: preview,
+                explicitPassphrase: "mock_passphrase",
+                capability: capability,
+                approval: approval
+            )
+            XCTFail("executeAuthorizedSend must fail closed when verifier is missing")
+        } catch let err as WalletSecurityError {
+            guard case .signingPathUnverified = err else {
+                XCTFail("Expected signingPathUnverified, got \(err)")
+                return
+            }
+        }
+
+        // Assert ZERO outbound RPC transport egress
+        XCTAssertEqual(DualFailureRPCURLProtocol.requestsReceived.count, 0, "No RPC calls must reach transport when verifier is missing")
+    }
+
+    func testExecuteAuthorizedSendSameCoordinatorDomainSucceeds() async throws {
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("exec_verifier_match_\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [DualFailureRPCURLProtocol.self]
+        let session = URLSession(configuration: config)
+
+        DualFailureRPCURLProtocol.reset()
+        DualFailureRPCURLProtocol.sendToAddressShouldFail = false
+        DualFailureRPCURLProtocol.walletLockShouldFail = false
+
+        let rpcClient = BitcoinRPCClient(user: "test", password: "pwd", urlSession: session, isBroadcastRestricted: false)
+        let coord = WalletAuthCoordinator(dataDirectory: tempDir.appendingPathComponent("coord"))
+
+        await coord.setMockDeviceOwnerSuccessForTesting(true)
+        UserDefaults.standard.removeObject(forKey: "hasCompletedInitialEnrollment")
+        let (secret, _, codes) = try await coord.generateEnrollmentSecret(username: "operator_match")
+        let code = WalletAuthCoordinator.generateTOTP(secret: secret)
+        let capability = try await coord.enroll(
+            username: "operator_match",
+            password: "OperatorPassword123!@#",
+            secretBase32: secret,
+            totpCode: code,
+            recoveryCodes: codes
+        )
+
+        let validDest = "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq"
+        let addrStore = ReceiveAddressStore(storageURL: tempDir.appendingPathComponent("addrs.json"))
+        let book = AddressBook(storageURL: tempDir.appendingPathComponent("book.json"))
+        _ = try book.addRecipient(name: "Test Recipient", address: validDest)
+
+        let walletManager = WalletManager(
+            rpcClient: rpcClient,
+            dataDirectory: tempDir,
+            addressBook: book,
+            receiveAddressStore: addrStore,
+            authCoordinator: coord,
+            allowUnauthenticatedForTesting: true,
+            initialWalletName: "test_vault"
+        )
+        try await walletManager.walletInventory.setOwner(for: "test_vault", owner: "operator_match")
+
+        XCTAssertTrue(rpcClient.isVerifierRegistered(for: coord.id))
+        let regErr = await walletManager.verifierRegistrationErrorDescription
+        XCTAssertNil(regErr)
+
+        let expectedInput = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef:0"
+        let preview = FundedTxPreview(
+            destinationAddress: validDest,
+            amountSats: 50_000,
+            feeSats: 1_000,
+            satPerVB: 5,
+            estimatedVSize: 140,
+            selectedInputs: [expectedInput]
+        )
+
+        let validPsbtBase64 = "cHNidP8BAHECAAAAAe/Nq4lnRSMB782riWdFIwHvzauJZ0UjAe/Nq4lnRSMBAAAAAAD/////AlDDAAAAAAAAFgAU6N8BjH4ybMJT+qx+Rs3FHmhULEIIew4AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAAAAABAR9AQg8AAAAAABYAFDorHE1eb3qLnA0eLzpLXG1+j5oLAAAA"
+        let psbtDigest = CryptoKit.SHA256.hash(data: Data(validPsbtBase64.utf8)).map { String(format: "%02x", $0) }.joined()
+        let expectedOutputFingerprint = "50000:0014e8df018c7e326cc253faac7e46cdc51e68542c42;949000:00143a2b1c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+        let totalInputSats: Int64 = 1_000_000
+
+        await walletManager.recordPendingFundedPsbt(
+            id: preview.id,
+            psbt: validPsbtBase64,
+            destination: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            feeSats: preview.feeSats,
+            inputs: preview.selectedInputs,
+            psbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint,
+            walletName: "test_vault",
+            username: "operator_match"
+        )
+
+        let txContext = TransactionSpendContext(
+            walletName: "test_vault",
+            destinationAddress: preview.destinationAddress,
+            amountSats: preview.amountSats,
+            maxFeeSats: preview.feeSats,
+            satPerVB: preview.satPerVB,
+            previewId: preview.id,
+            utxoFingerprint: expectedInput,
+            chain: "main",
+            nonce: preview.id.uuidString,
+            fundedPsbtDigest: psbtDigest,
+            totalInputSats: totalInputSats,
+            expectedOutputFingerprint: expectedOutputFingerprint
+        )
+
+        let approval = try await coord.requestHighRiskApproval(
+            capability: capability,
+            action: "send",
+            target: preview.destinationAddress,
+            reason: "Positive matching verifier executeAuthorizedSend test",
+            txContext: txContext
+        )
+
+        DualFailureRPCURLProtocol.reset()
+
+        let txid = try await walletManager.executeAuthorizedSend(
+            preview: preview,
+            explicitPassphrase: "mock_passphrase",
+            capability: capability,
+            approval: approval
+        )
+
+        XCTAssertEqual(txid, "synthetic_txid_1234567890abcdef")
+        XCTAssertEqual(
+            DualFailureRPCURLProtocol.requestsReceived,
+            ["walletpassphrase", "walletprocesspsbt", "finalizepsbt", "sendrawtransaction", "walletlock"],
+            "Matching coordinator domain must successfully execute full send pipeline with immediate relock"
+        )
+    }
+
     func testLegacySendCannotBypassApproval() async throws {
         let tempDir = FileManager.default.temporaryDirectory
             .appendingPathComponent("sentinel_legacy_send_guard_\(UUID().uuidString)")
