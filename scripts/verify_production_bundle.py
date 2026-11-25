@@ -59,6 +59,28 @@ RESTRICTED_ENTITLEMENT_KEYS = {
     "com.apple.developer.ubiquity-kvstore-identifier",
 }
 
+DEBUG_ENTITLEMENT_KEYS = (
+    "get-task-allow",
+    "com.apple.security.get-task-allow",
+)
+
+APPLE_ROOT_ORG_RE = re.compile(r"O\s*=\s*Apple(\s+Inc\.|\s+Computer,\s*Inc\.)", re.IGNORECASE)
+
+
+def _normalize_sha256_hex(digest: str, label: str) -> str:
+    cleaned = str(digest or "").strip()
+    if not re.match(r"^[0-9A-Fa-f]{64}$", cleaned):
+        raise VerificationError(f"{label} must be a 64-character hex SHA-256 digest (got '{cleaned}').")
+    return cleaned.lower()
+
+
+def _assert_no_debug_entitlements(entitlements: dict[str, Any], context: str) -> None:
+    for key in DEBUG_ENTITLEMENT_KEYS:
+        if key in entitlements and entitlements[key] is not False:
+            raise VerificationError(
+                f"Debug entitlement '{key}={entitlements[key]}' is strictly forbidden in production ({context})."
+            )
+
 
 class VerificationError(Exception):
     """Raised when a bundle, profile, permission, or signature invariant fails."""
@@ -84,28 +106,85 @@ def to_utc(dt: datetime.datetime) -> datetime.datetime:
     return dt.astimezone(datetime.timezone.utc)
 
 
-def export_apple_system_roots(roots_pem_path: str) -> None:
+def export_apple_root_cas(roots_pem_path: str) -> int:
     keychain = "/System/Library/Keychains/SystemRootCertificates.keychain"
     res = subprocess.run(
-        ["security", "find-certificate", "-a", "-p", keychain],
+        ["security", "find-certificate", "-a", "-c", "Apple", "-p", keychain],
         capture_output=True,
     )
     if res.returncode != 0 or not res.stdout:
         raise VerificationError(
-            f"Unable to export macOS SystemRootCertificates ({res.returncode}): {res.stderr.decode(errors='replace')}"
+            f"Unable to export Apple Root CAs from SystemRootCertificates ({res.returncode}): {res.stderr.decode(errors='replace')}"
         )
+    raw = res.stdout.decode("utf-8", errors="replace")
+    apple_blocks: list[bytes] = []
+    for chunk in raw.split("-----BEGIN CERTIFICATE-----")[1:]:
+        pem = ("-----BEGIN CERTIFICATE-----" + chunk).encode("utf-8")
+        info = subprocess.run(
+            ["openssl", "x509", "-noout", "-subject"],
+            input=pem,
+            capture_output=True,
+        )
+        if info.returncode == 0 and APPLE_ROOT_ORG_RE.search(info.stdout.decode(errors="replace")):
+            apple_blocks.append(pem)
+    if not apple_blocks:
+        raise VerificationError("No genuine Apple Root CA certificates found in SystemRootCertificates.")
     with open(roots_pem_path, "wb") as f:
-        f.write(res.stdout)
+        f.write(b"".join(apple_blocks))
+    return len(apple_blocks)
 
 
-def verify_profile_cms(profile_path: str, out_plist_path: str) -> None:
+def _verify_apple_profile_cms_signer(signer_pem_path: str) -> None:
+    if not os.path.isfile(signer_pem_path):
+        raise VerificationError("CMS verification produced no Apple signer certificate.")
+    res = subprocess.run(
+        ["openssl", "x509", "-in", signer_pem_path, "-noout", "-subject", "-issuer"],
+        capture_output=True,
+    )
+    if res.returncode != 0:
+        raise VerificationError(
+            f"Unable to inspect provisioning profile CMS signer certificate: {res.stderr.decode(errors='replace').strip()}"
+        )
+    text = res.stdout.decode("utf-8", errors="replace")
+    subj_line = ""
+    issuer_line = ""
+    for line in text.splitlines():
+        if line.startswith("subject="):
+            subj_line = line
+        elif line.startswith("issuer="):
+            issuer_line = line
+    if not APPLE_ROOT_ORG_RE.search(subj_line) or "Apple" not in subj_line:
+        raise VerificationError(
+            f"Provisioning profile CMS signer is NOT an Apple organization certificate ({subj_line.strip()})."
+        )
+    if not APPLE_ROOT_ORG_RE.search(issuer_line):
+        raise VerificationError(
+            f"Provisioning profile CMS signer issuer is NOT an Apple CA ({issuer_line.strip()})."
+        )
+
+
+def verify_profile_cms(
+    profile_path: str,
+    out_plist_path: str,
+    expected_profile_sha256: str | None = None,
+) -> None:
     if not os.path.isfile(profile_path) or os.path.islink(profile_path):
         raise VerificationError(f"Provisioning profile missing or is a symlink: {profile_path}")
+
+    if expected_profile_sha256:
+        expected_hex = _normalize_sha256_hex(expected_profile_sha256, "expected-profile-sha256")
+        with open(profile_path, "rb") as pf:
+            actual_hex = hashlib.sha256(pf.read()).hexdigest().lower()
+        if actual_hex != expected_hex:
+            raise VerificationError(
+                f"Provisioning profile SHA-256 ({actual_hex}) does not match expected pinned digest ({expected_hex})."
+            )
 
     with tempfile.TemporaryDirectory() as td:
         os.chmod(td, 0o700)
         roots_pem = os.path.join(td, "apple_roots.pem")
-        export_apple_system_roots(roots_pem)
+        signer_pem = os.path.join(td, "cms_signer.pem")
+        export_apple_root_cas(roots_pem)
 
         cms_verify = subprocess.run(
             [
@@ -118,6 +197,8 @@ def verify_profile_cms(profile_path: str, out_plist_path: str) -> None:
                 profile_path,
                 "-CAfile",
                 roots_pem,
+                "-signer",
+                signer_pem,
                 "-out",
                 out_plist_path,
             ],
@@ -126,6 +207,8 @@ def verify_profile_cms(profile_path: str, out_plist_path: str) -> None:
         if cms_verify.returncode != 0:
             err = cms_verify.stderr.decode(errors="replace").strip()
             raise VerificationError(f"Apple CMS authenticity verification failed for provisioning profile: {err}")
+
+        _verify_apple_profile_cms_signer(signer_pem)
 
         sec_cms = subprocess.run(
             ["security", "cms", "-D", "-h", "0", "-i", profile_path],
@@ -192,6 +275,7 @@ def validate_profile_plist(
     domain: str,
     cert_sha256: str,
     raw_profile_path: str | None = None,
+    expected_profile_sha256: str | None = None,
 ) -> dict[str, Any]:
     if not os.path.isfile(plist_path) or os.path.islink(plist_path):
         raise VerificationError(f"Profile plist missing or invalid: {plist_path}")
@@ -257,8 +341,7 @@ def validate_profile_plist(
     if not isinstance(entitlements, dict):
         raise VerificationError("Provisioning profile missing Entitlements dictionary.")
 
-    if entitlements.get("get-task-allow") is True:
-        raise VerificationError("Debug entitlement 'get-task-allow=true' is forbidden in production distribution profile.")
+    _assert_no_debug_entitlements(entitlements, "provisioning profile")
 
     ent_team = entitlements.get("com.apple.developer.team-identifier")
     if ent_team is not None and ent_team != team_id:
@@ -302,6 +385,16 @@ def validate_profile_plist(
     if raw_profile_path and os.path.isfile(raw_profile_path):
         with open(raw_profile_path, "rb") as rf:
             profile_sha256 = hashlib.sha256(rf.read()).hexdigest()
+    if expected_profile_sha256:
+        pinned_hex = _normalize_sha256_hex(expected_profile_sha256, "expected-profile-sha256")
+        if not profile_sha256:
+            raise VerificationError(
+                "expected-profile-sha256 was requested without a readable --raw-profile path."
+            )
+        if profile_sha256.lower() != pinned_hex:
+            raise VerificationError(
+                f"Provisioning profile SHA-256 ({profile_sha256.lower()}) does not match expected pinned digest ({pinned_hex})."
+            )
 
     return {
         "uuid": prof_uuid,
@@ -471,8 +564,8 @@ def verify_entitlements_against_profile(
     expected_app_id = f"{prefix}.{bundle_id}"
     expected_domain = f"webcredentials:{domain}"
 
-    if signed_entitlements.get("get-task-allow") is True or prof_ents.get("get-task-allow") is True:
-        raise VerificationError("Debug entitlement get-task-allow=true is strictly prohibited in production.")
+    _assert_no_debug_entitlements(prof_ents, "provisioning profile")
+    _assert_no_debug_entitlements(signed_entitlements, "signed bundle entitlements")
 
     # Verify required claims exist in final signed binary
     if signed_entitlements.get("com.apple.application-identifier") != expected_app_id:
@@ -542,22 +635,107 @@ def _extract_codesign_metadata(path: str) -> str:
     return res.stdout.decode(errors="replace") + "\n" + res.stderr.decode(errors="replace")
 
 
-def verify_signed_claims(app_path: str, team_id: str, bundle_id: str, domain: str, cert_sha256: str) -> None:
+def _extract_codesign_leaf_cert_sha256(path: str) -> str:
+    with tempfile.TemporaryDirectory() as td:
+        os.chmod(td, 0o700)
+        prefix = os.path.join(td, "cert-")
+        res = subprocess.run(
+            ["codesign", "--display", f"--extract-certificates={prefix}", path],
+            capture_output=True,
+        )
+        if res.returncode != 0:
+            raise VerificationError(
+                f"Failed to extract signing certificates from '{path}': {res.stderr.decode(errors='replace').strip()}"
+            )
+        leaf_path = f"{prefix}0"
+        if not os.path.isfile(leaf_path):
+            raise VerificationError(
+                f"Unsigned or ad-hoc code object has no X.509 leaf signing certificate: {path}"
+            )
+        with open(leaf_path, "rb") as cf:
+            der = cf.read()
+        if not der:
+            raise VerificationError(f"Extracted empty leaf signing certificate from '{path}'.")
+        return hashlib.sha256(der).hexdigest().upper()
+
+
+def _iter_nested_signed_targets(app_path: str) -> list[str]:
+    contents_dir = os.path.join(app_path, "Contents")
+    if not os.path.isdir(contents_dir):
+        raise VerificationError(f"Bundle missing Contents directory: {app_path}")
+    targets: list[str] = []
+    seen_real: set[str] = set()
+    main_bin_real = os.path.realpath(os.path.join(contents_dir, "MacOS", "SentinelNodeWallet"))
+
+    for dirpath, dirnames, filenames in os.walk(contents_dir, topdown=True, followlinks=False):
+        clean_dirs = []
+        for d in sorted(dirnames):
+            full_d = os.path.join(dirpath, d)
+            if os.path.islink(full_d):
+                continue
+            if d == "_CodeSignature":
+                continue
+            if d.endswith((".app", ".xpc", ".framework", ".appex")):
+                real_d = os.path.realpath(full_d)
+                if real_d not in seen_real:
+                    seen_real.add(real_d)
+                    targets.append(full_d)
+            clean_dirs.append(d)
+        dirnames[:] = clean_dirs
+
+        for fn in sorted(filenames):
+            full_f = os.path.join(dirpath, fn)
+            if os.path.islink(full_f):
+                continue
+            real_f = os.path.realpath(full_f)
+            if real_f == main_bin_real or real_f in seen_real:
+                continue
+            if is_macho_file(full_f):
+                seen_real.add(real_f)
+                targets.append(full_f)
+
+    return targets
+
+
+def verify_signed_claims(
+    app_path: str,
+    team_id: str,
+    bundle_id: str,
+    domain: str,
+    cert_sha256: str,
+    expected_profile_sha256: str | None = None,
+) -> None:
+    expected_cert_sha = _normalize_sha256_hex(cert_sha256, "cert-sha256").upper()
     emb_prof = os.path.join(app_path, "Contents", "embedded.provisionprofile")
     with tempfile.TemporaryDirectory() as td:
         os.chmod(td, 0o700)
         verified_plist = os.path.join(td, "verified_profile.plist")
-        verify_profile_cms(emb_prof, verified_plist)
+        verify_profile_cms(
+            emb_prof,
+            verified_plist,
+            expected_profile_sha256=expected_profile_sha256,
+        )
         validate_profile_plist(
             plist_path=verified_plist,
             team_id=team_id,
             bundle_id=bundle_id,
             domain=domain,
-            cert_sha256=cert_sha256,
+            cert_sha256=expected_cert_sha,
             raw_profile_path=emb_prof,
+            expected_profile_sha256=expected_profile_sha256,
         )
         with open(verified_plist, "rb") as pf:
             prof_pl = plistlib.load(pf)
+
+    prof_cert_fps = {
+        hashlib.sha256(raw_cert).hexdigest().upper()
+        for raw_cert in (prof_pl.get("DeveloperCertificates") or [])
+        if isinstance(raw_cert, (bytes, bytearray))
+    }
+    if expected_cert_sha not in prof_cert_fps:
+        raise VerificationError(
+            f"Expected signing certificate ({expected_cert_sha}) absent from verified profile DeveloperCertificates."
+        )
 
     # Verify outer bundle signature and Hardened Runtime
     verify_cmd = subprocess.run(["codesign", "--verify", "--strict", "--deep", "--verbose=2", app_path], capture_output=True)
@@ -574,20 +752,43 @@ def verify_signed_claims(app_path: str, team_id: str, bundle_id: str, domain: st
     if "(runtime)" not in meta:
         raise VerificationError("Outer bundle missing Hardened Runtime flag (0x10000(runtime)).")
 
+    outer_leaf_sha = _extract_codesign_leaf_cert_sha256(app_path)
+    if outer_leaf_sha != expected_cert_sha:
+        raise VerificationError(
+            f"Outer signed bundle leaf certificate SHA-256 ({outer_leaf_sha}) != expected signing cert ({expected_cert_sha})."
+        )
+    if outer_leaf_sha not in prof_cert_fps:
+        raise VerificationError(
+            f"Outer signed bundle leaf certificate SHA-256 ({outer_leaf_sha}) is NOT authorized in profile DeveloperCertificates."
+        )
+
     signed_ents = _extract_codesign_entitlements_plist(app_path)
     verify_entitlements_against_profile(prof_pl, signed_ents, team_id, bundle_id, domain)
 
-    # Also verify nested binaries do not claim debug entitlements or wrong team/missing runtime
+    # Require critical Knots helper binaries and verify ALL nested signed code objects (Mach-Os, frameworks, helpers)
     for helper in ("bitcoind", "bitcoin-cli"):
         helper_path = os.path.join(app_path, "Contents", "MacOS", helper)
         if not os.path.isfile(helper_path):
             raise VerificationError(f"Missing required nested binary: {helper_path}")
-        h_meta = _extract_codesign_metadata(helper_path)
-        if f"TeamIdentifier={team_id}" not in h_meta or "(runtime)" not in h_meta or "Authority=Developer ID Application:" not in h_meta:
-            raise VerificationError(f"Nested binary '{helper}' lacks Developer ID + TeamID + Hardened Runtime.")
-        h_ents = _extract_codesign_entitlements_plist(helper_path)
-        if h_ents.get("get-task-allow") is True:
-            raise VerificationError(f"Nested binary '{helper}' claims debug entitlement get-task-allow.")
+
+    for target_path in _iter_nested_signed_targets(app_path):
+        rel = os.path.relpath(target_path, app_path)
+        t_meta = _extract_codesign_metadata(target_path)
+        if f"TeamIdentifier={team_id}" not in t_meta or "(runtime)" not in t_meta or "Authority=Developer ID Application:" not in t_meta:
+            raise VerificationError(
+                f"Nested signed target '{rel}' lacks Developer ID Application + TeamID '{team_id}' + Hardened Runtime."
+            )
+        t_leaf_sha = _extract_codesign_leaf_cert_sha256(target_path)
+        if t_leaf_sha != expected_cert_sha or t_leaf_sha not in prof_cert_fps:
+            raise VerificationError(
+                f"Nested signed target '{rel}' leaf certificate SHA-256 ({t_leaf_sha}) != expected leaf cert ({expected_cert_sha})."
+            )
+        t_ents = _extract_codesign_entitlements_plist(target_path)
+        _assert_no_debug_entitlements(t_ents, f"nested signed target '{rel}'")
+        if any(k in t_ents for k in RESTRICTED_ENTITLEMENT_KEYS):
+            raise VerificationError(
+                f"Nested helper/framework target '{rel}' unexpectedly claims restricted entitlements: {sorted(k for k in t_ents if k in RESTRICTED_ENTITLEMENT_KEYS)}"
+            )
 
 
 def main() -> None:
@@ -597,6 +798,7 @@ def main() -> None:
     p_cms = sub.add_parser("verify-profile-cms")
     p_cms.add_argument("--profile", required=True)
     p_cms.add_argument("--out-plist", required=True)
+    p_cms.add_argument("--expected-profile-sha256", required=False)
 
     p_val = sub.add_parser("validate-profile-plist")
     p_val.add_argument("--plist", required=True)
@@ -605,6 +807,7 @@ def main() -> None:
     p_val.add_argument("--domain", required=True)
     p_val.add_argument("--cert-sha256", required=True)
     p_val.add_argument("--raw-profile", required=False)
+    p_val.add_argument("--expected-profile-sha256", required=False)
     p_val.add_argument("--json-out", required=False)
 
     p_perm = sub.add_parser("normalize-and-audit-permissions")
@@ -619,6 +822,7 @@ def main() -> None:
     p_claims.add_argument("--bundle-id", required=True)
     p_claims.add_argument("--domain", required=True)
     p_claims.add_argument("--cert-sha256", required=True)
+    p_claims.add_argument("--expected-profile-sha256", required=False)
 
     p_ent = sub.add_parser("check-entitlements-allowlist")
     p_ent.add_argument("--profile-plist", required=True)
@@ -630,11 +834,17 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.cmd == "verify-profile-cms":
-            verify_profile_cms(args.profile, args.out_plist)
+            verify_profile_cms(args.profile, args.out_plist, args.expected_profile_sha256)
             print("✓ Verified Apple CMS authenticity of provisioning profile.")
         elif args.cmd == "validate-profile-plist":
             summary = validate_profile_plist(
-                args.plist, args.team_id, args.bundle_id, args.domain, args.cert_sha256, args.raw_profile
+                args.plist,
+                args.team_id,
+                args.bundle_id,
+                args.domain,
+                args.cert_sha256,
+                args.raw_profile,
+                args.expected_profile_sha256,
             )
             if args.json_out:
                 with open(args.json_out, "w", encoding="utf-8") as jf:
@@ -649,7 +859,14 @@ def main() -> None:
             )
             print("✓ Audited distributable bundle permissions, symlinks, and embedded profile cleanly.")
         elif args.cmd == "verify-signed-claims":
-            verify_signed_claims(args.app, args.team_id, args.bundle_id, args.domain, args.cert_sha256)
+            verify_signed_claims(
+                args.app,
+                args.team_id,
+                args.bundle_id,
+                args.domain,
+                args.cert_sha256,
+                args.expected_profile_sha256,
+            )
             print("✓ Verified final signed entitlements against embedded MAC_APP_DIRECT provisioning profile.")
         elif args.cmd == "check-entitlements-allowlist":
             with open(args.profile_plist, "rb") as pf:

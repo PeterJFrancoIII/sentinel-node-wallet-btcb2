@@ -10,6 +10,8 @@ APP="${ROOT_DIR}/dist/Sentinel Node Wallet.app"
 DIST="${ROOT_DIR}/dist"
 BUNDLE_ID="${SENTINEL_BUNDLE_ID:-pool.sentineldefensetechnologies.co.za}"
 PROVISIONING_PROFILE_PATH="${SENTINEL_PROVISIONING_PROFILE_PATH:-}"
+EXPECTED_PROFILE_SHA256="${SENTINEL_PROVISIONING_PROFILE_SHA256:-}"
+EXPECTED_CERT_SHA256="${SENTINEL_DEVELOPER_ID_CERT_SHA256:-}"
 VERIFIER_PY="${SCRIPT_DIR}/verify_production_bundle.py"
 
 fail() { printf "RELEASE BLOCKED: %s\n" "$*" >&2; exit 1; }
@@ -30,6 +32,16 @@ while [ $# -gt 0 ]; do
         --profile)
             [ $# -ge 2 ] || fail "Missing argument for --profile"
             PROVISIONING_PROFILE_PATH="$2"
+            shift 2
+            ;;
+        --expected-profile-sha256)
+            [ $# -ge 2 ] || fail "Missing argument for --expected-profile-sha256"
+            EXPECTED_PROFILE_SHA256="$2"
+            shift 2
+            ;;
+        --expected-cert-sha256)
+            [ $# -ge 2 ] || fail "Missing argument for --expected-cert-sha256"
+            EXPECTED_CERT_SHA256="$2"
             shift 2
             ;;
         *)
@@ -106,12 +118,28 @@ SIGNER_CERT_SHA256="$(
 [[ "${SIGNER_CERT_SHA256}" =~ ^[0-9A-F]{64}$ ]] ||
     fail "Unable to resolve exact DER SHA-256 leaf fingerprint for signing identity '${SENTINEL_DEVELOPER_ID_APPLICATION}'."
 
+if [ -n "${EXPECTED_CERT_SHA256}" ]; then
+    [[ "${EXPECTED_CERT_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]] ||
+        fail "Invalid SENTINEL_DEVELOPER_ID_CERT_SHA256 digest format."
+    PINNED_CERT_SHA256="$(printf "%s" "${EXPECTED_CERT_SHA256}" | tr '[:lower:]' '[:upper:]')"
+    [ "${SIGNER_CERT_SHA256}" = "${PINNED_CERT_SHA256}" ] ||
+        fail "Active Keychain Developer ID leaf fingerprint (${SIGNER_CERT_SHA256}) does not match pinned SENTINEL_DEVELOPER_ID_CERT_SHA256 (${PINNED_CERT_SHA256})."
+fi
+
+PROFILE_PIN_ARGS=()
+if [ -n "${EXPECTED_PROFILE_SHA256}" ]; then
+    [[ "${EXPECTED_PROFILE_SHA256}" =~ ^[0-9A-Fa-f]{64}$ ]] ||
+        fail "Invalid SENTINEL_PROVISIONING_PROFILE_SHA256 digest format."
+    PROFILE_PIN_ARGS=(--expected-profile-sha256 "${EXPECTED_PROFILE_SHA256}")
+fi
+
 # Verify Apple CMS authenticity and bind profile to exact team, bundle, domain, and signing leaf cert BEFORE signing
 VERIFIED_PROFILE_PLIST="${TEMP_DIR}/verified_profile.plist"
 PROFILE_SUMMARY_JSON="${TEMP_DIR}/profile_summary.json"
 python3 "${VERIFIER_PY}" verify-profile-cms \
     --profile "${RESOLVED_PROFILE}" \
-    --out-plist "${VERIFIED_PROFILE_PLIST}"
+    --out-plist "${VERIFIED_PROFILE_PLIST}" \
+    ${PROFILE_PIN_ARGS[@]+"${PROFILE_PIN_ARGS[@]}"}
 chmod 0600 "${VERIFIED_PROFILE_PLIST}"
 
 python3 "${VERIFIER_PY}" validate-profile-plist \
@@ -121,7 +149,8 @@ python3 "${VERIFIER_PY}" validate-profile-plist \
     --domain "${DOMAIN}" \
     --cert-sha256 "${SIGNER_CERT_SHA256}" \
     --raw-profile "${RESOLVED_PROFILE}" \
-    --json-out "${PROFILE_SUMMARY_JSON}" >/dev/null
+    --json-out "${PROFILE_SUMMARY_JSON}" \
+    ${PROFILE_PIN_ARGS[@]+"${PROFILE_PIN_ARGS[@]}"} >/dev/null
 
 APP_ID_PREFIX="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["app_id_prefix"])' "${PROFILE_SUMMARY_JSON}")"
 PROFILE_UUID="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["uuid"])' "${PROFILE_SUMMARY_JSON}")"
@@ -181,10 +210,11 @@ ENTITLEMENTS_SHA256="$(shasum -a 256 "${ENTITLEMENTS}" | awk '{print $1}')"
 cp "${RESOLVED_PROFILE}" "${APP}/Contents/embedded.provisionprofile"
 
 # Normalize ONLY the distributable bundle permissions (0755 dirs & Mach-O binaries, 0644 resources/profile) preserving symlinks
+PINNED_OR_VERIFIED_PROFILE_SHA256="${EXPECTED_PROFILE_SHA256:-${PROFILE_SHA256}}"
 python3 "${VERIFIER_PY}" normalize-and-audit-permissions \
     --app "${APP}" \
     --require-profile \
-    --expected-profile-sha256 "${PROFILE_SHA256}"
+    --expected-profile-sha256 "${PINNED_OR_VERIFIED_PROFILE_SHA256}"
 
 # Sign nested frameworks and outer bundle with standard 022 umask inside subshell so _CodeSignature and DMG assets get 0644/0755
 (
@@ -210,13 +240,14 @@ python3 "${VERIFIER_PY}" normalize-and-audit-permissions \
     --app "${APP}" \
     --audit-only \
     --require-profile \
-    --expected-profile-sha256 "${PROFILE_SHA256}"
+    --expected-profile-sha256 "${PINNED_OR_VERIFIED_PROFILE_SHA256}"
 python3 "${VERIFIER_PY}" verify-signed-claims \
     --app "${APP}" \
     --team-id "${SENTINEL_APPLE_TEAM_ID}" \
     --bundle-id "${ACTUAL_BUNDLE_ID}" \
     --domain "${DOMAIN}" \
-    --cert-sha256 "${SIGNER_CERT_SHA256}"
+    --cert-sha256 "${SIGNER_CERT_SHA256}" \
+    ${PROFILE_PIN_ARGS[@]+"${PROFILE_PIN_ARGS[@]}"}
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "${APP}/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "${APP}/Contents/Info.plist" 2>/dev/null || echo "0")"
@@ -259,13 +290,14 @@ python3 "${VERIFIER_PY}" normalize-and-audit-permissions \
     --app "${MOUNTED_APP}" \
     --audit-only \
     --require-profile \
-    --expected-profile-sha256 "${PROFILE_SHA256}"
+    --expected-profile-sha256 "${PINNED_OR_VERIFIED_PROFILE_SHA256}"
 python3 "${VERIFIER_PY}" verify-signed-claims \
     --app "${MOUNTED_APP}" \
     --team-id "${SENTINEL_APPLE_TEAM_ID}" \
     --bundle-id "${ACTUAL_BUNDLE_ID}" \
     --domain "${DOMAIN}" \
-    --cert-sha256 "${SIGNER_CERT_SHA256}"
+    --cert-sha256 "${SIGNER_CERT_SHA256}" \
+    ${PROFILE_PIN_ARGS[@]+"${PROFILE_PIN_ARGS[@]}"}
 spctl --assess --type execute --verbose "${MOUNTED_APP}" ||
     fail "Gatekeeper spctl assessment failed on mounted app bundle."
 spctl --assess --type open --context context:primary-signature --verbose "${DMG}" ||
