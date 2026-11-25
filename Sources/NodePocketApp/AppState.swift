@@ -80,6 +80,7 @@ public final class AppState: ObservableObject {
     public let updateCoordinator: SoftwareUpdateCoordinator
     @Published public var authSession: WalletAuthCapability? = nil
     @Published public var isAuthEnrolled: Bool = false
+    @Published public var durableAuthState: DurableAuthState = .unknown
     @Published public var enrolledUsername: String? = nil
     @Published public var enrolledUsernames: [String] = []
     @Published public var isWalletTabUnlocked: Bool = false
@@ -90,6 +91,9 @@ public final class AppState: ObservableObject {
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
     @Published public var showSoftwareUpdatesSheet: Bool = false
     public let accountPurgeCoordinator: OperatorAccountPurgeCoordinator
+    public let startupGate = StartupLifecycleGate()
+    private var isBootstrapEvaluationInFlight: Bool = false
+    private var isStartGateCheckInFlight: Bool = false
 
     public let nodeManager: NodeManager
     public private(set) var walletManager: WalletManager
@@ -435,19 +439,60 @@ public final class AppState: ObservableObject {
 
     // MARK: - V13 Authentication Flow
 
+    private func syncPublishedAuthState(from durableState: DurableAuthState) async {
+        self.durableAuthState = durableState
+        self.isAuthEnrolled = await authCoordinator.isEnrolled
+        if !self.isAuthEnrolled || self.enrolledUsername == nil {
+            self.enrolledUsername = await authCoordinator.enrolledUsername
+        }
+        self.enrolledUsernames = await authCoordinator.enrolledUsernames
+        self.isMigrationPending = await authCoordinator.isMigrationPending
+        self.authRegistryError = await authCoordinator.registryLoadError?.localizedDescription
+        if let cur = await authCoordinator.currentSession {
+            self.authSession = cur
+            self.isWalletTabUnlocked = true
+        } else {
+            self.authSession = nil
+            self.isWalletTabUnlocked = false
+        }
+    }
+
     public func refreshAuthState() {
         Task { @MainActor in
-            self.isAuthEnrolled = await authCoordinator.isEnrolled
-            self.enrolledUsername = await authCoordinator.enrolledUsername
-            self.enrolledUsernames = await authCoordinator.enrolledUsernames
-            self.isMigrationPending = await authCoordinator.isMigrationPending
-            self.authRegistryError = await authCoordinator.registryLoadError?.localizedDescription
-            if let cur = await authCoordinator.currentSession {
-                self.authSession = cur
-                self.isWalletTabUnlocked = true
-            } else {
-                self.authSession = nil
-                self.isWalletTabUnlocked = false
+            let resolved = await startupGate.refreshDurableState(using: authCoordinator)
+            await syncPublishedAuthState(from: resolved)
+        }
+    }
+
+    /// Resolves authoritative persisted auth state and starts the embedded node at most once
+    /// ONLY when durable operator enrollment exists. On pristine or unhealthy installs, never writes
+    /// node markers or starts `bitcoind` and instead directs the operator to the Wallet screen.
+    public func performInitialBootstrapIfEligible() {
+        guard !isBootstrapEvaluationInFlight else { return }
+        isBootstrapEvaluationInFlight = true
+        Task { @MainActor in
+            defer { isBootstrapEvaluationInFlight = false }
+            let outcome = await startupGate.evaluateAutoBootstrap(
+                using: authCoordinator,
+                nodeIsStoppedOrError: nodeState == .stopped || caseMatchesError(nodeState),
+                isStartingUp: isStartingUp || isStartGateCheckInFlight,
+                startAction: { [weak self] in
+                    guard let self else { return false }
+                    return await self.executeVerifiedNodeStart(userInitiated: false)
+                }
+            )
+            await syncPublishedAuthState(from: startupGate.durableAuthState)
+            switch outcome {
+            case .requiresInitialEnrollment:
+                startupStatus = "Complete operator setup to start node"
+                selectedTab = .wallet
+                appendLog("[BOOTSTRAP] Awaiting initial operator enrollment before writing node configuration or starting Knots.")
+            case .blockedCorruptedOrMissingRegistry(let reason):
+                startupStatus = "Authentication registry error — node halted"
+                selectedTab = .wallet
+                appendLog("[AUTH] Fail-closed: \(reason)")
+            case .awaitingAuthResolution, .alreadyBootstrappedOrActive, .startedNode, .nodeStartSkippedOrFailed:
+                break
             }
         }
     }
@@ -477,13 +522,19 @@ public final class AppState: ObservableObject {
             totpCode: totpCode,
             recoveryCodes: data.recoveryCodes
         )
+        let verifiedDurable = await startupGate.refreshDurableState(using: authCoordinator)
+        guard verifiedDurable.canAutoStartOrMutateNode else {
+            throw WalletAuthError.storageError("Enrollment verification failed: durable authentication registry was not persisted.")
+        }
         await walletManager.resetActiveWallet()
+        self.durableAuthState = verifiedDurable
         self.authSession = session
         self.isAuthEnrolled = true
         self.enrolledUsername = session.username
         self.enrolledUsernames = await authCoordinator.enrolledUsernames
         self.isWalletTabUnlocked = true
         self.isMigrationPending = await authCoordinator.isMigrationPending
+        self.authRegistryError = nil
         self.authErrorMessage = nil
         // The TOTP provisioning URI and recovery codes are secret setup material.
         // Once enrollment succeeds, discard the app's transient onboarding copy.
@@ -496,6 +547,7 @@ public final class AppState: ObservableObject {
         self.transactions = []
         self.walletSummaries = []
         self.appendLog("[AUTH] Operator '\(session.username)' enrolled and Wallet Manager unlocked.")
+        self.performInitialBootstrapIfEligible()
         self.refreshWallet()
         self.refreshWalletInventory()
         Task { await self.refreshPrice() }
@@ -620,91 +672,124 @@ public final class AppState: ObservableObject {
 
     /// 1-Click Launch: Autonomous MainNet node startup, loopback RPC readiness,
     /// and encrypted descriptor wallet onboarding in a single integrated workflow.
-    public func startNode() {
-        guard nodeState == .stopped || caseMatchesError(nodeState) else { return }
+    public func startNode(userInitiated: Bool = true) {
+        guard !isStartGateCheckInFlight, !isStartingUp,
+              nodeState == .stopped || caseMatchesError(nodeState) else { return }
+        Task { @MainActor in
+            _ = await executeVerifiedNodeStart(userInitiated: userInitiated)
+        }
+    }
+
+    @discardableResult
+    private func executeVerifiedNodeStart(userInitiated: Bool) async -> Bool {
+        guard !isStartGateCheckInFlight, !isStartingUp,
+              nodeState == .stopped || caseMatchesError(nodeState) else { return false }
+        isStartGateCheckInFlight = true
+        let authz = await startupGate.authorizeNodeMutation(using: authCoordinator)
+        await syncPublishedAuthState(from: authz.durableState)
+        guard authz.allowed else {
+            isStartGateCheckInFlight = false
+            startupStatus = authz.durableState == .pristineUnenrolled
+                ? "Complete operator setup to start node"
+                : "Authentication registry error — node halted"
+            selectedTab = .wallet
+            let msg = authz.reason ?? "Complete First-Time Operator Setup before starting the node."
+            appendLog("[BOOTSTRAP] Blocked before node writes: \(msg)")
+            if userInitiated {
+                alertMessage = msg
+                showAlert = true
+            }
+            return false
+        }
+
         isStartingUp = true
+        isStartGateCheckInFlight = false
         startupStatus = "Writing configuration..."
         appendLog("[BOOTSTRAP] Initiating Sentinel Node Wallet 1-Click startup sequence...")
 
-        Task {
-            do {
-                // Check if background daemon is already responding
-                let isAlreadyRunning = (try? await nodeManager.rpcClient.getBlockchainInfo()) != nil
-                if isAlreadyRunning {
-                    let isVerified = await nodeManager.verifyAdoptedDaemon()
-                    if isVerified {
-                        nodeManager.adoptRunningDaemon()
-                        appendLog("[BOOTSTRAP] Verified and connected to active Knots BTCB2 daemon.")
-                    } else {
-                        throw RPCClientError.unverifiedDaemon(
-                            "An unverified process is responding on port \(nodeManager.config.rpcPort). " +
-                            "Refusing to adopt an unverified daemon. Stop the external process before launching Sentinel Node Wallet."
-                        )
-                    }
+        do {
+            // Check if background daemon is already responding
+            let isAlreadyRunning = (try? await nodeManager.rpcClient.getBlockchainInfo()) != nil
+            if isAlreadyRunning {
+                let isVerified = await nodeManager.verifyAdoptedDaemon()
+                if isVerified {
+                    nodeManager.adoptRunningDaemon()
+                    appendLog("[BOOTSTRAP] Verified and connected to active Knots BTCB2 daemon.")
                 } else {
-                    try nodeManager.start(ultraOverride: self.isUltraActive)
-                    startupStatus = "Awaiting loopback RPC connection..."
-                    try await nodeManager.waitForRPCReadiness(timeoutSeconds: 60)
+                    throw RPCClientError.unverifiedDaemon(
+                        "An unverified process is responding on port \(nodeManager.config.rpcPort). " +
+                        "Refusing to adopt an unverified daemon. Stop the external process before launching Sentinel Node Wallet."
+                    )
                 }
-
-                startupStatus = "Checking for an existing wallet..."
-                var needsWalletSetup = false
-                do {
-                    let walletName = try await walletManager.ensureDefaultWalletLoaded(capability: self.authSession)
-                    if self.isWalletTabUnlocked && self.authSession != nil {
-                        walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
-                        await self.loadOrEstablishReceiveAddresses(for: walletName)
-                        transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
-                        appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded and ready.")
-                    } else {
-                        walletSnapshot = nil
-                        canonicalReceiveAddress = ""
-                        receiveAddress = ""
-                        activeReceiveAddresses = []
-                        archivedReceiveAddresses = []
-                        transactions = []
-                        appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' discovered. Locked.")
-                    }
-                } catch WalletSecurityError.walletOnboardingRequired {
-                    // No wallet exists yet. This is normal, NOT a failed node startup.
-                    needsWalletSetup = true
-                    walletSnapshot = nil
-                    receiveAddress = ""
-                    transactions = []
-                    appendLog("[WALLET] Node is running. Create or load an encrypted wallet.")
-                } catch is WalletAuthError {
-                    walletSnapshot = nil
-                    receiveAddress = ""
-                    transactions = []
-                    appendLog("[AUTH] Wallet Manager is locked. Directing operator to Wallet sign-in.")
-                    selectedTab = .wallet
-                }
-
-                if let binfo = try? await nodeManager.rpcClient.getBlockchainInfo() {
-                    self.blockchainInfo = binfo
-                }
-                if let netInfo = try? await nodeManager.rpcClient.getNetworkInfo() {
-                    self.networkInfo = netInfo
-                }
-
-                startupStatus = needsWalletSetup ? "Node running — create an encrypted wallet" : "Ready"
-                isStartingUp = false
-                self.refreshWalletInventory()
-                appendLog(needsWalletSetup
-                    ? "[BOOTSTRAP] Node online; wallet setup required."
-                    : "[BOOTSTRAP] Node and existing wallet ready.")
-            } catch let authError as WalletAuthError {
-                isStartingUp = false
-                startupStatus = "Node online — Wallet locked"
-                selectedTab = .wallet
-                appendLog("[AUTH] \(authError.localizedDescription). Directing to Wallet sign-in.")
-            } catch {
-                isStartingUp = false
-                startupStatus = "Failed"
-                alertMessage = "1-Click Startup failed: \(error.localizedDescription)"
-                showAlert = true
-                appendLog("[ERROR] 1-Click Startup failed: \(error.localizedDescription)")
+            } else {
+                try nodeManager.start(ultraOverride: self.isUltraActive)
+                startupStatus = "Awaiting loopback RPC connection..."
+                try await nodeManager.waitForRPCReadiness(timeoutSeconds: 60)
             }
+
+            startupStatus = "Checking for an existing wallet..."
+            var needsWalletSetup = false
+            do {
+                let walletName = try await walletManager.ensureDefaultWalletLoaded(capability: self.authSession)
+                if self.isWalletTabUnlocked && self.authSession != nil {
+                    walletSnapshot = try? await walletManager.refreshWalletInfo(capability: self.authSession)
+                    await self.loadOrEstablishReceiveAddresses(for: walletName)
+                    transactions = (try? await walletManager.fetchRecentTransactions(count: 30, capability: self.authSession)) ?? []
+                    appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' loaded and ready.")
+                } else {
+                    walletSnapshot = nil
+                    canonicalReceiveAddress = ""
+                    receiveAddress = ""
+                    activeReceiveAddresses = []
+                    archivedReceiveAddresses = []
+                    transactions = []
+                    appendLog("[BOOTSTRAP] Existing encrypted wallet '\(walletName)' discovered. Locked.")
+                }
+            } catch WalletSecurityError.walletOnboardingRequired {
+                // No wallet exists yet. This is normal, NOT a failed node startup.
+                needsWalletSetup = true
+                walletSnapshot = nil
+                receiveAddress = ""
+                transactions = []
+                appendLog("[WALLET] Node is running. Create or load an encrypted wallet.")
+            } catch is WalletAuthError {
+                walletSnapshot = nil
+                receiveAddress = ""
+                transactions = []
+                appendLog("[AUTH] Wallet Manager is locked. Directing operator to Wallet sign-in.")
+                selectedTab = .wallet
+            }
+
+            if let binfo = try? await nodeManager.rpcClient.getBlockchainInfo() {
+                self.blockchainInfo = binfo
+            }
+            if let netInfo = try? await nodeManager.rpcClient.getNetworkInfo() {
+                self.networkInfo = netInfo
+            }
+
+            startupStatus = needsWalletSetup ? "Node running — create an encrypted wallet" : "Ready"
+            isStartingUp = false
+            self.refreshWalletInventory()
+            if self.isWalletTabUnlocked && self.authSession != nil {
+                self.refreshWallet()
+            }
+            appendLog(needsWalletSetup
+                ? "[BOOTSTRAP] Node online; wallet setup required."
+                : "[BOOTSTRAP] Node and existing wallet ready.")
+            return true
+        } catch let authError as WalletAuthError {
+            isStartingUp = false
+            startupStatus = "Node online — Wallet locked"
+            selectedTab = .wallet
+            appendLog("[AUTH] \(authError.localizedDescription). Directing to Wallet sign-in.")
+            return true
+        } catch {
+            isStartingUp = false
+            startupStatus = "Failed"
+            alertMessage = "1-Click Startup failed: \(error.localizedDescription)"
+            showAlert = true
+            appendLog("[ERROR] 1-Click Startup failed: \(error.localizedDescription)")
+            return false
         }
     }
 
@@ -955,6 +1040,11 @@ public final class AppState: ObservableObject {
         guard !isApplyingNodeSettings else {
             throw RPCClientError.serializationError("Another settings change is already in progress.")
         }
+        let authz = await startupGate.authorizeNodeMutation(using: authCoordinator)
+        await syncPublishedAuthState(from: authz.durableState)
+        guard authz.allowed else {
+            throw WalletAuthError.storageError(authz.reason ?? "Complete First-Time Operator Setup before modifying node settings.")
+        }
         isApplyingNodeSettings = true
         defer { isApplyingNodeSettings = false }
         let status = try await nodeManager.applyConfiguration(profile: profile, storageMode: mode, allowInboundP2P: allowInboundP2P)
@@ -1187,12 +1277,24 @@ public final class AppState: ObservableObject {
     }
 
     public func applyProfile(_ profileType: SyncProfileType) {
-        self.userPreferredProfile = profileType
-        self.selectedProfileType = profileType
-        ProfileSettingsStore.shared.setSelectedProfileType(profileType)
-        let profile = ProfileSettingsStore.shared.getProfile(for: profileType, pruneMB: storageMode.pruneMB)
-
-        Task {
+        let previous = self.selectedProfileType
+        Task { @MainActor in
+            let authz = await startupGate.authorizeNodeMutation(using: authCoordinator)
+            await syncPublishedAuthState(from: authz.durableState)
+            guard authz.allowed else {
+                if self.selectedProfileType != previous {
+                    self.selectedProfileType = previous
+                    self.userPreferredProfile = previous
+                    alertMessage = authz.reason ?? "Complete First-Time Operator Setup before changing sync profile."
+                    showAlert = true
+                }
+                selectedTab = .wallet
+                return
+            }
+            self.userPreferredProfile = profileType
+            self.selectedProfileType = profileType
+            ProfileSettingsStore.shared.setSelectedProfileType(profileType)
+            let profile = ProfileSettingsStore.shared.getProfile(for: profileType, pruneMB: storageMode.pruneMB)
             do {
                 try await applyNodeSettings(profile: profile, storageMode: storageMode)
             } catch {

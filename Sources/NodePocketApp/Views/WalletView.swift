@@ -150,7 +150,7 @@ public struct WalletView: View {
             state.refreshCoinbaseRewards()
             state.refreshWalletInventory()
             Task { await state.refreshPrice() }
-            if state.isWalletTabUnlocked && !isNodeReadyForWallet && !hasBypassedNodePrompt {
+            if state.isWalletTabUnlocked && !isNodeReadyForWallet && !state.isStartingUp && !hasBypassedNodePrompt {
                 showNodePromptSheet = true
             }
         }
@@ -193,7 +193,7 @@ public struct WalletView: View {
             } else {
                 state.refreshWalletInventory()
                 Task { await state.refreshPrice() }
-                if !isNodeReadyForWallet && !hasBypassedNodePrompt {
+                if !isNodeReadyForWallet && !state.isStartingUp && !hasBypassedNodePrompt {
                     showNodePromptSheet = true
                 }
             }
