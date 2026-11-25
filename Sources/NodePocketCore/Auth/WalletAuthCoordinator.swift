@@ -29,6 +29,21 @@ public enum AuthRegistryStorageError: LocalizedError, Sendable, Equatable {
     }
 }
 
+/// Authoritative disk-backed operator authentication lifecycle state.
+public enum DurableAuthState: Equatable, Sendable {
+    case unknown
+    case pristineUnenrolled
+    case enrolled(usernames: [String])
+    case corruptedOrMissingInEstablishedNode(errorDescription: String)
+
+    public var canAutoStartOrMutateNode: Bool {
+        if case .enrolled(let usernames) = self {
+            return !usernames.isEmpty
+        }
+        return false
+    }
+}
+
 /// Internal diagnostic failure stage classification preserving generic public user-facing errors
 /// to eliminate credential oracle leakage while maintaining detailed observability.
 public enum AuthFailureStage: String, Sendable, Equatable {
@@ -761,6 +776,48 @@ public actor WalletAuthCoordinator {
 
     public var isEnrolled: Bool {
         !records.isEmpty
+    }
+
+    /// Authoritative durable lifecycle state derived strictly from persisted registry and marker validation.
+    public var durableAuthState: DurableAuthState {
+        if let err = registryLoadError {
+            return .corruptedOrMissingInEstablishedNode(errorDescription: err.localizedDescription)
+        }
+        if records.isEmpty {
+            return .pristineUnenrolled
+        }
+        return .enrolled(usernames: enrolledUsernames)
+    }
+
+    /// Re-evaluates persisted authentication state directly from disk without creating node or auth markers
+    /// on a genuinely pristine data directory.
+    public func evaluateDurableAuthState() -> DurableAuthState {
+        do {
+            let dirExists = FileManager.default.fileExists(atPath: dataDirectory.path)
+            let hasCompleted = UserDefaults.standard.bool(forKey: "hasCompletedInitialEnrollment")
+            let reloaded: [String: AuthRegistryRecord]
+            if !dirExists && !hasCompleted {
+                reloaded = try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+            } else {
+                reloaded = try withCrossProcessLock {
+                    try Self.loadRecordsStrict(from: registryURL, in: dataDirectory)
+                }
+            }
+            var updated = reloaded
+            Self.mergeDurableLockoutFallback(into: &updated)
+            self.records = updated
+            self.registryLoadError = nil
+        } catch let err as AuthRegistryStorageError {
+            self.records = [:]
+            self.registryLoadError = err
+        } catch {
+            self.records = [:]
+            self.registryLoadError = .unreadableFile(
+                path: registryURL.path,
+                underlyingError: error.localizedDescription
+            )
+        }
+        return durableAuthState
     }
 
     public func reloadRecordsFromDisk() throws {

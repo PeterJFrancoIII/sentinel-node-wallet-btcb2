@@ -134,10 +134,8 @@ struct NodePocketApp: App {
                     appDelegate.configureMainWindow(window)
                 })
                 .onAppear {
-                    // Autonomous 1-Click bootstrap on first app open
-                    if appState.nodeState == .stopped && !appState.isStartingUp {
-                        appState.startNode()
-                    }
+                    // Resolve durable operator authentication before any autonomous node bootstrap or config write
+                    appState.performInitialBootstrapIfEligible()
                 }
         }
         .windowStyle(.titleBar)

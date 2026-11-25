@@ -156,7 +156,19 @@ public struct NodeView: View {
 
                             Spacer()
 
-                            if state.isStartingUp {
+                            if !state.durableAuthState.canAutoStartOrMutateNode {
+                                Button(action: { state.selectedTab = .wallet }) {
+                                    Label(
+                                        state.authRegistryError != nil ? "Resolve Auth in Wallet" : "Enroll Operator First",
+                                        systemImage: "person.badge.key.fill"
+                                    )
+                                    .font(.headline)
+                                    .padding(.horizontal, 18)
+                                    .padding(.vertical, 8)
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                            } else if state.isStartingUp {
                                 HStack(spacing: 10) {
                                     ProgressView()
                                         .controlSize(.small)

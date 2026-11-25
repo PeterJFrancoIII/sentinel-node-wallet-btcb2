@@ -103,7 +103,9 @@ public struct ContentView: View {
                     }
                     .pickerStyle(.menu)
                     .frame(width: 105)
+                    .disabled(!state.durableAuthState.canAutoStartOrMutateNode)
                     .onChange(of: state.selectedProfileType) { newProfile in
+                        guard state.durableAuthState.canAutoStartOrMutateNode else { return }
                         state.applyProfile(newProfile)
                     }
                 }
