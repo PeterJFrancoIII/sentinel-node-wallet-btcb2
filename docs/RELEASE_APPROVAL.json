@@ -2,17 +2,17 @@
   "$schema": "./RELEASE_APPROVAL.schema.json",
   "schema_version": "1.0.0",
   "release_target": {
-    "target_tag": "v1.0.0-build6",
-    "approved_commit_sha": "3326e821ee9e47139dcb630953b41da89e258b87",
+    "target_tag": "v1.0.0-build7",
+    "approved_commit_sha": "242eeaaa02a4155fe2c3d7901601329b6c0c2a2e",
     "bundle_version": "1.0.0",
-    "build_number": 6
+    "build_number": 7
   },
   "approval_metadata": {
     "approver_identity": "Peter J. Franco III (Operator)",
     "approval_policy": "Policy B: Independent Approved Release Commit on Protected Main",
-    "approved_at_utc": "2026-11-24T02:35:00Z",
+    "approved_at_utc": "2026-11-25T00:19:21Z",
     "authorized_scope": "NODEPOCKET_BTCB2_ONLY",
-    "review_reference": "MSG:chatgpt-nodepocket-r240-operator-authorized-production-ship-20261123-gpt6-295"
+    "review_reference": "MSG:chatgpt-nodepocket-r256-operator-approved-build7-exact-candidate-execute-20261124-gpt6-308"
   },
   "security_attestation": {
     "spending_authority_disarmed": true,
