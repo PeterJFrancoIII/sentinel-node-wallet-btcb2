@@ -444,6 +444,8 @@ jobs:
           APPLE_CERT_B64: "${{ secrets.APPLE_CERTIFICATE_BASE64 }}"
           APPLE_CERT_PASS: "${{ secrets.APPLE_CERTIFICATE_PASSWORD }}"
           APPLE_PROV_B64: "${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}"
+          APPLE_PROV_SHA256: "${{ vars.APPLE_PROVISIONING_PROFILE_SHA256 }}"
+          APPLE_CERT_SHA256: "${{ vars.APPLE_DEVELOPER_ID_CERT_SHA256 }}"
           NOTARY_KEY_B64: "${{ secrets.NOTARY_API_KEY_BASE64 }}"
           NOTARY_KEY_ID: "${{ secrets.NOTARY_KEY_ID }}"
           NOTARY_ISSUER_ID: "${{ secrets.NOTARY_ISSUER_ID }}"
@@ -457,6 +459,12 @@ jobs:
           fi
           if [ -z "${APPLE_PROV_B64}" ]; then
             MISSING="${MISSING} APPLE_PROVISIONING_PROFILE_BASE64"
+          fi
+          if [ -z "${APPLE_PROV_SHA256}" ]; then
+            MISSING="${MISSING} APPLE_PROVISIONING_PROFILE_SHA256(vars)"
+          fi
+          if [ -z "${APPLE_CERT_SHA256}" ]; then
+            MISSING="${MISSING} APPLE_DEVELOPER_ID_CERT_SHA256(vars)"
           fi
           if [ -z "${NOTARY_KEY_B64}" ] || [ -z "${NOTARY_KEY_ID}" ] || [ -z "${NOTARY_ISSUER_ID}" ]; then
             MISSING="${MISSING} NOTARY_CREDENTIALS"
@@ -478,8 +486,16 @@ jobs:
           fi
 
           python3 - <<'PY' || exit 1
-          import base64, os, sys
+          import base64, hashlib, os, re, sys
           raw_b64 = os.environ.get("APPLE_PROV_B64", "").strip()
+          expected_prov_sha = os.environ.get("APPLE_PROV_SHA256", "").strip().lower()
+          expected_cert_sha = os.environ.get("APPLE_CERT_SHA256", "").strip().upper()
+          if not re.match(r"^[0-9a-f]{64}$", expected_prov_sha):
+              print(f"ERROR: APPLE_PROVISIONING_PROFILE_SHA256 is not a valid 64-char hex digest: '{expected_prov_sha}'", file=sys.stderr)
+              sys.exit(1)
+          if not re.match(r"^[0-9A-F]{64}$", expected_cert_sha):
+              print(f"ERROR: APPLE_DEVELOPER_ID_CERT_SHA256 is not a valid 64-char hex digest: '{expected_cert_sha}'", file=sys.stderr)
+              sys.exit(1)
           try:
               raw = base64.b64decode(raw_b64, validate=True)
               if len(raw) < 256:
@@ -488,7 +504,12 @@ jobs:
           except Exception as e:
               print(f"ERROR: APPLE_PROVISIONING_PROFILE_BASE64 is not valid Base64: {e}", file=sys.stderr)
               sys.exit(1)
-          print(f"✓ Verified APPLE_PROVISIONING_PROFILE_BASE64 format ({len(raw)} bytes).")
+          actual_prov_sha = hashlib.sha256(raw).hexdigest().lower()
+          if actual_prov_sha != expected_prov_sha:
+              print(f"ERROR: APPLE_PROVISIONING_PROFILE_BASE64 SHA-256 ({actual_prov_sha}) != pinned APPLE_PROVISIONING_PROFILE_SHA256 ({expected_prov_sha}).", file=sys.stderr)
+              sys.exit(1)
+          print(f"✓ Verified APPLE_PROVISIONING_PROFILE_BASE64 format ({len(raw)} bytes) and pinned SHA-256 ({actual_prov_sha}).")
+          print(f"✓ Verified pinned APPLE_DEVELOPER_ID_CERT_SHA256 format ({expected_cert_sha}).")
           PY
 
           python3 - "${SPARKLE_TOOL_HASH}" <<'PY' || exit 1
@@ -558,6 +579,8 @@ jobs:
           SENTINEL_WEBCREDENTIALS_DOMAIN: pool.sentineldefensetechnologies.co.za
           SENTINEL_NOTARY_PROFILE: sentinel-notary-profile
           APPLE_PROVISIONING_PROFILE_BASE64: "${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}"
+          SENTINEL_PROVISIONING_PROFILE_SHA256: "${{ vars.APPLE_PROVISIONING_PROFILE_SHA256 }}"
+          SENTINEL_DEVELOPER_ID_CERT_SHA256: "${{ vars.APPLE_DEVELOPER_ID_CERT_SHA256 }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
           SENTINEL_REQUIRE_SPARKLE_KEY: "1"
           SENTINEL_SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
@@ -592,6 +615,8 @@ jobs:
           SHORT_VERSION: "${{ needs.unprivileged-qualification.outputs.short_version }}"
           BUILD_NUM: "${{ needs.unprivileged-qualification.outputs.build_number }}"
           SPARKLE_PUBLIC_ED_KEY: "${{ vars.SPARKLE_PUBLIC_ED_KEY || secrets.SPARKLE_PUBLIC_ED_KEY }}"
+          EXPECTED_PROV_SHA256: "${{ vars.APPLE_PROVISIONING_PROFILE_SHA256 }}"
+          EXPECTED_CERT_SHA256: "${{ vars.APPLE_DEVELOPER_ID_CERT_SHA256 }}"
         run: |
           RELEASE_CONTROL_COMMIT="$(git rev-parse HEAD)"
           echo "✓ Verified trusted release-control commit on main: ${RELEASE_CONTROL_COMMIT}"
@@ -666,6 +691,17 @@ jobs:
           if os.path.isfile("dist/BUILD_MANIFEST.json"):
               with open("dist/BUILD_MANIFEST.json", encoding="utf-8") as mf:
                   manifest = json.load(mf)
+
+          expected_prov_sha = os.environ.get("EXPECTED_PROV_SHA256", "").strip().lower()
+          expected_cert_sha = os.environ.get("EXPECTED_CERT_SHA256", "").strip().upper()
+          if not expected_prov_sha or (manifest.get("provisioning_profile_sha256") or "").lower() != expected_prov_sha:
+              raise SystemExit(
+                  f"ERROR: BUILD_MANIFEST provisioning_profile_sha256 ({manifest.get('provisioning_profile_sha256')}) != pinned ({expected_prov_sha})."
+              )
+          if not expected_cert_sha or (manifest.get("signing_cert_sha256") or "").upper() != expected_cert_sha:
+              raise SystemExit(
+                  f"ERROR: BUILD_MANIFEST signing_cert_sha256 ({manifest.get('signing_cert_sha256')}) != pinned ({expected_cert_sha})."
+              )
 
           attestation = {
               "tag": "${TAG}",

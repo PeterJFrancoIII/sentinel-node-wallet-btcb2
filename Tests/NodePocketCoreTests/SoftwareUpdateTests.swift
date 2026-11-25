@@ -3338,4 +3338,278 @@ echo "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
         ])
         XCTAssertNotEqual(resWorldWrite.status, 0, "World-writable Info.plist must fail audit")
     }
+
+    func testProvisioningProfileLeafCertAndDebugKeyValidationCase41() throws {
+        var currentURL = URL(fileURLWithPath: #file).deletingLastPathComponent()
+        while !FileManager.default.fileExists(atPath: currentURL.appendingPathComponent("Package.swift").path) {
+            let parent = currentURL.deletingLastPathComponent()
+            if parent.path == currentURL.path { break }
+            currentURL = parent
+        }
+        let rootDir = currentURL
+        let scriptsDir = rootDir.appendingPathComponent("scripts").path
+        let verifierPyPath = rootDir.appendingPathComponent("scripts/verify_production_bundle.py").path
+
+        let tempBase = FileManager.default.temporaryDirectory.appendingPathComponent("sentinel-case41-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tempBase, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempBase) }
+
+        func runCmd(_ exe: String, _ args: [String]) -> (status: Int32, output: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: exe)
+            proc.arguments = args
+            let pipe = Pipe()
+            proc.standardOutput = pipe
+            proc.standardError = pipe
+            try? proc.run()
+            proc.waitUntilExit()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+        }
+
+        // 1. Verify _extract_codesign_leaf_cert_sha256 extracts real DER leaf SHA-256 from signed macOS Mach-O (/usr/bin/true)
+        let leafPyRes = runCmd("/usr/bin/python3", [
+            "-c",
+            """
+            import sys
+            sys.path.insert(0, \(String(reflecting: scriptsDir)))
+            import verify_production_bundle as v
+            sha = v._extract_codesign_leaf_cert_sha256('/usr/bin/true')
+            assert len(sha) == 64 and all(c in '0123456789ABCDEF' for c in sha), f'Invalid sha: {sha}'
+            print('EXTRACTED_LEAF_OK:' + sha)
+            """
+        ])
+        XCTAssertEqual(leafPyRes.status, 0, "Real Mach-O leaf extraction must succeed: \(leafPyRes.output)")
+        XCTAssertTrue(leafPyRes.output.contains("EXTRACTED_LEAF_OK:"))
+
+        // 2. Build fixture profile & test macOS debug key (`com.apple.security.get-task-allow`) + pinned digest mismatch
+        let certPath = tempBase.appendingPathComponent("cert.pem").path
+        let keyPath = tempBase.appendingPathComponent("key.pem").path
+        let certDerPath = tempBase.appendingPathComponent("cert.der").path
+        _ = runCmd("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyPath, "-out", certPath, "-days", "1", "-subj", "/CN=TestLeafA/O=TestOrg"])
+        _ = runCmd("/usr/bin/openssl", ["x509", "-in", certPath, "-outform", "DER", "-out", certDerPath])
+        let certDER = try Data(contentsOf: URL(fileURLWithPath: certDerPath))
+        let certASHA = SHA256.hash(data: certDER).map { String(format: "%02X", $0) }.joined()
+
+        let certBPath = tempBase.appendingPathComponent("certB.pem").path
+        let keyBPath = tempBase.appendingPathComponent("keyB.pem").path
+        let certBDerPath = tempBase.appendingPathComponent("certB.der").path
+        _ = runCmd("/usr/bin/openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", keyBPath, "-out", certBPath, "-days", "1", "-subj", "/CN=TestLeafB/O=TestOrg"])
+        _ = runCmd("/usr/bin/openssl", ["x509", "-in", certBPath, "-outform", "DER", "-out", certBDerPath])
+        let certBDER = try Data(contentsOf: URL(fileURLWithPath: certBDerPath))
+        let certBSHA = SHA256.hash(data: certBDER).map { String(format: "%02X", $0) }.joined()
+        XCTAssertNotEqual(certASHA, certBSHA)
+
+        func makeProfilePlist(macDebugKey: Bool = false) throws -> URL {
+            var ent: [String: Any] = [
+                "com.apple.application-identifier": "S8QMQZA656.pool.sentineldefensetechnologies.co.za",
+                "com.apple.developer.team-identifier": "S8QMQZA656",
+                "com.apple.developer.associated-domains": "*",
+                "keychain-access-groups": ["S8QMQZA656.*"]
+            ]
+            if macDebugKey {
+                ent["com.apple.security.get-task-allow"] = true
+            }
+            let dict: [String: Any] = [
+                "UUID": "8bf87383-c1a9-4e55-a725-02fd376ac6cf",
+                "Name": "Test Direct Profile",
+                "ExpirationDate": ISO8601DateFormatter().date(from: "2044-11-19T22:26:30Z")!,
+                "CreationDate": ISO8601DateFormatter().date(from: "2026-11-24T00:00:00Z")!,
+                "Platform": ["OSX"],
+                "ProvisionsAllDevices": true,
+                "TeamIdentifier": ["S8QMQZA656"],
+                "ApplicationIdentifierPrefix": ["S8QMQZA656"],
+                "Entitlements": ent,
+                "DeveloperCertificates": [certDER]
+            ]
+            let url = tempBase.appendingPathComponent("prof-\(UUID().uuidString).plist")
+            try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0).write(to: url)
+            return url
+        }
+
+        let validProfURL = try makeProfilePlist(macDebugKey: false)
+        let validProfBytes = try Data(contentsOf: validProfURL)
+        let validProfDigest = SHA256.hash(data: validProfBytes).map { String(format: "%02x", $0) }.joined()
+        let wrongProfDigest = String(repeating: "0", count: 64)
+
+        // 2a. com.apple.security.get-task-allow in profile plist fails validate-profile-plist
+        let macDebugProfURL = try makeProfilePlist(macDebugKey: true)
+        let resMacDebugProf = runCmd("/usr/bin/python3", [
+            verifierPyPath, "validate-profile-plist",
+            "--plist", macDebugProfURL.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za",
+            "--cert-sha256", certASHA
+        ])
+        XCTAssertNotEqual(resMacDebugProf.status, 0, "macOS com.apple.security.get-task-allow=true in profile must fail closed")
+
+        // 2b. com.apple.security.get-task-allow in claimed entitlements fails allowlist AND real codesigned Mach-O extraction
+        let macDebugClaimsURL = tempBase.appendingPathComponent("mac-debug-claims.plist")
+        let macDebugClaimsDict: [String: Any] = [
+            "com.apple.application-identifier": "S8QMQZA656.pool.sentineldefensetechnologies.co.za",
+            "com.apple.developer.team-identifier": "S8QMQZA656",
+            "com.apple.developer.associated-domains": ["webcredentials:pool.sentineldefensetechnologies.co.za"],
+            "keychain-access-groups": ["S8QMQZA656.pool.sentineldefensetechnologies.co.za"],
+            "com.apple.security.get-task-allow": true
+        ]
+        try PropertyListSerialization.data(fromPropertyList: macDebugClaimsDict, format: .xml, options: 0).write(to: macDebugClaimsURL)
+        let resMacDebugClaims = runCmd("/usr/bin/python3", [
+            verifierPyPath, "check-entitlements-allowlist",
+            "--profile-plist", validProfURL.path,
+            "--entitlements-plist", macDebugClaimsURL.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za"
+        ])
+        XCTAssertNotEqual(resMacDebugClaims.status, 0, "macOS com.apple.security.get-task-allow in signed claims must fail closed")
+
+        // Real ad-hoc signed Mach-O carrying com.apple.security.get-task-allow rejected by _assert_no_debug_entitlements
+        let debugStubBin = tempBase.appendingPathComponent("debug_stub")
+        _ = runCmd("/bin/cp", ["/usr/bin/true", debugStubBin.path])
+        let resSignStub = runCmd("/usr/bin/codesign", ["--force", "--sign", "-", "--entitlements", macDebugClaimsURL.path, debugStubBin.path])
+        XCTAssertEqual(resSignStub.status, 0, "Ad-hoc debug stub signing failed: \(resSignStub.output)")
+        let resRealDebugExtract = runCmd("/usr/bin/python3", [
+            "-c",
+            """
+            import sys
+            sys.path.insert(0, \(String(reflecting: scriptsDir)))
+            import verify_production_bundle as v
+            ents = v._extract_codesign_entitlements_plist(\(String(reflecting: debugStubBin.path)))
+            v._assert_no_debug_entitlements(ents, 'signed Mach-O stub')
+            """
+        ])
+        XCTAssertNotEqual(resRealDebugExtract.status, 0, "Extracted real Mach-O com.apple.security.get-task-allow must fail closed")
+
+        // 2c. Unexpected pinned profile digest fails closed; matching digest passes
+        let resWrongDigest = runCmd("/usr/bin/python3", [
+            verifierPyPath, "validate-profile-plist",
+            "--plist", validProfURL.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za",
+            "--cert-sha256", certASHA,
+            "--raw-profile", validProfURL.path,
+            "--expected-profile-sha256", wrongProfDigest
+        ])
+        XCTAssertNotEqual(resWrongDigest.status, 0, "Mismatched --expected-profile-sha256 must fail closed")
+
+        let resExactDigest = runCmd("/usr/bin/python3", [
+            verifierPyPath, "validate-profile-plist",
+            "--plist", validProfURL.path,
+            "--team-id", "S8QMQZA656",
+            "--bundle-id", "pool.sentineldefensetechnologies.co.za",
+            "--domain", "pool.sentineldefensetechnologies.co.za",
+            "--cert-sha256", certASHA,
+            "--raw-profile", validProfURL.path,
+            "--expected-profile-sha256", validProfDigest
+        ])
+        XCTAssertEqual(resExactDigest.status, 0, "Matching --expected-profile-sha256 must pass: \(resExactDigest.output)")
+
+        // 2d. Non-Apple CA CMS blob rejected by Apple-root-filtered verify-profile-cms
+        let selfSignedCMS = tempBase.appendingPathComponent("nonapple.provisionprofile").path
+        let outPlistPath = tempBase.appendingPathComponent("verified_out.plist").path
+        _ = runCmd("/usr/bin/openssl", ["cms", "-sign", "-binary", "-nodetach", "-in", validProfURL.path, "-signer", certPath, "-inkey", keyPath, "-outform", "DER", "-out", selfSignedCMS])
+        let resNonAppleCMS = runCmd("/usr/bin/python3", [
+            verifierPyPath, "verify-profile-cms",
+            "--profile", selfSignedCMS,
+            "--out-plist", outPlistPath
+        ])
+        XCTAssertNotEqual(resNonAppleCMS.status, 0, "Non-Apple CMS signer must be rejected even with macOS roots")
+
+        // 3. Test verify_signed_claims: valid path passes, wrong-leaf-same-team (outer & nested), nested debug key, and wrong profile digest all fail closed
+        let fakeApp = tempBase.appendingPathComponent("ClaimTest.app")
+        let contentsMacOS = fakeApp.appendingPathComponent("Contents/MacOS")
+        let sparkleVerB = fakeApp.appendingPathComponent("Contents/Frameworks/Sparkle.framework/Versions/B")
+        try FileManager.default.createDirectory(at: contentsMacOS, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: sparkleVerB, withIntermediateDirectories: true)
+        let macho = Data([0xCF, 0xFA, 0xED, 0xFE, 0x0C, 0x00, 0x00, 0x01])
+        try macho.write(to: contentsMacOS.appendingPathComponent("SentinelNodeWallet"))
+        try macho.write(to: contentsMacOS.appendingPathComponent("bitcoind"))
+        try macho.write(to: contentsMacOS.appendingPathComponent("bitcoin-cli"))
+        try macho.write(to: sparkleVerB.appendingPathComponent("Sparkle"))
+        try macho.write(to: sparkleVerB.appendingPathComponent("Autoupdate"))
+        try validProfBytes.write(to: fakeApp.appendingPathComponent("Contents/embedded.provisionprofile"))
+
+        let verifyClaimsHarness = """
+        import os, shutil, subprocess, sys
+        sys.path.insert(0, \(String(reflecting: scriptsDir)))
+        import verify_production_bundle as v
+
+        app = \(String(reflecting: fakeApp.path))
+        prof_plist = \(String(reflecting: validProfURL.path))
+        cert_a = \(String(reflecting: certASHA))
+        cert_b = \(String(reflecting: certBSHA))
+        prof_sha = \(String(reflecting: validProfDigest))
+        wrong_sha = \(String(reflecting: wrongProfDigest))
+
+        def stub_cms(profile_path, out_plist, expected_profile_sha256=None):
+            if expected_profile_sha256:
+                import hashlib
+                actual = hashlib.sha256(open(profile_path, 'rb').read()).hexdigest().lower()
+                if actual != expected_profile_sha256.lower():
+                    raise v.VerificationError('pin mismatch')
+            shutil.copyfile(profile_path, out_plist)
+
+        class OKProc:
+            returncode = 0
+            stdout = b''
+            stderr = b''
+
+        orig_run = subprocess.run
+        v.verify_profile_cms = stub_cms
+        v.subprocess.run = lambda *a, **kw: OKProc() if (a and isinstance(a[0], list) and a[0][0] == 'codesign' and '--verify' in a[0]) else orig_run(*a, **kw)
+        v._extract_codesign_metadata = lambda p: 'TeamIdentifier=S8QMQZA656\\nAuthority=Developer ID Application: Peter Franco (S8QMQZA656)\\nflags=0x10000(runtime)\\n'
+
+        valid_app_ents = {
+            'com.apple.application-identifier': 'S8QMQZA656.pool.sentineldefensetechnologies.co.za',
+            'com.apple.developer.team-identifier': 'S8QMQZA656',
+            'com.apple.developer.associated-domains': ['webcredentials:pool.sentineldefensetechnologies.co.za'],
+            'keychain-access-groups': ['S8QMQZA656.pool.sentineldefensetechnologies.co.za'],
+        }
+
+        # Case A: All targets match cert_a, no debug keys, matching profile sha -> PASS
+        v._extract_codesign_leaf_cert_sha256 = lambda p: cert_a
+        v._extract_codesign_entitlements_plist = lambda p: valid_app_ents if p == app else {}
+        v.verify_signed_claims(app, 'S8QMQZA656', 'pool.sentineldefensetechnologies.co.za', 'pool.sentineldefensetechnologies.co.za', cert_a, prof_sha)
+
+        # Case B: wrong-leaf-same-team on outer .app (same TeamIdentifier & Authority string, leaf cert_b != cert_a) -> FAIL
+        v._extract_codesign_leaf_cert_sha256 = lambda p: cert_b if p == app else cert_a
+        try:
+            v.verify_signed_claims(app, 'S8QMQZA656', 'pool.sentineldefensetechnologies.co.za', 'pool.sentineldefensetechnologies.co.za', cert_a, prof_sha)
+            raise AssertionError('Expected wrong-leaf-same-team outer rejection')
+        except v.VerificationError:
+            pass
+
+        # Case C: wrong-leaf-same-team on nested Sparkle Autoupdate helper -> FAIL
+        v._extract_codesign_leaf_cert_sha256 = lambda p: cert_b if p.endswith('Autoupdate') else cert_a
+        try:
+            v.verify_signed_claims(app, 'S8QMQZA656', 'pool.sentineldefensetechnologies.co.za', 'pool.sentineldefensetechnologies.co.za', cert_a, prof_sha)
+            raise AssertionError('Expected wrong-leaf nested rejection')
+        except v.VerificationError:
+            pass
+
+        # Case D: macOS debug key com.apple.security.get-task-allow on nested bitcoind -> FAIL
+        v._extract_codesign_leaf_cert_sha256 = lambda p: cert_a
+        v._extract_codesign_entitlements_plist = lambda p: valid_app_ents if p == app else ({'com.apple.security.get-task-allow': True} if p.endswith('bitcoind') else {})
+        try:
+            v.verify_signed_claims(app, 'S8QMQZA656', 'pool.sentineldefensetechnologies.co.za', 'pool.sentineldefensetechnologies.co.za', cert_a, prof_sha)
+            raise AssertionError('Expected nested macOS debug key rejection')
+        except v.VerificationError:
+            pass
+
+        # Case E: unexpected pinned profile digest in verify_signed_claims -> FAIL
+        v._extract_codesign_entitlements_plist = lambda p: valid_app_ents if p == app else {}
+        try:
+            v.verify_signed_claims(app, 'S8QMQZA656', 'pool.sentineldefensetechnologies.co.za', 'pool.sentineldefensetechnologies.co.za', cert_a, wrong_sha)
+            raise AssertionError('Expected profile digest mismatch rejection')
+        except v.VerificationError:
+            pass
+
+        print('CASE41_ALL_PASSED')
+        """
+        let resClaimsHarness = runCmd("/usr/bin/python3", ["-c", verifyClaimsHarness])
+        XCTAssertEqual(resClaimsHarness.status, 0, "Case 41 verify_signed_claims harness failed: \(resClaimsHarness.output)")
+        XCTAssertTrue(resClaimsHarness.output.contains("CASE41_ALL_PASSED"))
+    }
 }
