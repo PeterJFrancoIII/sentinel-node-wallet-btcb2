@@ -8,11 +8,11 @@
     "build_number": 8
   },
   "approval_metadata": {
-    "approver_identity": "PENDING_OPERATOR_APPROVAL: Peter J. Franco III (Operator)",
+    "approver_identity": "Peter J. Franco III (Operator)",
     "approval_policy": "Policy B: Independent Approved Release Commit on Protected Main",
-    "approved_at_utc": "PENDING_OPERATOR_APPROVAL_TIMESTAMP",
+    "approved_at_utc": "2026-11-25T07:25:40Z",
     "authorized_scope": "NODEPOCKET_BTCB2_ONLY",
-    "review_reference": "PENDING_OPERATOR_CANDIDATE_REVIEW_FOR_bfc314c7ea7f352784cc0421ab0a7a815099cfc6"
+    "review_reference": "MSG:chatgpt-nodepocket-r261-operator-approved-build8-exact-candidate-execute-20261125-gpt6-313"
   },
   "security_attestation": {
     "spending_authority_disarmed": true,
