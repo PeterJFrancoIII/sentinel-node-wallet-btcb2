@@ -216,6 +216,7 @@ public struct SoftwareUpdatesSettingsView: View {
 
                 HStack(spacing: 12) {
                     Button("Install Update") {
+                        isShowingReleaseNotes = false
                         Task {
                             do {
                                 try await coordinator.confirmAndInstallUpdate(release: release)
@@ -225,6 +226,19 @@ public struct SoftwareUpdatesSettingsView: View {
                         }
                     }
                     .buttonStyle(.borderedProminent)
+                    if coordinator.isRelaunchPostponed {
+                        Button("Retry Relaunch") {
+                            isShowingReleaseNotes = false
+                            Task {
+                                await coordinator.retryPostponedRelaunch()
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        Button("Cancel Update", role: .cancel) {
+                            coordinator.cancelPostponedRelaunch()
+                        }
+                        .buttonStyle(.bordered)
+                    }
 
                     Button("Remind Me Later") {
                         coordinator.remindMeLater()

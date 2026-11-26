@@ -21,6 +21,17 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     @Published public var errorMessage: String? = nil
     @Published public var showUpdateBanner: Bool = false
     @Published public var showUpdateModal: Bool = false
+    @Published public var isRelaunchPostponed: Bool = false
+
+    public var onPrepareForTermination: (() -> Void)? {
+        didSet {
+            #if canImport(Sparkle) && !APP_STORE
+            if let sparkle = driver as? SparkleUpdateDriver {
+                sparkle.onPrepareForTermination = onPrepareForTermination
+            }
+            #endif
+        }
+    }
 
     public let driver: any SoftwareUpdating
     public let resolver: GitHubReleaseResolver
@@ -94,6 +105,25 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         if let sparkle = self.driver as? SparkleUpdateDriver {
             sparkle.isBusyCheck = self.isWalletOrNodeBusy
             sparkle.onGracefulShutdownRequested = self.gracefullyStopNode
+            sparkle.onPrepareForTermination = self.onPrepareForTermination
+            sparkle.onStatusChange = { [weak self] newStatus in
+                Task { @MainActor [weak self] in
+                    self?.status = newStatus
+                    switch newStatus {
+                    case .error(let msg):
+                        self?.errorMessage = msg
+                    case .idle:
+                        self?.errorMessage = nil
+                    default:
+                        break
+                    }
+                }
+            }
+            sparkle.onRelaunchPostponedChange = { [weak self] postponed in
+                Task { @MainActor [weak self] in
+                    self?.isRelaunchPostponed = postponed
+                }
+            }
         }
         #endif
 
@@ -249,6 +279,31 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         showUpdateModal = false
     }
 
+    public func retryPostponedRelaunch() async {
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = driver as? SparkleUpdateDriver {
+            do {
+                errorMessage = nil
+                try await sparkle.retryPostponedRelaunch()
+            } catch {
+                let msg = error.localizedDescription
+                errorMessage = msg
+                status = .error(msg)
+            }
+        }
+        #endif
+    }
+
+    public func cancelPostponedRelaunch() {
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = driver as? SparkleUpdateDriver {
+            sparkle.cancelPostponedRelaunch()
+        }
+        #endif
+        isRelaunchPostponed = false
+        errorMessage = nil
+    }
+
     public func confirmAndInstallUpdate(release: AppReleaseInfo) async throws {
         // If Mac App Store distribution, binary self-updates from GitHub are forbidden.
         // Delegate directly to driver (opens App Store product page) without stopping node.
@@ -267,6 +322,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         // ensuring the Bitcoin Knots daemon is NEVER prematurely killed if download fails or user cancels.
         #if canImport(Sparkle) && !APP_STORE
         if driver is SparkleUpdateDriver {
+            onPrepareForTermination?()
             try await driver.installUpdate(release: release)
             return
         }

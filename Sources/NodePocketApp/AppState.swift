@@ -190,6 +190,10 @@ public final class AppState: ObservableObject {
             }
         }
 
+        self.updateCoordinator.onPrepareForTermination = { [weak self] in
+            self?.dismissAllModalSheets()
+        }
+
         Task {
             await self.refreshPrice()
         }
@@ -197,6 +201,16 @@ public final class AppState: ObservableObject {
         Task { [walletManager] in
             await walletManager.purgeStaleStagingDirectories()
         }
+    }
+
+    /// Dismisses all AppKit and SwiftUI modal sheets cleanly before Sparkle delivers a quit event.
+    public func dismissAllModalSheets() {
+        showSettingsSheet = false
+        showUninstallWipeSheet = false
+        showSoftwareUpdatesSheet = false
+        updateCoordinator.showUpdateModal = false
+        NotificationCenter.default.post(name: .sentinelDismissModalSheets, object: nil)
+        UpdateRelaunchGate.dismissAttachedModalSheets()
     }
 
     private func setupBindings() {

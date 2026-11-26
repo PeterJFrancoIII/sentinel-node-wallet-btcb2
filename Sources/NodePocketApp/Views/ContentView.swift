@@ -158,6 +158,9 @@ public struct ContentView: View {
         .sheet(isPresented: $state.showUninstallWipeSheet) {
             AdvancedSheet(initialTab: 2)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .sentinelDismissModalSheets)) { _ in
+            showAdvancedSheet = false
+        }
         .alert(isPresented: $state.showAlert) {
             Alert(
                 title: Text("Notice"),

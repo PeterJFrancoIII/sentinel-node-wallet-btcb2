@@ -7,7 +7,11 @@ import Sparkle
 /// Production macOS updater driver interfacing with the Sparkle 2 framework.
 /// Dedicated strictly to direct GitHub releases; never embedded or invoked for Mac App Store builds.
 public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDelegate, SPUStandardUserDriverDelegate, @unchecked Sendable {
-    public private(set) var status: SoftwareUpdateStatus = .idle
+    public private(set) var status: SoftwareUpdateStatus = .idle {
+        didSet {
+            onStatusChange?(status)
+        }
+    }
     public let distributionChannel: SoftwareDistributionChannel = .directGitHub
 
     public private(set) var updaterController: SPUStandardUpdaterController?
@@ -21,29 +25,51 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     /// Safety callback: performs graceful Bitcoin Knots daemon shutdown before relaunch.
     public var onGracefulShutdownRequested: (@MainActor () async throws -> Void)?
 
-    /// Current postponed relaunch handler if an update was postponed due to active node/wallet operations.
-    public private(set) var postponedInstallHandler: (() -> Void)?
+    public var onStatusChange: ((SoftwareUpdateStatus) -> Void)?
+    public var onRelaunchPostponedChange: ((Bool) -> Void)?
+    public var onPrepareForTermination: (@MainActor () -> Void)?
+
     public private(set) var isRelaunchPostponed: Bool = false
 
-    public func cancelPostponedRelaunch() {
-        self.postponedInstallHandler = nil
-        self.isRelaunchPostponed = false
-        self.status = .idle
+    @MainActor
+    public var postponedInstallHandler: (() -> Void)? {
+        relaunchGate.pendingInstallHandler
     }
 
+    public lazy var relaunchGate: UpdateRelaunchGate = {
+        UpdateRelaunchGate(
+            isBusyCheck: { [weak self] in
+                guard let check = self?.isBusyCheck else { return false }
+                return await check()
+            },
+            onGracefulShutdownRequested: { [weak self] in
+                guard let shutdown = self?.onGracefulShutdownRequested else { return }
+                try await shutdown()
+            },
+            prepareWindowsForTermination: { [weak self] in
+                self?.onPrepareForTermination?()
+                #if canImport(AppKit)
+                UpdateRelaunchGate.dismissAttachedModalSheets()
+                #endif
+            },
+            onStatusChange: { [weak self] newStatus in
+                self?.status = newStatus
+            },
+            onRelaunchPostponedChange: { [weak self] postponed in
+                self?.isRelaunchPostponed = postponed
+                self?.onRelaunchPostponedChange?(postponed)
+            }
+        )
+    }()
+
+    @MainActor
+    public func cancelPostponedRelaunch() {
+        relaunchGate.cancelPostponedRelaunch()
+    }
+
+    @MainActor
     public func retryPostponedRelaunch() async throws {
-        guard let handler = self.postponedInstallHandler else {
-            throw SoftwareUpdateError.installationFailed("No postponed update relaunch handler is pending.")
-        }
-        if let isBusy = self.isBusyCheck, await isBusy() {
-            throw SoftwareUpdateError.walletActiveOperationInProgress
-        }
-        if let shutdown = self.onGracefulShutdownRequested {
-            try await shutdown()
-        }
-        self.postponedInstallHandler = nil
-        self.isRelaunchPostponed = false
-        handler()
+        try await relaunchGate.retryPostponedRelaunch()
     }
 
     public init(startingUpdater: Bool = true) {
@@ -71,6 +97,10 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     public func installUpdate(release: AppReleaseInfo) async throws {
         self.selectedRelease = release
         await MainActor.run {
+            self.onPrepareForTermination?()
+            #if canImport(AppKit)
+            UpdateRelaunchGate.dismissAttachedModalSheets()
+            #endif
             updaterController?.checkForUpdates(nil)
         }
     }
@@ -101,30 +131,14 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
         shouldPostponeRelaunchForUpdate item: SUAppcastItem,
         untilInvokingBlock installHandler: @escaping () -> Void
     ) -> Bool {
-        self.postponedInstallHandler = installHandler
-        self.isRelaunchPostponed = true
-
-        Task { @MainActor in
-            // Safety Check: if wallet or node operations are busy, keep postponed and inform driver
-            if let isBusy = self.isBusyCheck, await isBusy() {
-                self.status = .error("Update postponement active: node or wallet operation in progress. Cancel or retry when operations complete.")
-                return
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.relaunchGate.beginPostponedRelaunch(installHandler: installHandler)
             }
-
-            // Graceful Bitcoin Knots daemon shutdown before relaunch
-            if let shutdown = self.onGracefulShutdownRequested {
-                do {
-                    try await shutdown()
-                } catch {
-                    self.status = .error("Graceful node shutdown failed: \(error.localizedDescription). Update relaunch aborted.")
-                    return
-                }
+        } else {
+            Task { @MainActor in
+                self.relaunchGate.beginPostponedRelaunch(installHandler: installHandler)
             }
-
-            // Clean daemon shutdown confirmed: proceed with app relaunch
-            self.postponedInstallHandler = nil
-            self.isRelaunchPostponed = false
-            installHandler()
         }
         return true
     }
