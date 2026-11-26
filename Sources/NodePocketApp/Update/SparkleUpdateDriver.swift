@@ -27,9 +27,17 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public var onStatusChange: ((SoftwareUpdateStatus) -> Void)?
     public var onRelaunchPostponedChange: ((Bool) -> Void)?
-    public var onPrepareForTermination: (@MainActor () -> Void)?
+    public var onPreparingChange: ((Bool) -> Void)?
+    public var onBlockedReasonChange: ((String?) -> Void)?
+    public var onNativeCycleEnded: ((Error?) -> Void)?
+    public var onWillRelaunchApplication: (() -> Void)?
+
+    public var requestDismissScopedSheets: (@MainActor () -> Void)?
+    public var hasActiveScopedSheets: (@MainActor () -> Bool)?
+    public var findUnrelatedModalBlocker: (@MainActor () -> String?)?
 
     public private(set) var isRelaunchPostponed: Bool = false
+    public private(set) var isPreparingRelaunch: Bool = false
 
     @MainActor
     public var postponedInstallHandler: (() -> Void)? {
@@ -38,6 +46,7 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public lazy var relaunchGate: UpdateRelaunchGate = {
         UpdateRelaunchGate(
+            supportsPostponedInstallCancellation: false,
             isBusyCheck: { [weak self] in
                 guard let check = self?.isBusyCheck else { return false }
                 return await check()
@@ -46,10 +55,33 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
                 guard let shutdown = self?.onGracefulShutdownRequested else { return }
                 try await shutdown()
             },
-            prepareWindowsForTermination: { [weak self] in
-                self?.onPrepareForTermination?()
+            requestDismissScopedSheets: { [weak self] in
+                if let custom = self?.requestDismissScopedSheets {
+                    custom()
+                } else {
+                    #if canImport(AppKit)
+                    ScopedSettingsSheetRegistry.shared.dismissRegisteredSheets()
+                    #endif
+                }
+            },
+            hasActiveScopedSheets: { [weak self] in
+                if let custom = self?.hasActiveScopedSheets {
+                    return custom()
+                }
                 #if canImport(AppKit)
-                UpdateRelaunchGate.dismissAttachedModalSheets()
+                return ScopedSettingsSheetRegistry.shared.hasAttachedRegisteredSheet
+                #else
+                return false
+                #endif
+            },
+            findUnrelatedModalBlocker: { [weak self] in
+                if let custom = self?.findUnrelatedModalBlocker {
+                    return custom()
+                }
+                #if canImport(AppKit)
+                return ScopedSettingsSheetRegistry.shared.findUnrelatedModalBlocker()
+                #else
+                return nil
                 #endif
             },
             onStatusChange: { [weak self] newStatus in
@@ -58,13 +90,21 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
             onRelaunchPostponedChange: { [weak self] postponed in
                 self?.isRelaunchPostponed = postponed
                 self?.onRelaunchPostponedChange?(postponed)
+            },
+            onPreparingChange: { [weak self] preparing in
+                self?.isPreparingRelaunch = preparing
+                self?.onPreparingChange?(preparing)
+            },
+            onBlockedReasonChange: { [weak self] reason in
+                self?.onBlockedReasonChange?(reason)
             }
         )
     }()
 
     @MainActor
-    public func cancelPostponedRelaunch() {
-        relaunchGate.cancelPostponedRelaunch()
+    @discardableResult
+    public func requestCancelPostponedRelaunch() -> CancelPostponedOutcome {
+        relaunchGate.requestCancelPostponedRelaunch()
     }
 
     @MainActor
@@ -97,10 +137,6 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     public func installUpdate(release: AppReleaseInfo) async throws {
         self.selectedRelease = release
         await MainActor.run {
-            self.onPrepareForTermination?()
-            #if canImport(AppKit)
-            UpdateRelaunchGate.dismissAttachedModalSheets()
-            #endif
             updaterController?.checkForUpdates(nil)
         }
     }
@@ -128,16 +164,67 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public func updater(
         _ updater: SPUUpdater,
+        userDidMake choice: SPUUserUpdateChoice,
+        forUpdate updateItem: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        let handleChoice: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            switch choice {
+            case .skip:
+                if !self.relaunchGate.hasCommittedNativeInstall {
+                    self.relaunchGate.invalidateNativeSession(reason: nil)
+                }
+                self.onNativeCycleEnded?(nil)
+            case .dismiss:
+                if state.stage == .notDownloaded && !self.relaunchGate.hasCommittedNativeInstall {
+                    self.onNativeCycleEnded?(nil)
+                }
+            case .install:
+                break
+            @unknown default:
+                break
+            }
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(handleChoice)
+        } else {
+            Task { @MainActor in handleChoice() }
+        }
+    }
+
+    public func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        let target = "\(item.displayVersionString) (\(item.versionString))"
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.status = .readyToInstall(
+                    self.selectedRelease ?? AppReleaseInfo(
+                        id: item.versionString,
+                        tagName: "v\(item.displayVersionString)-build\(item.versionString)",
+                        version: AppVersion.parse("\(item.displayVersionString) (build \(item.versionString))")
+                            ?? AppVersion(major: 1, minor: 0, patch: 0, build: Int(item.versionString), rawString: target),
+                        name: target,
+                        releaseNotes: "",
+                        publishedAt: Date()
+                    )
+                )
+            }
+        }
+    }
+
+    public func updater(
+        _ updater: SPUUpdater,
         shouldPostponeRelaunchForUpdate item: SUAppcastItem,
         untilInvokingBlock installHandler: @escaping () -> Void
     ) -> Bool {
+        let target = "\(item.displayVersionString) (\(item.versionString))"
         if Thread.isMainThread {
             MainActor.assumeIsolated {
-                self.relaunchGate.beginPostponedRelaunch(installHandler: installHandler)
+                self.relaunchGate.beginPostponedRelaunch(targetVersion: target, installHandler: installHandler)
             }
         } else {
             Task { @MainActor in
-                self.relaunchGate.beginPostponedRelaunch(installHandler: installHandler)
+                self.relaunchGate.beginPostponedRelaunch(targetVersion: target, installHandler: installHandler)
             }
         }
         return true
@@ -145,6 +232,61 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public func updaterShouldRelaunchApplication(_ updater: SPUUpdater) -> Bool {
         return true
+    }
+
+    public func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.onWillRelaunchApplication?()
+            }
+        } else {
+            Task { @MainActor in
+                self.onWillRelaunchApplication?()
+            }
+        }
+    }
+
+    public func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        let nsError = error as NSError
+        let isSparkleDomain = nsError.domain == SUSparkleErrorDomain
+        let isNoUpdate = isSparkleDomain && nsError.code == Int(SUError.noUpdateError.rawValue)
+        let isAuthLater = isSparkleDomain && nsError.code == Int(SUError.installationAuthorizeLaterError.rawValue)
+        let isCanceled = isSparkleDomain && nsError.code == Int(SUError.installationCanceledError.rawValue)
+
+        let finish: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            if !isAuthLater && !isNoUpdate {
+                self.relaunchGate.invalidateNativeSession(reason: isCanceled ? nil : error.localizedDescription)
+            }
+            self.onNativeCycleEnded?(isNoUpdate || isCanceled ? nil : error)
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(finish)
+        } else {
+            Task { @MainActor in finish() }
+        }
+    }
+
+    public func updater(
+        _ updater: SPUUpdater,
+        didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
+        error: Error?
+    ) {
+        let nsError = error as NSError?
+        let isSparkleDomain = nsError?.domain == SUSparkleErrorDomain
+        let isNoUpdate = isSparkleDomain && nsError?.code == Int(SUError.noUpdateError.rawValue)
+        let isCanceled = isSparkleDomain && nsError?.code == Int(SUError.installationCanceledError.rawValue)
+        let surfacedError: Error? = (isNoUpdate || isCanceled) ? nil : error
+
+        let finish: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            self.onNativeCycleEnded?(surfacedError)
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(finish)
+        } else {
+            Task { @MainActor in finish() }
+        }
     }
 }
 #endif

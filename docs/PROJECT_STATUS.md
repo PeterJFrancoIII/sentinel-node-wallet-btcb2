@@ -39,7 +39,7 @@
 
 ## Open acceptance work
 
-- Complete full post-enrollment clean-Mac GUI walkthrough, interactive Keychain `.userPresence` accept/cancel/delete, and future candidate (`v1.0.0-build9`) verification of automatic modal-sheet dismissal & visible postponement Retry/Cancel handling during live native Sparkle relaunch.
+- Complete full post-enrollment clean-Mac GUI walkthrough, interactive Keychain `.userPresence` accept/cancel/delete, and future candidate (`v1.0.0-build9`) verification of scoped Settings modal-sheet dismissal & persistent Retry Relaunch handling during live native Sparkle relaunch (noting Build 8's existing updater still requires closing Settings before upgrade to Build 9).
 - Audit the pinned Knots fork against publisher provenance and independently confirm BTCB2 signing rules, changes of signature hash, fees, RBF, safe replay handling and user-authorized recipients.
 - Run real signed-app GUI encrypted wallet create→lock→backup→restore in a new isolated datadir, verify addresses/ownership and Keychain accept/cancel/denial. Do not test against user funds.
 - Verify app runtime with network.client/network.server entitlements, local listening socket, actual P2P inbound opt-in, peer caps, Ultra power transitions, pruned storage under pressure and user-preserving migrations.

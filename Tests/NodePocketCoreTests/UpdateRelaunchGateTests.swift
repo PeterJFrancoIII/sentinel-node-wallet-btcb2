@@ -5,104 +5,317 @@ import AppKit
 @MainActor
 final class UpdateRelaunchGateTests: XCTestCase {
 
-    func testNormalPostponedRelaunchSingleShotConsumptionAndSheetDismissalCallback() async throws {
-        var events: [String] = []
-        var statuses: [SoftwareUpdateStatus] = []
-        var postponedChanges: [Bool] = []
-        var installCallCount = 0
+    override func tearDown() {
+        ScopedSettingsSheetRegistry.shared.unregisterAll()
+        super.tearDown()
+    }
+
+    func testScopedSettingsSheetDismissedAndVerifiedClearBeforeInstallHandler() async throws {
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.prohibited)
+
+        let hostWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let settingsSheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 140),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        settingsSheet.animationBehavior = .none
+
+        let registry = ScopedSettingsSheetRegistry()
+        registry.register(settingsSheet)
+
+        hostWindow.beginSheet(settingsSheet) { _ in }
+        XCTAssertTrue(hostWindow.attachedSheet === settingsSheet)
+        XCTAssertTrue(registry.hasAttachedRegisteredSheet)
+
+        var attachedSheetDuringHandler: NSWindow? = settingsSheet
+        var unrelatedBlockerDuringHandler: String? = "stale"
+        var didInvokeHandler = false
+        let exp = expectation(description: "Scoped settings sheet dismissed cleanly before handler")
 
         let gate = UpdateRelaunchGate(
-            isBusyCheck: {
-                events.append("busyCheck")
-                return false
+            isBusyCheck: { false },
+            onGracefulShutdownRequested: {},
+            requestDismissScopedSheets: {
+                registry.dismissRegisteredSheets()
             },
-            onGracefulShutdownRequested: {
-                events.append("shutdown")
+            hasActiveScopedSheets: {
+                registry.hasAttachedRegisteredSheet
             },
-            prepareWindowsForTermination: {
-                events.append("dismissSheets")
+            findUnrelatedModalBlocker: {
+                registry.findUnrelatedModalBlocker(in: [hostWindow])
             },
-            onStatusChange: { statuses.append($0) },
-            onRelaunchPostponedChange: { postponedChanges.append($0) },
-            sheetDismissalSettleNanoseconds: 0
+            sheetDetachmentTimeoutNanoseconds: 500_000_000,
+            sheetPollIntervalNanoseconds: 10_000_000
         )
 
-        gate.beginPostponedRelaunch {
-            events.append("installHandler")
-            installCallCount += 1
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") {
+            didInvokeHandler = true
+            attachedSheetDuringHandler = hostWindow.attachedSheet
+            unrelatedBlockerDuringHandler = registry.findUnrelatedModalBlocker(in: [hostWindow])
+            exp.fulfill()
         }
 
-        XCTAssertTrue(gate.isRelaunchPostponed)
-        XCTAssertNotNil(gate.pendingInstallHandler)
+        await fulfillment(of: [exp], timeout: 2.0)
 
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        XCTAssertEqual(installCallCount, 1)
+        XCTAssertTrue(didInvokeHandler)
+        XCTAssertNil(attachedSheetDuringHandler)
+        XCTAssertNil(unrelatedBlockerDuringHandler)
+        XCTAssertNil(hostWindow.attachedSheet)
         XCTAssertFalse(gate.isRelaunchPostponed)
         XCTAssertNil(gate.pendingInstallHandler)
-        XCTAssertEqual(events, ["busyCheck", "shutdown", "dismissSheets", "installHandler"])
-        XCTAssertEqual(postponedChanges, [true, false])
-        XCTAssertTrue(statuses.isEmpty)
+        XCTAssertNil(gate.blockedReason)
 
-        // Repeated retry after consumption must fail closed and never re-invoke handler.
+        // Repeated retry after consumption must fail closed and never double-invoke handler.
         do {
             try await gate.retryPostponedRelaunch()
             XCTFail("Expected retry after consumption to throw installationFailed")
         } catch SoftwareUpdateError.installationFailed {
-            XCTAssertEqual(installCallCount, 1)
+            // Expected
         }
+
+        settingsSheet.orderOut(nil)
+        hostWindow.orderOut(nil)
     }
 
-    func testBusyDeferralPublishesErrorPreservesHandlerAndRetryConsumesOnce() async throws {
-        var isBusy = true
+    func testUnrelatedModalSheetIsNeverAbortedAndDefersRelaunchUntilClosed() async throws {
+        _ = NSApplication.shared
+        NSApp.setActivationPolicy(.prohibited)
+
+        let hostWindow = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 220),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let walletOrWipeSheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 260, height: 140),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        walletOrWipeSheet.animationBehavior = .none
+
+        // Intentionally NOT registered as a scoped settings sheet.
+        let registry = ScopedSettingsSheetRegistry()
+        hostWindow.beginSheet(walletOrWipeSheet) { _ in }
+        XCTAssertTrue(hostWindow.attachedSheet === walletOrWipeSheet)
+
+        var shutdownCalls = 0
+        var installCalls = 0
+        var statuses: [SoftwareUpdateStatus] = []
+        var blockedReasons: [String?] = []
+
+        let gate = UpdateRelaunchGate(
+            isBusyCheck: { false },
+            onGracefulShutdownRequested: { shutdownCalls += 1 },
+            requestDismissScopedSheets: {
+                registry.dismissRegisteredSheets()
+            },
+            hasActiveScopedSheets: {
+                registry.hasAttachedRegisteredSheet
+            },
+            findUnrelatedModalBlocker: {
+                registry.findUnrelatedModalBlocker(in: [hostWindow])
+            },
+            onStatusChange: { statuses.append($0) },
+            onBlockedReasonChange: { blockedReasons.append($0) },
+            sheetDetachmentTimeoutNanoseconds: 100_000_000,
+            sheetPollIntervalNanoseconds: 10_000_000
+        )
+
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") {
+            installCalls += 1
+        }
+
+        try await Task.sleep(nanoseconds: 80_000_000)
+
+        // Unrelated modal MUST remain intact, daemon MUST NOT shut down, and handler MUST be preserved.
+        XCTAssertTrue(hostWindow.attachedSheet === walletOrWipeSheet)
+        XCTAssertEqual(shutdownCalls, 0)
+        XCTAssertEqual(installCalls, 0)
+        XCTAssertTrue(gate.isRelaunchPostponed)
+        XCTAssertNotNil(gate.pendingInstallHandler)
+        XCTAssertNotNil(gate.blockedReason)
+        guard case .error(let blockerMsg) = statuses.last else {
+            return XCTFail("Expected .error status when unrelated modal is active")
+        }
+        XCTAssertTrue(blockerMsg.contains("Another active dialog sheet"))
+
+        // Operator closes unrelated modal sheet manually, then clicks Retry Relaunch.
+        hostWindow.endSheet(walletOrWipeSheet, returnCode: .OK)
+        XCTAssertNil(hostWindow.attachedSheet)
+
+        try await gate.retryPostponedRelaunch()
+        XCTAssertEqual(shutdownCalls, 1)
+        XCTAssertEqual(installCalls, 1)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        XCTAssertNil(gate.blockedReason)
+        XCTAssertEqual(blockedReasons.last ?? "non-nil", nil)
+
+        walletOrWipeSheet.orderOut(nil)
+        hostWindow.orderOut(nil)
+    }
+
+    func testScopedSheetDetachmentTimeoutDefersVisiblyWithoutRunningShutdown() async throws {
+        var sheetStillAttached = true
+        var dismissAttempts = 0
+        var shutdownCalls = 0
+        var installCalls = 0
+
+        let gate = UpdateRelaunchGate(
+            isBusyCheck: { false },
+            onGracefulShutdownRequested: { shutdownCalls += 1 },
+            requestDismissScopedSheets: {
+                dismissAttempts += 1
+            },
+            hasActiveScopedSheets: { sheetStillAttached },
+            findUnrelatedModalBlocker: { nil },
+            sheetDetachmentTimeoutNanoseconds: 60_000_000,
+            sheetPollIntervalNanoseconds: 15_000_000
+        )
+
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") {
+            installCalls += 1
+        }
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+
+        XCTAssertGreaterThanOrEqual(dismissAttempts, 1)
+        XCTAssertEqual(shutdownCalls, 0)
+        XCTAssertEqual(installCalls, 0)
+        XCTAssertTrue(gate.isRelaunchPostponed)
+        XCTAssertNotNil(gate.blockedReason)
+        XCTAssertTrue(gate.blockedReason?.contains("did not finish closing") == true)
+
+        sheetStillAttached = false
+        try await gate.retryPostponedRelaunch()
+        XCTAssertEqual(shutdownCalls, 1)
+        XCTAssertEqual(installCalls, 1)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+    }
+
+    func testTrueSingleFlightShutdownCoalescesSupersedingPostponementWithoutOverlap() async throws {
+        var firstShutdownCont: CheckedContinuation<Void, Error>?
+        var activeShutdowns = 0
+        var maxConcurrentShutdowns = 0
+        var totalShutdownCalls = 0
+        var busyChecks = 0
+        var handler1Calls = 0
+        var handler2Calls = 0
+
+        let gate = UpdateRelaunchGate(
+            isBusyCheck: {
+                busyChecks += 1
+                return false
+            },
+            onGracefulShutdownRequested: {
+                totalShutdownCalls += 1
+                activeShutdowns += 1
+                maxConcurrentShutdowns = max(maxConcurrentShutdowns, activeShutdowns)
+                defer { activeShutdowns -= 1 }
+                if totalShutdownCalls == 1 {
+                    try await withCheckedThrowingContinuation { cont in
+                        firstShutdownCont = cont
+                    }
+                }
+            },
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { nil }
+        )
+
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (8)") { handler1Calls += 1 }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNotNil(firstShutdownCont)
+        XCTAssertEqual(activeShutdowns, 1)
+        XCTAssertTrue(gate.isPreparingRelaunch)
+
+        // Concurrent retry must fail closed immediately without touching active worker.
+        do {
+            try await gate.retryPostponedRelaunch()
+            XCTFail("Expected single-flight rejection while worker is active")
+        } catch SoftwareUpdateError.installationFailed {
+            // Expected
+        }
+
+        // Superseding postponement while first shutdown is suspended MUST NOT start an overlapping shutdown.
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") { handler2Calls += 1 }
+        try await Task.sleep(nanoseconds: 30_000_000)
+
+        XCTAssertEqual(activeShutdowns, 1)
+        XCTAssertEqual(totalShutdownCalls, 1, "Second shutdown must NEVER overlap first suspended shutdown")
+        XCTAssertEqual(maxConcurrentShutdowns, 1)
+
+        // Release first shutdown; worker sequentially completes coalesced newer generation once.
+        firstShutdownCont?.resume()
+        try await Task.sleep(nanoseconds: 60_000_000)
+
+        XCTAssertEqual(maxConcurrentShutdowns, 1)
+        XCTAssertEqual(handler1Calls, 0)
+        XCTAssertEqual(handler2Calls, 1)
+        XCTAssertGreaterThanOrEqual(busyChecks, 2)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        XCTAssertFalse(gate.isPreparingRelaunch)
+    }
+
+    func testBusyRecheckAfterShutdownDefersInsteadOfInvokingHandlerThenRetriesOnce() async throws {
+        var shutdownCont: CheckedContinuation<Void, Error>?
         var shutdownCount = 0
-        var installCallCount = 0
+        var isBusy = false
+        var installCalls = 0
         var statuses: [SoftwareUpdateStatus] = []
 
         let gate = UpdateRelaunchGate(
             isBusyCheck: { isBusy },
-            onGracefulShutdownRequested: { shutdownCount += 1 },
-            prepareWindowsForTermination: {},
-            onStatusChange: { statuses.append($0) },
-            sheetDismissalSettleNanoseconds: 0
+            onGracefulShutdownRequested: {
+                shutdownCount += 1
+                if shutdownCount == 1 {
+                    try await withCheckedThrowingContinuation { cont in
+                        shutdownCont = cont
+                    }
+                }
+            },
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { nil },
+            onStatusChange: { statuses.append($0) }
         )
 
-        gate.beginPostponedRelaunch {
-            installCallCount += 1
-        }
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") { installCalls += 1 }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNotNil(shutdownCont)
 
-        try await Task.sleep(nanoseconds: 50_000_000)
+        // Simulate wallet/sync becoming busy while daemon shutdown was suspended.
+        isBusy = true
+        shutdownCont?.resume()
+        try await Task.sleep(nanoseconds: 40_000_000)
 
+        XCTAssertEqual(installCalls, 0)
         XCTAssertTrue(gate.isRelaunchPostponed)
         XCTAssertNotNil(gate.pendingInstallHandler)
-        XCTAssertEqual(shutdownCount, 0)
-        XCTAssertEqual(installCallCount, 0)
-        guard case .error(let busyMsg) = statuses.last else {
-            return XCTFail("Expected .error status on busy deferral, got \(statuses)")
+        XCTAssertNotNil(gate.blockedReason)
+        guard case .error(let busyErr) = statuses.last else {
+            return XCTFail("Expected .error status when busy after shutdown")
         }
-        XCTAssertTrue(busyMsg.contains("Update postponement active"))
+        XCTAssertTrue(busyErr.contains("Update relaunch paused"))
 
-        // While still busy, retry rejects cleanly without losing the handler.
-        do {
-            try await gate.retryPostponedRelaunch()
-            XCTFail("Expected walletActiveOperationInProgress")
-        } catch SoftwareUpdateError.walletActiveOperationInProgress {
-            XCTAssertTrue(gate.isRelaunchPostponed)
-            XCTAssertNotNil(gate.pendingInstallHandler)
-        }
-
-        // Clearing busy state lets Retry succeed and consume handler once.
         isBusy = false
         try await gate.retryPostponedRelaunch()
-        XCTAssertEqual(shutdownCount, 1)
-        XCTAssertEqual(installCallCount, 1)
+        XCTAssertEqual(installCalls, 1)
         XCTAssertFalse(gate.isRelaunchPostponed)
-        XCTAssertNil(gate.pendingInstallHandler)
     }
 
-    func testGracefulShutdownFailurePreservesHandlerAndSurfacesError() async throws {
+    func testGracefulShutdownFailurePreservesHandlerAndSurfacesRetryableError() async throws {
         var shouldFailShutdown = true
-        var installCallCount = 0
+        var installCalls = 0
         var statuses: [SoftwareUpdateStatus] = []
 
         let gate = UpdateRelaunchGate(
@@ -112,203 +325,139 @@ final class UpdateRelaunchGateTests: XCTestCase {
                     throw SoftwareUpdateError.nodeTerminationFailed("RPC timeout")
                 }
             },
-            prepareWindowsForTermination: {},
-            onStatusChange: { statuses.append($0) },
-            sheetDismissalSettleNanoseconds: 0
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { nil },
+            onStatusChange: { statuses.append($0) }
         )
 
-        gate.beginPostponedRelaunch {
-            installCallCount += 1
-        }
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") { installCalls += 1 }
+        try await Task.sleep(nanoseconds: 40_000_000)
 
-        try await Task.sleep(nanoseconds: 50_000_000)
-
-        XCTAssertEqual(installCallCount, 0)
+        XCTAssertEqual(installCalls, 0)
         XCTAssertTrue(gate.isRelaunchPostponed)
         XCTAssertNotNil(gate.pendingInstallHandler)
         guard case .error(let errMsg) = statuses.last else {
-            return XCTFail("Expected .error status on shutdown failure, got \(statuses)")
+            return XCTFail("Expected .error status on shutdown failure")
         }
         XCTAssertTrue(errMsg.contains("Graceful node shutdown failed"))
 
         shouldFailShutdown = false
         try await gate.retryPostponedRelaunch()
-        XCTAssertEqual(installCallCount, 1)
-        XCTAssertFalse(gate.isRelaunchPostponed)
-        XCTAssertNil(gate.pendingInstallHandler)
-    }
-
-    func testCancelPostponedRelaunchInvalidatesInFlightAsyncPreparation() async throws {
-        var busyContinuation: CheckedContinuation<Bool, Never>?
-        var shutdownCount = 0
-        var installCallCount = 0
-        var statuses: [SoftwareUpdateStatus] = []
-
-        let gate = UpdateRelaunchGate(
-            isBusyCheck: {
-                await withCheckedContinuation { cont in
-                    busyContinuation = cont
-                }
-            },
-            onGracefulShutdownRequested: { shutdownCount += 1 },
-            prepareWindowsForTermination: {},
-            onStatusChange: { statuses.append($0) },
-            sheetDismissalSettleNanoseconds: 0
-        )
-
-        gate.beginPostponedRelaunch {
-            installCallCount += 1
-        }
-
-        // Wait briefly for Task to suspend on isBusyCheck.
-        try await Task.sleep(nanoseconds: 30_000_000)
-        XCTAssertNotNil(busyContinuation)
-
-        gate.cancelPostponedRelaunch()
-        XCTAssertFalse(gate.isRelaunchPostponed)
-        XCTAssertNil(gate.pendingInstallHandler)
-        XCTAssertEqual(statuses.last, .idle)
-
-        // Resume stale suspended busyCheck with false — must NOT shut down or invoke handler.
-        busyContinuation?.resume(returning: false)
-        try await Task.sleep(nanoseconds: 40_000_000)
-
-        XCTAssertEqual(shutdownCount, 0)
-        XCTAssertEqual(installCallCount, 0)
-        XCTAssertFalse(gate.isRelaunchPostponed)
-        XCTAssertEqual(statuses.last, .idle)
-    }
-
-    func testSupersedingPostponementInvalidatesPreviousGeneration() async throws {
-        var firstShutdownCont: CheckedContinuation<Void, Error>?
-        var shutdownCallIndex = 0
-        var handler1Calls = 0
-        var handler2Calls = 0
-
-        let gate = UpdateRelaunchGate(
-            isBusyCheck: { false },
-            onGracefulShutdownRequested: {
-                shutdownCallIndex += 1
-                if shutdownCallIndex == 1 {
-                    try await withCheckedThrowingContinuation { cont in
-                        firstShutdownCont = cont
-                    }
-                }
-            },
-            prepareWindowsForTermination: {},
-            sheetDismissalSettleNanoseconds: 0
-        )
-
-        gate.beginPostponedRelaunch { handler1Calls += 1 }
-        try await Task.sleep(nanoseconds: 30_000_000)
-        XCTAssertNotNil(firstShutdownCont)
-
-        gate.beginPostponedRelaunch { handler2Calls += 1 }
-        try await Task.sleep(nanoseconds: 40_000_000)
-
-        XCTAssertEqual(handler2Calls, 1)
-        XCTAssertEqual(handler1Calls, 0)
-
-        // Stale first shutdown completes late — must never execute handler1.
-        firstShutdownCont?.resume()
-        try await Task.sleep(nanoseconds: 30_000_000)
-
-        XCTAssertEqual(handler1Calls, 0)
-        XCTAssertEqual(handler2Calls, 1)
-        XCTAssertFalse(gate.isRelaunchPostponed)
-    }
-
-    func testSingleFlightRetryRejectsConcurrentRetry() async throws {
-        var shutdownCont: CheckedContinuation<Void, Error>?
-        var shutdownCalls = 0
-        var installCalls = 0
-        var busy = true
-
-        let gate = UpdateRelaunchGate(
-            isBusyCheck: { busy },
-            onGracefulShutdownRequested: {
-                shutdownCalls += 1
-                try await withCheckedThrowingContinuation { cont in
-                    shutdownCont = cont
-                }
-            },
-            prepareWindowsForTermination: {},
-            sheetDismissalSettleNanoseconds: 0
-        )
-
-        gate.beginPostponedRelaunch { installCalls += 1 }
-        try await Task.sleep(nanoseconds: 30_000_000)
-        XCTAssertTrue(gate.isRelaunchPostponed)
-
-        busy = false
-        let firstRetryTask = Task { @MainActor in
-            try await gate.retryPostponedRelaunch()
-        }
-
-        try await Task.sleep(nanoseconds: 30_000_000)
-        XCTAssertNotNil(shutdownCont)
-        XCTAssertTrue(gate.isPreparingRelaunch)
-
-        do {
-            try await gate.retryPostponedRelaunch()
-            XCTFail("Expected single-flight rejection while retry is preparing")
-        } catch SoftwareUpdateError.installationFailed {
-            // Expected single-flight refusal
-        }
-
-        shutdownCont?.resume()
-        try await firstRetryTask.value
-
-        XCTAssertEqual(shutdownCalls, 1)
         XCTAssertEqual(installCalls, 1)
         XCTAssertFalse(gate.isRelaunchPostponed)
     }
 
-    func testRealAppKitWindowModalSheetDismissalBeforeInstallHandler() async throws {
-        _ = NSApplication.shared
-        NSApp.setActivationPolicy(.prohibited)
-        let hostWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
-        let sheetWindow = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 220, height: 120),
-            styleMask: [.titled],
-            backing: .buffered,
-            defer: false
-        )
-        sheetWindow.animationBehavior = .none
+    func testUnsupportedCancellationPreservesStagedHandlerAndSurfacesHonestGuidance() async throws {
+        var isBusy = true
+        var installCalls = 0
 
-        hostWindow.beginSheet(sheetWindow) { _ in }
-        XCTAssertTrue(hostWindow.attachedSheet === sheetWindow)
-
-        var didInvokeHandler = false
-        var attachedSheetDuringHandler: NSWindow?
-        let exp = expectation(description: "Install handler executed after sheet dismissal")
         let gate = UpdateRelaunchGate(
-            isBusyCheck: { false },
+            supportsPostponedInstallCancellation: false,
+            isBusyCheck: { isBusy },
             onGracefulShutdownRequested: {},
-            prepareWindowsForTermination: {
-                UpdateRelaunchGate.dismissAttachedModalSheets(in: [hostWindow])
-            },
-            sheetDismissalSettleNanoseconds: 15_000_000
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { nil }
         )
 
-        gate.beginPostponedRelaunch {
-            didInvokeHandler = true
-            attachedSheetDuringHandler = hostWindow.attachedSheet
-            exp.fulfill()
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") { installCalls += 1 }
+        try await Task.sleep(nanoseconds: 40_000_000)
+
+        let outcome = gate.requestCancelPostponedRelaunch()
+        guard case .unsupportedAfterCommit(let message) = outcome else {
+            return XCTFail("Expected unsupportedAfterCommit, got \(outcome)")
         }
+        XCTAssertTrue(message.contains("Sparkle does not support cancelling programmatically once staged"))
+        XCTAssertTrue(gate.isRelaunchPostponed)
+        XCTAssertTrue(gate.hasCommittedNativeInstall)
+        XCTAssertNotNil(gate.pendingInstallHandler)
 
-        await fulfillment(of: [exp], timeout: 2.0)
+        isBusy = false
+        try await gate.retryPostponedRelaunch()
+        XCTAssertEqual(installCalls, 1)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+    }
 
-        XCTAssertTrue(didInvokeHandler)
-        XCTAssertNil(attachedSheetDuringHandler, "Attached modal sheet must be dismissed before installHandler sends quit")
-        XCTAssertNil(hostWindow.attachedSheet)
+    func testSupportedCancellationDuringInFlightShutdownAcknowledgesShutdownAndAbortsHandler() async throws {
+        var shutdownCont: CheckedContinuation<Void, Error>?
+        var nativeCancelCalled = 0
+        var installCalls = 0
+        var statuses: [SoftwareUpdateStatus] = []
 
-        sheetWindow.orderOut(nil)
-        hostWindow.orderOut(nil)
+        let gate = UpdateRelaunchGate(
+            supportsPostponedInstallCancellation: true,
+            isBusyCheck: { false },
+            onGracefulShutdownRequested: {
+                try await withCheckedThrowingContinuation { cont in
+                    shutdownCont = cont
+                }
+            },
+            onNativeCancelRequested: {
+                nativeCancelCalled += 1
+                return true
+            },
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { nil },
+            onStatusChange: { statuses.append($0) }
+        )
+
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") { installCalls += 1 }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNotNil(shutdownCont)
+
+        let outcome = gate.requestCancelPostponedRelaunch()
+        XCTAssertEqual(outcome, .deferredUntilInFlightShutdownCompletes)
+        XCTAssertEqual(nativeCancelCalled, 0, "Must acknowledge active shutdown before invoking native cancel")
+
+        shutdownCont?.resume()
+        try await Task.sleep(nanoseconds: 40_000_000)
+
+        XCTAssertEqual(nativeCancelCalled, 1)
+        XCTAssertEqual(installCalls, 0)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        XCTAssertFalse(gate.hasCommittedNativeInstall)
+        XCTAssertNil(gate.pendingInstallHandler)
+        XCTAssertEqual(statuses.last, .idle)
+    }
+
+    func testNativeSessionInvalidationPreventsHandlerInvocationAfterShutdown() async throws {
+        var shutdownCont: CheckedContinuation<Void, Error>?
+        var installCalls = 0
+        var statuses: [SoftwareUpdateStatus] = []
+
+        let gate = UpdateRelaunchGate(
+            supportsPostponedInstallCancellation: false,
+            isBusyCheck: { false },
+            onGracefulShutdownRequested: {
+                try await withCheckedThrowingContinuation { cont in
+                    shutdownCont = cont
+                }
+            },
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { nil },
+            onStatusChange: { statuses.append($0) }
+        )
+
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") { installCalls += 1 }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        XCTAssertNotNil(shutdownCont)
+
+        gate.invalidateNativeSession(reason: "Sparkle update aborted due to signature mismatch.")
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        XCTAssertFalse(gate.hasCommittedNativeInstall)
+        XCTAssertNil(gate.pendingInstallHandler)
+
+        shutdownCont?.resume()
+        try await Task.sleep(nanoseconds: 40_000_000)
+
+        XCTAssertEqual(installCalls, 0)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        guard case .error(let abortMsg) = statuses.last else {
+            return XCTFail("Expected .error status from native session abort")
+        }
+        XCTAssertTrue(abortMsg.contains("signature mismatch"))
     }
 }

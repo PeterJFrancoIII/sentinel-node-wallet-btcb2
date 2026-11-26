@@ -37,10 +37,14 @@ public struct SoftwareUpdatesSettingsView: View {
                                 .font(.caption)
                         }
                     }
-                    .disabled(coordinator.isChecking)
+                    .disabled(coordinator.isChecking || coordinator.isInstalling || coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
                 }
+            }
+
+            if coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch || coordinator.relaunchBlockedReason != nil {
+                postponedRelaunchBanner
             }
 
             // Update Status Callout (Prominently at the top)
@@ -149,6 +153,57 @@ public struct SoftwareUpdatesSettingsView: View {
         }
         .padding(.horizontal, 4)
         .padding(.vertical, 6)
+        .onReceive(NotificationCenter.default.publisher(for: .sentinelDismissSettingsSheets)) { _ in
+            isShowingReleaseNotes = false
+        }
+    }
+
+    private var postponedRelaunchBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Image(systemName: coordinator.relaunchBlockedReason != nil ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
+                    .foregroundColor(coordinator.relaunchBlockedReason != nil ? .orange : .blue)
+                Text(coordinator.isPreparingRelaunch ? "Preparing Safe Update Relaunch…" : "Update Staged & Waiting to Relaunch")
+                    .font(.subheadline)
+                    .bold()
+            }
+
+            Text(coordinator.relaunchBlockedReason ?? coordinator.errorMessage ?? "The update is verified and staged. Close any other active dialogs or let node operations finish, then click Retry Relaunch (or quit the app manually to complete installation).")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 10) {
+                if coordinator.isRelaunchPostponed {
+                    Button(coordinator.isPreparingRelaunch ? "Retrying…" : "Retry Relaunch") {
+                        isShowingReleaseNotes = false
+                        Task { await coordinator.retryPostponedRelaunch() }
+                    }
+                    .disabled(coordinator.isPreparingRelaunch)
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
+                    if coordinator.canCancelPostponedRelaunch {
+                        Button("Cancel Update", role: .cancel) {
+                            _ = coordinator.requestCancelPostponedRelaunch()
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                    } else {
+                        Text("Programmatic cancel is unavailable once Sparkle stages installation; click Retry Relaunch or quit manually when ready.")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.orange.opacity(0.1)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8).stroke(Color.orange.opacity(0.3), lineWidth: 1)
+        )
     }
 
     @ViewBuilder
@@ -215,7 +270,7 @@ public struct SoftwareUpdatesSettingsView: View {
                 }
 
                 HStack(spacing: 12) {
-                    Button("Install Update") {
+                    Button(coordinator.isInstalling ? "Installing…" : "Install Update") {
                         isShowingReleaseNotes = false
                         Task {
                             do {
@@ -225,20 +280,8 @@ public struct SoftwareUpdatesSettingsView: View {
                             }
                         }
                     }
+                    .disabled(coordinator.isInstalling || coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch)
                     .buttonStyle(.borderedProminent)
-                    if coordinator.isRelaunchPostponed {
-                        Button("Retry Relaunch") {
-                            isShowingReleaseNotes = false
-                            Task {
-                                await coordinator.retryPostponedRelaunch()
-                            }
-                        }
-                        .buttonStyle(.bordered)
-                        Button("Cancel Update", role: .cancel) {
-                            coordinator.cancelPostponedRelaunch()
-                        }
-                        .buttonStyle(.bordered)
-                    }
 
                     Button("Remind Me Later") {
                         coordinator.remindMeLater()
@@ -291,6 +334,26 @@ public struct SoftwareUpdatesSettingsView: View {
                         .font(.caption2)
                         .foregroundColor(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if coordinator.isRelaunchPostponed {
+                        HStack(spacing: 8) {
+                            Button(coordinator.isPreparingRelaunch ? "Retrying…" : "Retry Relaunch") {
+                                isShowingReleaseNotes = false
+                                Task { await coordinator.retryPostponedRelaunch() }
+                            }
+                            .disabled(coordinator.isPreparingRelaunch)
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+
+                            if coordinator.canCancelPostponedRelaunch {
+                                Button("Cancel Update", role: .cancel) {
+                                    _ = coordinator.requestCancelPostponedRelaunch()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
                 }
             }
             .padding(10)
