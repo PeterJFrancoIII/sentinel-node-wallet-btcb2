@@ -90,6 +90,8 @@ public final class AppState: ObservableObject {
     @Published public var spendDegradedReason: String? = nil
     @Published public var generatedEnrollmentData: (secretBase32: String, otpauthURI: String, recoveryCodes: [String])? = nil
     @Published public var showSoftwareUpdatesSheet: Bool = false
+    @Published public var isScopedAdvancedSheetOpen: Bool = false
+    @Published public var isSensitiveSettingsOperationActive: Bool = false
     public let accountPurgeCoordinator: OperatorAccountPurgeCoordinator
     public let startupGate = StartupLifecycleGate()
     private var isBootstrapEvaluationInFlight: Bool = false
@@ -190,6 +192,18 @@ public final class AppState: ObservableObject {
             }
         }
 
+        self.updateCoordinator.requestDismissScopedSheets = { [weak self] in
+            self?.dismissScopedSettingsSheets()
+        }
+        self.updateCoordinator.hasActiveScopedSheets = { [weak self] in
+            guard let self else { return false }
+            return self.hasActiveScopedSettingsSheets()
+        }
+        self.updateCoordinator.findUnrelatedModalBlocker = { [weak self] in
+            guard let self else { return nil }
+            return self.findUnrelatedTerminationModalBlocker()
+        }
+
         Task {
             await self.refreshPrice()
         }
@@ -197,6 +211,33 @@ public final class AppState: ObservableObject {
         Task { [walletManager] in
             await walletManager.purgeStaleStagingDirectories()
         }
+    }
+
+    /// Dismisses ONLY app-owned non-wipe Settings / Software Updates / Release Notes sheets
+    /// prior to update relaunch. Never aborts unrelated auth, wallet, wipe, or Sparkle modals.
+    public func dismissScopedSettingsSheets() {
+        guard !isSensitiveSettingsOperationActive else { return }
+        showSettingsSheet = false
+        showSoftwareUpdatesSheet = false
+        updateCoordinator.showUpdateModal = false
+        NotificationCenter.default.post(name: .sentinelDismissSettingsSheets, object: nil)
+        ScopedSettingsSheetRegistry.shared.dismissRegisteredSheets()
+    }
+
+    public func hasActiveScopedSettingsSheets() -> Bool {
+        let nonWipeAdvancedOpen = isScopedAdvancedSheetOpen && !isSensitiveSettingsOperationActive && !showUninstallWipeSheet
+        return showSettingsSheet
+            || showSoftwareUpdatesSheet
+            || updateCoordinator.showUpdateModal
+            || nonWipeAdvancedOpen
+            || ScopedSettingsSheetRegistry.shared.hasAttachedRegisteredSheet
+    }
+
+    public func findUnrelatedTerminationModalBlocker() -> String? {
+        if showUninstallWipeSheet || isSensitiveSettingsOperationActive {
+            return "Full Uninstallation or an uninstall confirmation dialog is active. Complete or close it before relaunching, then click Retry Relaunch."
+        }
+        return ScopedSettingsSheetRegistry.shared.findUnrelatedModalBlocker()
     }
 
     private func setupBindings() {

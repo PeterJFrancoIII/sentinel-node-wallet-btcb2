@@ -21,6 +21,51 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     @Published public var errorMessage: String? = nil
     @Published public var showUpdateBanner: Bool = false
     @Published public var showUpdateModal: Bool = false
+    @Published public var isRelaunchPostponed: Bool = false
+    @Published public var isPreparingRelaunch: Bool = false
+    @Published public var isInstalling: Bool = false
+    @Published public var hasHandedOffToNativeInstaller: Bool = false
+    @Published public var canCancelPostponedRelaunch: Bool = false
+    @Published public var relaunchBlockedReason: String? = nil
+
+    public var isNativeSessionOrCommitActive: Bool {
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = driver as? SparkleUpdateDriver, sparkle.isNativeSessionInProgress {
+            return true
+        }
+        #endif
+        return isInstalling || isRelaunchPostponed || isPreparingRelaunch || hasHandedOffToNativeInstaller
+    }
+
+    public var requestDismissScopedSheets: (@MainActor () -> Void)? {
+        didSet {
+            #if canImport(Sparkle) && !APP_STORE
+            if let sparkle = driver as? SparkleUpdateDriver {
+                sparkle.requestDismissScopedSheets = requestDismissScopedSheets
+            }
+            #endif
+        }
+    }
+
+    public var hasActiveScopedSheets: (@MainActor () -> Bool)? {
+        didSet {
+            #if canImport(Sparkle) && !APP_STORE
+            if let sparkle = driver as? SparkleUpdateDriver {
+                sparkle.hasActiveScopedSheets = hasActiveScopedSheets
+            }
+            #endif
+        }
+    }
+
+    public var findUnrelatedModalBlocker: (@MainActor () -> String?)? {
+        didSet {
+            #if canImport(Sparkle) && !APP_STORE
+            if let sparkle = driver as? SparkleUpdateDriver {
+                sparkle.findUnrelatedModalBlocker = findUnrelatedModalBlocker
+            }
+            #endif
+        }
+    }
 
     public let driver: any SoftwareUpdating
     public let resolver: GitHubReleaseResolver
@@ -94,6 +139,74 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         if let sparkle = self.driver as? SparkleUpdateDriver {
             sparkle.isBusyCheck = self.isWalletOrNodeBusy
             sparkle.onGracefulShutdownRequested = self.gracefullyStopNode
+            sparkle.requestDismissScopedSheets = self.requestDismissScopedSheets
+            sparkle.hasActiveScopedSheets = self.hasActiveScopedSheets
+            sparkle.findUnrelatedModalBlocker = self.findUnrelatedModalBlocker
+            sparkle.onStatusChange = { [weak self] newStatus in
+                Task { @MainActor [weak self] in
+                    self?.status = newStatus
+                    switch newStatus {
+                    case .error(let msg):
+                        self?.errorMessage = msg
+                    case .idle:
+                        self?.errorMessage = nil
+                    default:
+                        break
+                    }
+                }
+            }
+            sparkle.onRelaunchPostponedChange = { [weak self] postponed in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.isRelaunchPostponed = postponed
+                    self.canCancelPostponedRelaunch = sparkle.relaunchGate.supportsPostponedInstallCancellation
+                    if !postponed && !self.hasHandedOffToNativeInstaller && !sparkle.relaunchGate.hasCommittedNativeInstall {
+                        self.isInstalling = false
+                    }
+                }
+            }
+            sparkle.onNativeHandoffChange = { [weak self] handedOff in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.hasHandedOffToNativeInstaller = handedOff
+                    if handedOff {
+                        self.isInstalling = true
+                    } else if !self.isRelaunchPostponed && !sparkle.relaunchGate.hasCommittedNativeInstall {
+                        self.isInstalling = false
+                    }
+                }
+            }
+            sparkle.onPreparingChange = { [weak self] preparing in
+                Task { @MainActor [weak self] in
+                    self?.isPreparingRelaunch = preparing
+                }
+            }
+            sparkle.onBlockedReasonChange = { [weak self] reason in
+                Task { @MainActor [weak self] in
+                    self?.relaunchBlockedReason = reason
+                }
+            }
+            sparkle.onNativeCycleEnded = { [weak self] err in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    if let err {
+                        let msg = err.localizedDescription
+                        self.isInstalling = false
+                        self.hasHandedOffToNativeInstaller = false
+                        self.errorMessage = msg
+                        self.relaunchBlockedReason = msg
+                        self.status = .error(msg)
+                    } else if !self.isRelaunchPostponed && !self.hasHandedOffToNativeInstaller && !sparkle.isNativeSessionInProgress {
+                        self.isInstalling = false
+                    }
+                }
+            }
+            sparkle.onWillRelaunchApplication = { [weak self] in
+                Task { @MainActor [weak self] in
+                    // Keep committed/installing guard locked until actual process termination or terminal abort.
+                    self?.relaunchBlockedReason = nil
+                }
+            }
         }
         #endif
 
@@ -129,7 +242,12 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     // MARK: - Update Check Execution
 
     public func checkForUpdates(isUserInitiated: Bool) async {
-        guard !isChecking else { return }
+        // Never overwrite an active installation, native handoff, postponed relaunch,
+        // active Sparkle session, or relaunch-blocked error state.
+        guard !isChecking && !isNativeSessionOrCommitActive else { return }
+        if !isUserInitiated && relaunchBlockedReason != nil {
+            return
+        }
         isChecking = true
         errorMessage = nil
 
@@ -170,6 +288,10 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 cachedETag: cachedETag
             )
 
+            // Guard against overwriting native committed/postponed/handed-off state if
+            // an update installation committed while discovery was awaiting the network.
+            guard !isNativeSessionOrCommitActive else { return }
+
             if let etag = newETag {
                 config.setLastCheckETag(etag, for: targetUrl)
             }
@@ -208,6 +330,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 showUpdateBanner = false
             }
         } catch SoftwareUpdateError.notModified {
+            guard !isNativeSessionOrCommitActive else { return }
             config.lastCheckDate = Date()
             if let existing = discoveredRelease {
                 status = .updateAvailable(existing)
@@ -215,6 +338,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 status = .upToDate(lastChecked: Date())
             }
         } catch let updateErr as SoftwareUpdateError {
+            guard !isNativeSessionOrCommitActive else { return }
             let desc: String
             if case .networkError(let msg) = updateErr, msg.contains("404") {
                 desc = (config.channel == .beta)
@@ -227,6 +351,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
             errorMessage = desc
             showUpdateBanner = false
         } catch {
+            guard !isNativeSessionOrCommitActive else { return }
             status = .error(error.localizedDescription)
             errorMessage = error.localizedDescription
             showUpdateBanner = false
@@ -249,7 +374,58 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
         showUpdateModal = false
     }
 
+    public func retryPostponedRelaunch() async {
+        guard !isPreparingRelaunch else { return }
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = driver as? SparkleUpdateDriver {
+            do {
+                errorMessage = nil
+                relaunchBlockedReason = nil
+                try await sparkle.retryPostponedRelaunch()
+            } catch {
+                let msg = error.localizedDescription
+                errorMessage = msg
+                relaunchBlockedReason = msg
+                status = .error(msg)
+            }
+        }
+        #endif
+    }
+
+    @discardableResult
+    public func requestCancelPostponedRelaunch() -> CancelPostponedOutcome {
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = driver as? SparkleUpdateDriver {
+            let outcome = sparkle.requestCancelPostponedRelaunch()
+            switch outcome {
+            case .cancelled:
+                isRelaunchPostponed = false
+                isInstalling = false
+                errorMessage = nil
+                relaunchBlockedReason = nil
+            case .deferredUntilInFlightShutdownCompletes:
+                break
+            case .unsupportedAfterCommit(let msg), .cancellationFailed(let msg):
+                errorMessage = msg
+                relaunchBlockedReason = msg
+                status = .error(msg)
+            }
+            return outcome
+        }
+        #endif
+        isRelaunchPostponed = false
+        isInstalling = false
+        errorMessage = nil
+        relaunchBlockedReason = nil
+        return .cancelled
+    }
+
     public func confirmAndInstallUpdate(release: AppReleaseInfo) async throws {
+        // Guard duplicate clicks / concurrent or already handed-off native installation sessions.
+        guard !isNativeSessionOrCommitActive else {
+            throw SoftwareUpdateError.installationFailed("An update installation, postponed relaunch, or active Sparkle session is already in progress.")
+        }
+
         // If Mac App Store distribution, binary self-updates from GitHub are forbidden.
         // Delegate directly to driver (opens App Store product page) without stopping node.
         if distributionChannel == .macAppStore {
@@ -257,31 +433,42 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
             return
         }
 
-        // P0 Wallet Safety Check:
-        if let isBusy = isWalletOrNodeBusy, await isBusy() {
-            throw SoftwareUpdateError.walletActiveOperationInProgress
-        }
+        isInstalling = true
 
-        // For SparkleUpdateDriver, graceful node termination is hooked to Sparkle's
-        // actual relaunch lifecycle (`updater(_:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)`),
-        // ensuring the Bitcoin Knots daemon is NEVER prematurely killed if download fails or user cancels.
-        #if canImport(Sparkle) && !APP_STORE
-        if driver is SparkleUpdateDriver {
-            try await driver.installUpdate(release: release)
-            return
-        }
-        #endif
-
-        // For non-Sparkle drivers (e.g. MockUpdateDriver in tests), stop node cleanly before install
-        if let stopAction = gracefullyStopNode {
-            do {
-                try await stopAction()
-            } catch {
-                throw SoftwareUpdateError.nodeTerminationFailed(error.localizedDescription)
+        do {
+            // P0 Wallet Safety Check:
+            if let isBusy = isWalletOrNodeBusy, await isBusy() {
+                isInstalling = false
+                throw SoftwareUpdateError.walletActiveOperationInProgress
             }
-        }
 
-        // Trigger installer & relaunch via driver
-        try await driver.installUpdate(release: release)
+            // For SparkleUpdateDriver, graceful node termination is hooked to Sparkle's
+            // actual relaunch lifecycle (`updater(_:shouldPostponeRelaunchForUpdate:untilInvokingBlock:)`),
+            // ensuring the Bitcoin Knots daemon is NEVER prematurely killed if download fails or user cancels.
+            #if canImport(Sparkle) && !APP_STORE
+            if driver is SparkleUpdateDriver {
+                try await driver.installUpdate(release: release)
+                return
+            }
+            #endif
+
+            // For non-Sparkle drivers (e.g. MockUpdateDriver in tests), stop node cleanly before install
+            if let stopAction = gracefullyStopNode {
+                do {
+                    try await stopAction()
+                } catch {
+                    throw SoftwareUpdateError.nodeTerminationFailed(error.localizedDescription)
+                }
+            }
+
+            // Trigger installer & relaunch via driver
+            try await driver.installUpdate(release: release)
+            isInstalling = false
+        } catch {
+            if !isRelaunchPostponed {
+                isInstalling = false
+            }
+            throw error
+        }
     }
 }

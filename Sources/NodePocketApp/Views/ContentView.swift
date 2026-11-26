@@ -126,6 +126,58 @@ public struct ContentView: View {
 
             Divider()
 
+            if state.updateCoordinator.isRelaunchPostponed || state.updateCoordinator.isPreparingRelaunch || state.updateCoordinator.hasHandedOffToNativeInstaller || state.updateCoordinator.relaunchBlockedReason != nil {
+                HStack(alignment: .center, spacing: 12) {
+                    Image(systemName: state.updateCoordinator.relaunchBlockedReason != nil ? "exclamationmark.triangle.fill" : "arrow.triangle.2.circlepath.circle.fill")
+                        .foregroundColor(state.updateCoordinator.relaunchBlockedReason != nil ? .orange : .blue)
+                        .font(.title3)
+
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(
+                            state.updateCoordinator.hasHandedOffToNativeInstaller
+                                ? "Update Handed Off — Finishing Installation & Quitting"
+                                : (state.updateCoordinator.isPreparingRelaunch ? "Preparing Update Relaunch…" : "Update Staged — Ready to Finish Installation")
+                        )
+                            .font(.subheadline)
+                            .bold()
+                        Text(state.updateCoordinator.relaunchBlockedReason ?? state.updateCoordinator.errorMessage ?? (state.updateCoordinator.hasHandedOffToNativeInstaller ? "Sparkle installer is finishing. Wait for automatic quit, or perform a normal Quit cleanly if prompted." : "Close any active dialogs and click Retry Relaunch, or Quit Sentinel Node Wallet manually to complete the update."))
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer()
+
+                    if state.updateCoordinator.isRelaunchPostponed {
+                        Button(state.updateCoordinator.isPreparingRelaunch ? "Retrying…" : "Retry Relaunch") {
+                            Task { await state.updateCoordinator.retryPostponedRelaunch() }
+                        }
+                        .disabled(state.updateCoordinator.isPreparingRelaunch)
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+
+                        if state.updateCoordinator.canCancelPostponedRelaunch {
+                            Button("Cancel Update", role: .cancel) {
+                                _ = state.updateCoordinator.requestCancelPostponedRelaunch()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+                    }
+
+                    Button("Update Settings") {
+                        state.activeSettingsTab = 1
+                        state.showSettingsSheet = true
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .background(state.updateCoordinator.relaunchBlockedReason != nil ? Color.orange.opacity(0.12) : Color.blue.opacity(0.08))
+                Divider()
+            }
+
             // Active Tab View
             Group {
                 switch state.selectedTab {
@@ -157,6 +209,14 @@ public struct ContentView: View {
         }
         .sheet(isPresented: $state.showUninstallWipeSheet) {
             AdvancedSheet(initialTab: 2)
+        }
+        .onChange(of: showAdvancedSheet) { open in
+            state.isScopedAdvancedSheetOpen = open
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .sentinelDismissSettingsSheets)) { _ in
+            if !state.isSensitiveSettingsOperationActive && !state.showUninstallWipeSheet {
+                showAdvancedSheet = false
+            }
         }
         .alert(isPresented: $state.showAlert) {
             Alert(

@@ -7,7 +7,11 @@ import Sparkle
 /// Production macOS updater driver interfacing with the Sparkle 2 framework.
 /// Dedicated strictly to direct GitHub releases; never embedded or invoked for Mac App Store builds.
 public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDelegate, SPUStandardUserDriverDelegate, @unchecked Sendable {
-    public private(set) var status: SoftwareUpdateStatus = .idle
+    public private(set) var status: SoftwareUpdateStatus = .idle {
+        didSet {
+            onStatusChange?(status)
+        }
+    }
     public let distributionChannel: SoftwareDistributionChannel = .directGitHub
 
     public private(set) var updaterController: SPUStandardUpdaterController?
@@ -21,29 +25,108 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     /// Safety callback: performs graceful Bitcoin Knots daemon shutdown before relaunch.
     public var onGracefulShutdownRequested: (@MainActor () async throws -> Void)?
 
-    /// Current postponed relaunch handler if an update was postponed due to active node/wallet operations.
-    public private(set) var postponedInstallHandler: (() -> Void)?
-    public private(set) var isRelaunchPostponed: Bool = false
+    public var onStatusChange: ((SoftwareUpdateStatus) -> Void)?
+    public var onRelaunchPostponedChange: ((Bool) -> Void)?
+    public var onPreparingChange: ((Bool) -> Void)?
+    public var onBlockedReasonChange: ((String?) -> Void)?
+    public var onNativeHandoffChange: ((Bool) -> Void)?
+    public var onNativeCycleEnded: ((Error?) -> Void)?
+    public var onWillRelaunchApplication: (() -> Void)?
 
-    public func cancelPostponedRelaunch() {
-        self.postponedInstallHandler = nil
-        self.isRelaunchPostponed = false
-        self.status = .idle
+    public var requestDismissScopedSheets: (@MainActor () -> Void)?
+    public var hasActiveScopedSheets: (@MainActor () -> Bool)?
+    public var findUnrelatedModalBlocker: (@MainActor () -> String?)?
+
+    public private(set) var isRelaunchPostponed: Bool = false
+    public private(set) var isPreparingRelaunch: Bool = false
+    public private(set) var hasHandedOffToNativeInstaller: Bool = false
+
+    @MainActor
+    public var isNativeSessionInProgress: Bool {
+        if relaunchGate.isBlockingNewChecksOrInstalls {
+            return true
+        }
+        if let updater = updaterController?.updater {
+            return updater.sessionInProgress || !updater.canCheckForUpdates
+        }
+        return false
     }
 
+    @MainActor
+    public var postponedInstallHandler: (() -> Void)? {
+        relaunchGate.pendingInstallHandler
+    }
+
+    public lazy var relaunchGate: UpdateRelaunchGate = {
+        UpdateRelaunchGate(
+            supportsPostponedInstallCancellation: false,
+            isBusyCheck: { [weak self] in
+                guard let check = self?.isBusyCheck else { return false }
+                return await check()
+            },
+            onGracefulShutdownRequested: { [weak self] in
+                guard let shutdown = self?.onGracefulShutdownRequested else { return }
+                try await shutdown()
+            },
+            requestDismissScopedSheets: { [weak self] in
+                if let custom = self?.requestDismissScopedSheets {
+                    custom()
+                } else {
+                    #if canImport(AppKit)
+                    ScopedSettingsSheetRegistry.shared.dismissRegisteredSheets()
+                    #endif
+                }
+            },
+            hasActiveScopedSheets: { [weak self] in
+                if let custom = self?.hasActiveScopedSheets {
+                    return custom()
+                }
+                #if canImport(AppKit)
+                return ScopedSettingsSheetRegistry.shared.hasAttachedRegisteredSheet
+                #else
+                return false
+                #endif
+            },
+            findUnrelatedModalBlocker: { [weak self] in
+                if let custom = self?.findUnrelatedModalBlocker {
+                    return custom()
+                }
+                #if canImport(AppKit)
+                return ScopedSettingsSheetRegistry.shared.findUnrelatedModalBlocker()
+                #else
+                return nil
+                #endif
+            },
+            onStatusChange: { [weak self] newStatus in
+                self?.status = newStatus
+            },
+            onRelaunchPostponedChange: { [weak self] postponed in
+                self?.isRelaunchPostponed = postponed
+                self?.onRelaunchPostponedChange?(postponed)
+            },
+            onPreparingChange: { [weak self] preparing in
+                self?.isPreparingRelaunch = preparing
+                self?.onPreparingChange?(preparing)
+            },
+            onBlockedReasonChange: { [weak self] reason in
+                self?.onBlockedReasonChange?(reason)
+            },
+            onNativeHandoffChange: { [weak self] handedOff in
+                self?.hasHandedOffToNativeInstaller = handedOff
+                self?.onNativeHandoffChange?(handedOff)
+            }
+        )
+    }()
+
+    @MainActor
+    @discardableResult
+    public func requestCancelPostponedRelaunch() -> CancelPostponedOutcome {
+        relaunchGate.requestCancelPostponedRelaunch()
+    }
+
+    @MainActor
     public func retryPostponedRelaunch() async throws {
-        guard let handler = self.postponedInstallHandler else {
-            throw SoftwareUpdateError.installationFailed("No postponed update relaunch handler is pending.")
-        }
-        if let isBusy = self.isBusyCheck, await isBusy() {
-            throw SoftwareUpdateError.walletActiveOperationInProgress
-        }
-        if let shutdown = self.onGracefulShutdownRequested {
-            try await shutdown()
-        }
-        self.postponedInstallHandler = nil
-        self.isRelaunchPostponed = false
-        handler()
+        try await relaunchGate.retryPostponedRelaunch()
     }
 
     public init(startingUpdater: Bool = true) {
@@ -98,39 +181,134 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public func updater(
         _ updater: SPUUpdater,
+        userDidMake choice: SPUUserUpdateChoice,
+        forUpdate updateItem: SUAppcastItem,
+        state: SPUUserUpdateState
+    ) {
+        let handleChoice: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            switch choice {
+            case .skip:
+                if !self.relaunchGate.hasCommittedNativeInstall {
+                    self.relaunchGate.invalidateNativeSession(reason: nil)
+                }
+                self.onNativeCycleEnded?(nil)
+            case .dismiss:
+                if state.stage == .notDownloaded && !self.relaunchGate.hasCommittedNativeInstall {
+                    self.onNativeCycleEnded?(nil)
+                }
+            case .install:
+                break
+            @unknown default:
+                break
+            }
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(handleChoice)
+        } else {
+            Task { @MainActor in handleChoice() }
+        }
+    }
+
+    public func updater(_ updater: SPUUpdater, willInstallUpdate item: SUAppcastItem) {
+        let target = "\(item.displayVersionString) (\(item.versionString))"
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.status = .readyToInstall(
+                    self.selectedRelease ?? AppReleaseInfo(
+                        id: item.versionString,
+                        tagName: "v\(item.displayVersionString)-build\(item.versionString)",
+                        version: AppVersion.parse("\(item.displayVersionString) (build \(item.versionString))")
+                            ?? AppVersion(major: 1, minor: 0, patch: 0, build: Int(item.versionString), rawString: target),
+                        name: target,
+                        releaseNotes: "",
+                        publishedAt: Date()
+                    )
+                )
+            }
+        }
+    }
+
+    public func updater(
+        _ updater: SPUUpdater,
         shouldPostponeRelaunchForUpdate item: SUAppcastItem,
         untilInvokingBlock installHandler: @escaping () -> Void
     ) -> Bool {
-        self.postponedInstallHandler = installHandler
-        self.isRelaunchPostponed = true
-
-        Task { @MainActor in
-            // Safety Check: if wallet or node operations are busy, keep postponed and inform driver
-            if let isBusy = self.isBusyCheck, await isBusy() {
-                self.status = .error("Update postponement active: node or wallet operation in progress. Cancel or retry when operations complete.")
-                return
+        let target = "\(item.displayVersionString) (\(item.versionString))"
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.relaunchGate.beginPostponedRelaunch(targetVersion: target, installHandler: installHandler)
             }
-
-            // Graceful Bitcoin Knots daemon shutdown before relaunch
-            if let shutdown = self.onGracefulShutdownRequested {
-                do {
-                    try await shutdown()
-                } catch {
-                    self.status = .error("Graceful node shutdown failed: \(error.localizedDescription). Update relaunch aborted.")
-                    return
-                }
+        } else {
+            Task { @MainActor in
+                self.relaunchGate.beginPostponedRelaunch(targetVersion: target, installHandler: installHandler)
             }
-
-            // Clean daemon shutdown confirmed: proceed with app relaunch
-            self.postponedInstallHandler = nil
-            self.isRelaunchPostponed = false
-            installHandler()
         }
         return true
     }
 
     public func updaterShouldRelaunchApplication(_ updater: SPUUpdater) -> Bool {
         return true
+    }
+
+    public func updaterWillRelaunchApplication(_ updater: SPUUpdater) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                self.onWillRelaunchApplication?()
+            }
+        } else {
+            Task { @MainActor in
+                self.onWillRelaunchApplication?()
+            }
+        }
+    }
+
+    public func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        let nsError = error as NSError
+        let isSparkleDomain = nsError.domain == SUSparkleErrorDomain
+        let isNoUpdate = isSparkleDomain && nsError.code == Int(SUError.noUpdateError.rawValue)
+        let isAuthLater = isSparkleDomain && nsError.code == Int(SUError.installationAuthorizeLaterError.rawValue)
+        let isCanceled = isSparkleDomain && nsError.code == Int(SUError.installationCanceledError.rawValue)
+
+        let finish: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            if !isAuthLater && !isNoUpdate {
+                self.relaunchGate.invalidateNativeSession(reason: isCanceled ? nil : error.localizedDescription)
+            } else if isCanceled {
+                self.relaunchGate.invalidateNativeSession(reason: nil)
+            }
+            self.onNativeCycleEnded?(isNoUpdate || isCanceled ? nil : error)
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(finish)
+        } else {
+            Task { @MainActor in finish() }
+        }
+    }
+
+    public func updater(
+        _ updater: SPUUpdater,
+        didFinishUpdateCycleFor updateCheck: SPUUpdateCheck,
+        error: Error?
+    ) {
+        let nsError = error as NSError?
+        let isSparkleDomain = nsError?.domain == SUSparkleErrorDomain
+        let isNoUpdate = isSparkleDomain && nsError?.code == Int(SUError.noUpdateError.rawValue)
+        let isCanceled = isSparkleDomain && nsError?.code == Int(SUError.installationCanceledError.rawValue)
+        let surfacedError: Error? = (isNoUpdate || isCanceled) ? nil : error
+
+        let finish: @MainActor () -> Void = { [weak self] in
+            guard let self else { return }
+            if let surfacedError {
+                self.relaunchGate.invalidateNativeSession(reason: surfacedError.localizedDescription)
+            }
+            self.onNativeCycleEnded?(surfacedError)
+        }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated(finish)
+        } else {
+            Task { @MainActor in finish() }
+        }
     }
 }
 #endif

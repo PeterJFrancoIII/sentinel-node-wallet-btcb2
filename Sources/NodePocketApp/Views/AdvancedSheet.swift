@@ -312,9 +312,18 @@ public struct AdvancedSheet: View {
         }
         .padding(20)
         .frame(minWidth: 560, idealWidth: 600, maxWidth: 660, minHeight: 580, idealHeight: 640, maxHeight: 720)
+        .background(ScopedSettingsSheetAnchor(isScopedDismissible: isScopedDismissible))
         .onAppear {
             loadCurrentSettings()
+            syncScopedModalState()
         }
+        .onDisappear {
+            state.isSensitiveSettingsOperationActive = false
+        }
+        .onChange(of: settingsTab) { _ in syncScopedModalState() }
+        .onChange(of: showWipeConfirmation) { _ in syncScopedModalState() }
+        .onChange(of: isWipingData) { _ in syncScopedModalState() }
+        .onChange(of: wipeCompleted) { _ in syncScopedModalState() }
         .alert("Fully Uninstall Application & All Files?", isPresented: $showWipeConfirmation) {
             Button("Cancel", role: .cancel) { }
             Button("Uninstall Everything", role: .destructive) {
@@ -590,4 +599,62 @@ public struct AdvancedSheet: View {
         }
     }
 
+    private var isScopedDismissible: Bool {
+        settingsTab != 2 && !showWipeConfirmation && !isWipingData && !wipeCompleted && !state.showUninstallWipeSheet
+    }
+
+    private func syncScopedModalState() {
+        state.isSensitiveSettingsOperationActive = !isScopedDismissible
+    }
+}
+
+private struct ScopedSettingsSheetAnchor: NSViewRepresentable {
+    let isScopedDismissible: Bool
+
+    final class Coordinator {
+        weak var registeredWindow: NSWindow?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            updateRegistration(for: view.window, coordinator: context.coordinator)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            updateRegistration(for: nsView.window, coordinator: context.coordinator)
+        }
+    }
+
+    static func dismantleNSView(_ nsView: NSView, coordinator: Coordinator) {
+        if let window = coordinator.registeredWindow {
+            Task { @MainActor in
+                ScopedSettingsSheetRegistry.shared.unregister(window)
+            }
+            coordinator.registeredWindow = nil
+        }
+    }
+
+    @MainActor
+    private func updateRegistration(for window: NSWindow?, coordinator: Coordinator) {
+        if isScopedDismissible, let window, window.sheetParent != nil {
+            if coordinator.registeredWindow !== window {
+                if let previous = coordinator.registeredWindow {
+                    ScopedSettingsSheetRegistry.shared.unregister(previous)
+                }
+                ScopedSettingsSheetRegistry.shared.register(window)
+                coordinator.registeredWindow = window
+            }
+        } else if let previous = coordinator.registeredWindow {
+            ScopedSettingsSheetRegistry.shared.unregister(previous)
+            coordinator.registeredWindow = nil
+        }
+    }
 }
