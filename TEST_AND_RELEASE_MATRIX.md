@@ -1,10 +1,10 @@
 # Test and Release Matrix — Sentinel Node Wallet BTCB2
 
-**Snapshot:** November 14, 2026 (America/New_York). [GitHub v1.0.0 Build 3](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) publicly published; [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) **merged**. Current main before this docs update `31f888b`; exact-[SHA CI #43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) **SUCCESS: 144 executed / 143 passed / 0 failed / 1 skipped**. No independent real-funds or notarization certification.
+**Snapshot:** November 25, 2026 (America/New_York). [GitHub v1.0.0 Build 8](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build8) publicly published (`2026-11-26T00:21:45Z`), approved candidate commit `bfc314c7ea7f352784cc0421ab0a7a815099cfc6`; exact-[SHA CI #45564463622](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45564463622) **SUCCESS: 339 executed / 338 passed / 0 failed / 1 skipped**; [Phase C #45736669756](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45736669756) **SUCCESS** (`dist/appcast.xml` SHA-256 `90eaebe859c413648f60f50ca8d6ad0479f0410e3e504a3d8db525231a597f83`). No independent real-funds certification.
 
 **Evidence taxonomy:** SOURCE = current source behavior; CI = automated checkout/test; RELEASE = publicly available GitHub artifact; PEER = agent-reported host/Apple claims; NATIVE = independently captured signed-app result; OPEN = unproven or failing. A skipped test is not a pass.
 
-| Capability / gate | Evidence at Build 3 source baseline | Status |
+| Capability / gate | Evidence at Build 8 source baseline (`bfc314c7`) | Status |
 |---|---|---|
 | Native SwiftUI Node / Wallet / Network + Advanced | Source present; optimized Release CI compile | **SOURCE + CI PASS** |
 | Embedded Bitcoin Knots 29.4.3 and BTCB2 anchors | Pinned source/archive verification; isolated CLI regtest | **SOURCE + CI PASS**, signed binary provenance independent review **OPEN** |
@@ -20,11 +20,11 @@
 | Outbound Send/RBF | RPC defaults broadcast restricted; conditional manager guards; alternate paths exist when deliberately unrestricted | **RESTRICTED BY DEFAULT; independent fork signing P0 OPEN** |
 | Apple Passwords / Touch ID / Keychain | Source hooks; hosted interactive Keychain XCTest skipped | SOURCE + partial CI; **NATIVE P0 OPEN** |
 | Optional Neoxa/NonKYC ticker | Read-only GET endpoints in price service; network metadata exposure documented | SOURCE; live network privacy/availability **OPEN** |
-| GitHub macOS DMG | Build 3 release with DMG, SHA256SUMS.txt, BUILD_MANIFEST.json, published asset digest `892798a3...` | **RELEASE VERIFIED**; notarization/Gatekeeper/source-to-DMG independently **OPEN** |
+| GitHub macOS DMG & Signed Sparkle Feed | Build 8 (`v1.0.0-build8`) DMG `14,197,833` bytes (`449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119`), `S8QMQZA656` Developer ID notarized/stapled, CryptoKit EdDSA + Phase C feed verified | **RELEASE + NOTARIZATION + FEED VERIFIED**; full post-enrollment GUI & native Build 7->8 relaunch install **OPEN** |
 | App Store Connect | App ID 6833290684, active script bundle `pool.sentineldefensetechnologies.co.za`, v1.0 Build3 | SOURCE/peer report; **Apple final approval NOT independently verified** |
 | Full signed/native security and financial release | No independent BTCB2 signing, GUI restore, interactive Keychain and notarization acceptance packet | **NO FUNDS/SECURITY GO** |
 
-**Current CI evidence:** [Build 3 source run #43663728634](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663728634) also succeeded at `357766bf`. GitHub logs for both runs show 144 XCTest executions with one interactive Keychain skip, and isolated Knots CLI encrypted recovery. Do not print “144 passed” for this run.
+**Current CI evidence:** [PR #41 CI #45564463622](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45564463622) at `bfc314c7` executed 339 XCTests with 338 passing, 0 failing, and 1 interactive Keychain skip, plus release broadcast-lock verification and isolated Knots CLI encrypted recovery. Do not omit the skipped interactive Keychain test when reporting counts.
 
 **Required closeout:** verify DMG file bytes/checksum and final code signature + Gatekeeper, independently test installed signed SwiftUI GUI, confirm wallet recovery and all destructive flows, commission an independent fork-signing audit, and prove current Apple disposition by authenticated first-party record. All test work must use disposable zero-funds datadirs.
 

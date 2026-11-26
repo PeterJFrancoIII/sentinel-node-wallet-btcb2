@@ -1,19 +1,19 @@
 # Sentinel Node Wallet BTCB2 — Current Project Status
 
-**Snapshot:** November 14, 2026, America/New_York. **Single active status register.** Current public [GitHub v1.0.0 (Build 3) release](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3); previous [PR #10](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/pull/10) is **merged**, not open. Baseline `main` before this documentation review: `31f888b61f2fbf8bf0e1425b367f0783a23c0174`.
+**Snapshot:** November 25, 2026, America/New_York. **Single active status register.** Current public [GitHub v1.0.0 (Build 8) release](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build8) (published `2026-11-26T00:21:45Z`). Approved candidate commit: `bfc314c7ea7f352784cc0421ab0a7a815099cfc6`; feed PR #43 merged at `9e65602e6b69b329a9944325352d7a3c71a7c1c6`.
 
 ## Current milestone and independent evidence
 
 | Item | Verified information | Qualification |
 |---|---|---|
-| GitHub release | Published `v1.0.0-build3` with macOS arm64 DMG, checksum file and JSON build manifest | **PUBLICLY AVAILABLE**; not automatically notarized |
-| DMG | `Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`, SHA-256 `892798a3a7bf4c50b4cf220d6ac3e4a0b071c8c8acc1d993da1d04212d01b114` from GitHub's asset metadata | Release asset metadata verified; installed artifact signature not independently verified |
-| Release source | Release notes identify `357766bf8d5e219208148101dde5bc7c26f59b0e` | No independent source-to-DMG reproducibility report |
-| GitHub Actions | [Current-main CI #43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) succeeded at `31f888b`. [Release-source CI #43663728634](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663728634) succeeded at `357766bf`. | Both report **144 executed / 143 passed / 0 failed / 1 skipped**, optimized Release compile, ad-hoc bundle and isolated Knots regtest recovery |
-| App Store identity | Apple app `6833290684`, bundle `pool.sentineldefensetechnologies.co.za`, `1.0 (3)` as configured in current packaging scripts | Actual Apple review/approval state needs authenticated first-party verification |
+| GitHub release | Published `v1.0.0-build8` with Developer ID notarized macOS arm64 DMG, `SHA256SUMS.txt`, `BUILD_MANIFEST.json`, `RELEASE_ATTESTATION.json`, `SPARKLE_SIGNATURE.base64` | **PUBLICLY AVAILABLE**; prior Build 6 (`AMFI -413` missing profile) and Build 7 (`missingRegistryInEstablishedNode`) retained with warnings and suppressed in feed |
+| DMG | `Sentinel-Node-Wallet-BTCB2-v1.0.0-build8-macOS-arm64-notarized.dmg`, **14,197,833 bytes**, SHA-256 `449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119` | Verified Developer ID (`S8QMQZA656`), hardened runtime, embedded provisioning profile (`043f266e...`), Apple notarized/stapled, `spctl --assess` accepted |
+| Release source | Approved Policy B candidate `bfc314c7ea7f352784cc0421ab0a7a815099cfc6` (PR #41 enrollment-before-node startup gate) | Independent bit-for-bit source-to-DMG reproducibility not separately claimed |
+| GitHub Actions & Feed | [PR #41 CI #45564463622](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45564463622) at `bfc314c7` (**339 executed / 338 passed / 0 failed / 1 interactive Keychain skipped**); [Phase A #45717133027](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45717133027), [Phase B #45732601504](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45732601504), and [Phase C #45736669756](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45736669756) **SUCCESS** | Signed Sparkle `dist/appcast.xml` live (SHA-256 `90eaebe859c413648f60f50ca8d6ad0479f0410e3e504a3d8db525231a597f83`, 1,576 bytes); scheduled discovery + operator-initiated Sparkle check active, unattended `autoDownload` disabled |
+| App Store identity | Apple app `6833290684`, bundle `pool.sentineldefensetechnologies.co.za` | Actual App Store Connect review/approval state remains separate from Developer ID DMG release |
 | Embedded node | Bitcoin Knots `29.4.3.knots20260508` pinned in fetch/package scripts | Binary publisher/updated upstream audit remains separate |
-| Build signing | GitHub DMG script optionally signs with **Apple Development** identity, while a separate Developer ID/notary script exists | No public record here proving Build 3 DMG Developer ID notarization or Gatekeeper acceptance |
-| Shared memory | Operator references `MSG:gemini-sentinel-v100-build3-github-dmg-release-121` and `SentinelNodeWallet_BTCB2_v100_Build3_GitHub_Release_and_DMG_Deployment` | Agent dispatch is not an independent signed-package audit |
+| Clean-Mac Runtime & Keychain | Build 8 passed isolated quarantined Gatekeeper `"Open"`, zero `AMFI -413`/`-10810`, pre-enrollment node/settings gate on `bfc314c7` | **OPEN** for full post-enrollment GUI walkthrough, interactive Keychain `.userPresence` accept/cancel/delete, and live native Sparkle relaunch install on Build 7 -> Build 8 |
+| Shared memory | Coordinated via `InterAgent_Dialogue_Channel` & `SentinelNodeWallet_BTCB2_PostWO119_LastReleaseProvenanceAndCutoverGates_20261119_GPT6_230` | Agent dispatch is not an independent financial safety audit |
 
 **Evidence labels:** **SOURCE** current code; **CI** automated tests on exact SHA; **RELEASE** publicly posted asset and metadata; **PEER** another agent's local or Apple portal report; **NATIVE** independently inspected signed installed app; **OPEN** missing/failed proof.
 
@@ -35,16 +35,16 @@
 3. **Full-Uninstallation risk:** Separate AppState and CLI uninstaller may permanently erase the entire node datadir, including wallet files, and attempt deletion of the app bundle and sandbox container. These routines do **not** establish independent backup recoverability, may be interrupted by macOS sandbox restrictions, and must not be represented as guaranteed complete or lossless.
 4. **Keychain:** App source contains Touch ID/system-password and Keychain/TOTP handling; 1 interactive XCTest is SKIPPED in hosted CI. Native Mac consent, failures and recovery must be separately validated on the actual signed binary.
 5. **Networking and privacy:** Node RPC remains loopback; optional blockchain P2P and exchange-ticker HTTPS requests expose normal network metadata. Apple server entitlement supports a node RPC listener and user-enabled inbound P2P; the exact signed App Sandbox helper behavior must be proven.
-6. **Distribution:** GitHub release file SHA is reported and can be verified after download. Build 3 notarization, third-party signature audits, accepted App Store build and Apple policy status are **not** verified by GitHub asset metadata.
+6. **Distribution:** GitHub Build 8 (`v1.0.0-build8`) release DMG (`449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119`), `S8QMQZA656` Developer ID notarization/stapling, and Phase C live Sparkle feed (`dist/appcast.xml`, SHA-256 `90eaebe859c413648f60f50ca8d6ad0479f0410e3e504a3d8db525231a597f83`) are verified. Accepted App Store Connect status and independent external security audits remain separate.
 
 ## Open acceptance work
 
-- Verify actual downloaded Build 3 DMG hash, embedded signed executables, hardened runtime, Developer ID signature/notary ticket if claimed, Gatekeeper and safe clean installation on an isolated Apple Silicon Mac.
+- Complete post-enrollment clean-Mac GUI walkthrough, interactive Keychain `.userPresence` accept/cancel/delete, and live native Sparkle relaunch upgrade verification on Build 7 -> Build 8.
 - Audit the pinned Knots fork against publisher provenance and independently confirm BTCB2 signing rules, changes of signature hash, fees, RBF, safe replay handling and user-authorized recipients.
 - Run real signed-app GUI encrypted wallet create→lock→backup→restore in a new isolated datadir, verify addresses/ownership and Keychain accept/cancel/denial. Do not test against user funds.
 - Verify app runtime with network.client/network.server entitlements, local listening socket, actual P2P inbound opt-in, peer caps, Ultra power transitions, pruned storage under pressure and user-preserving migrations.
 - Replace broad destructive uninstaller assumptions with permission-aware confirmation, isolated restoration proof, rollback/error handling and honest warnings. Treat irreversible wallet-state removal as a major separate security gate.
-- Confirm Apple App Store Connect `6833290684` Build 3 processing/review status, account eligibility, App Privacy/marketing, entitlements, App Review feedback and actual release setting using first-party authenticated evidence.
+- Confirm Apple App Store Connect `6833290684` Build 8/current processing/review status, account eligibility, App Privacy/marketing, entitlements, App Review feedback and actual release setting using first-party authenticated evidence.
 
 ## Governance / history
 
@@ -52,4 +52,4 @@ The [README](../README.md), [GOVERNANCE](../GOVERNANCE.md), [SECURITY](../SECURI
 
 Use the canonical SCM session `Session_Gemini_NodePocketBTCB2_20261106-1741` and `InterAgent_Dialogue_Channel` with exact message provenance. Never share real wallet names, balances, keys, contacts or sensitive local host information in repo documentation.
 
-**Current decision:** GitHub distribution **YES** (artifact exists); independent trusted/notarized distribution evidence **OPEN**; Apple approval **UNVERIFIED**; real-funds security **NOT CLEARED**.
+**Current decision:** GitHub Developer ID notarized DMG + live signed Sparkle feed **YES** (`v1.0.0-build8`); full post-enrollment GUI/Keychain runtime & Apple App Store review **OPEN**; real-funds security **NOT CLEARED**.
