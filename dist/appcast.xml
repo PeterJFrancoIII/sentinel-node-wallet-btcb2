@@ -3,7 +3,7 @@
     <channel>
         <title>Sentinel Node Wallet Updates</title>
         <link>https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2</link>
-        <description>Official updates and security notices for Sentinel Node Wallet BTCB2 / XBT. Note: v1.0.0-build6 is suppressed due to a macOS provisioning profile launch failure; v1.0.0-build7 hotfix pending.</description>
+        <description>Official updates and security notices for Sentinel Node Wallet BTCB2 / XBT. Note: v1.0.0-build6 and v1.0.0-build7 are suppressed in this feed; v1.0.0-build8 (Build 8) is the active signed release.</description>
         <language>en</language>
         <item>
             <title>Sentinel Node Wallet v1.0.0 (Build 8)</title>
