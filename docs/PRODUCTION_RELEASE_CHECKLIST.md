@@ -1,24 +1,25 @@
 # Distribution and Security Release Checklist — Sentinel Node Wallet BTCB2
 
-**Updated November 14, 2026.** [GitHub v1.0.0 Build 3](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) is published with a macOS DMG, `BUILD_MANIFEST.json` and `SHA256SUMS.txt`. A downloadable artifact is **not** automatically a notarized, Gatekeeper-accepted or independently audited release. [Project Status](PROJECT_STATUS.md) provides the current evidence register.
+**Updated November 25, 2026.** [GitHub v1.0.0 Build 8](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build8) is published (`2026-11-26T00:21:45Z`) with Developer ID notarized macOS arm64 DMG, `SHA256SUMS.txt`, `BUILD_MANIFEST.json`, `RELEASE_ATTESTATION.json`, and `SPARKLE_SIGNATURE.base64`, plus live signed Sparkle feed `dist/appcast.xml` verified by Phase C (`45736669756`). [Project Status](PROJECT_STATUS.md) provides the current evidence register.
 
 ## Public GitHub asset (confirmed)
 
-- Asset: `Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`; GitHub release asset reports **12,430,628 bytes** and SHA-256 `892798a3a7bf4c50b4cf220d6ac3e4a0b071c8c8acc1d993da1d04212d01b114`.
-- Release notes identify source `357766bf8d5e219208148101dde5bc7c26f59b0e`; [CI #43663728634](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663728634) succeeded (144 executed / 143 passed / 1 skipped, zero failed), optimized release compile, development app packaging, and isolated regtest backup→restore.
-- `scripts/build_dmg.sh` creates a drag-to-Applications DMG and **optionally signs it with an Apple Development identity**. Development signing is **not Developer ID distribution signing**. The GitHub release does not provide verifiable Apple notarization/Gatekeeper evidence in this record.
-- Independent verification required: download exact bytes, run SHA-256, inspect attached manifest and signatures of `.dmg`, `.app`, `bitcoind` and `bitcoin-cli`, test on a clean authorized Apple Silicon Mac. If Gatekeeper rejects the asset, do not tell users to disable OS security.
+- Asset: `Sentinel-Node-Wallet-BTCB2-v1.0.0-build8-macOS-arm64-notarized.dmg`; **14,197,833 bytes** and SHA-256 `449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119`.
+- Approved candidate commit `bfc314c7ea7f352784cc0421ab0a7a815099cfc6`; [CI #45564463622](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45564463622) succeeded (`339` executed / `338` passed / `1` skipped, zero failed), optimized release compile, and isolated regtest verification.
+- Phase A (`45717133027`), Phase B (`45732601504`), and Phase C (`45736669756`) verified Developer ID signing (`S8QMQZA656`), embedded provisioning profile (`043f266e...`), Apple notarization/stapling, Swift `CryptoKit` Ed25519 signature, and live CDN `dist/appcast.xml` (`90eaebe859c413648f60f50ca8d6ad0479f0410e3e504a3d8db525231a597f83`, `1,576` bytes).
+- Scheduled checks & operator-initiated Sparkle 2 updates (`Check for Updates…`) are served by `dist/appcast.xml`, while unattended background `autoDownload` remains intentionally disabled.
+- Direct-DMG upgrades should preserve `~/Library/Application Support/NodePocketBTCB2` (do not advise destructive reset of existing data). If Gatekeeper rejects an unsigned or unprofiled asset, do not tell users to disable OS security.
 
 ## Independent release channels
 
 ### A. Outside Mac App Store (Developer ID)
 
-For a public trustable outside-store DMG, use a properly authorized **Developer ID Application** identity, hardened runtime, correctly signed embedded binaries and notarization/stapling with Apple's notary service. `scripts/build_production_dmg.sh` provides a guarded candidate pipeline; do **not** assume it was used for the published Build 3 DMG. Prerequisites include:
+For a public trustable outside-store DMG, the guarded release workflow (`release-macos.yml` + `scripts/build_production_dmg.sh`) uses a properly authorized **Developer ID Application** identity (`S8QMQZA656`), hardened runtime, embedded provisioning profile (`pool.sentineldefensetechnologies.co.za`), correctly signed embedded binaries, and notarization/stapling with Apple's notary service. Prerequisites include:
 
-- Owner-installed valid Developer ID certificate and local notarization credentials; never commit Apple keys or profiles.
-- Owner-approved HTTPS associated-domain AASA matching actual team and **current** bundle `pool.sentineldefensetechnologies.co.za` if Apple Passwords is used. The old `app.nodepocket.btcb2` AASA in historical documentation is not the packaging identifier. **Important source mismatch:** the checked-in `scripts/build_production_dmg.sh` still hard-codes `BUNDLE_ID=app.nodepocket.btcb2`. Do **not** run it unchanged for the Build 3 bundle: first review and repair the script, provision appropriate entitlements/AASA for the actual `pool.sentineldefensetechnologies.co.za` identity, and re-qualify the signature and notarization pipeline on an isolated test app.
+- Owner-provisioned Developer ID certificate, embedded provisioning profile (`043f266e...`), and App Store Connect API notarization credentials in protected GitHub Environments; never commit Apple keys or profiles.
+- Owner-approved HTTPS associated-domain AASA matching team `S8QMQZA656` and bundle `pool.sentineldefensetechnologies.co.za`.
 - Independent BTCB2 consensus/signing and complete native credential/backup acceptance; no live wallet testing.
-- Final accepted notarization receipt, stapling validation, trusted Gatekeeper assessment and signed-file hash manifest. Public download only after approved release gates.
+- Final accepted notarization receipt, stapling validation, trusted Gatekeeper assessment, Sparkle EdDSA attestation, and Phase C live CDN verification of `dist/appcast.xml`.
 
 ### B. Mac App Store
 

@@ -1,30 +1,30 @@
 # Sentinel Node Wallet — BTCB2
 
-**Latest GitHub release:** [v1.0.0 (Build 3)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) · **macOS:** 13+ on Apple Silicon · **BTCB2:** BLAKE2b / BIP-110 MainNet.
+**Latest GitHub release:** [v1.0.0 (Build 8)](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build8) · **macOS:** 13+ on Apple Silicon · **BTCB2:** BLAKE2b / BIP-110 MainNet.
 
 Sentinel Node Wallet is an independent SwiftUI macOS application that bundles a local Bitcoin Knots daemon and provides node operations, encrypted-descriptor wallet management and locally calculated blockchain network analytics. The project is **not** an exchange, mining program, cloud wallet or part of any other operational system.
 
 | Identity / release | Current record |
 |---|---|
-| GitHub release tag | `v1.0.0-build3` |
-| Release source commit (identified in release notes) | [`838f119c`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/838f119cd5a748313fe2e9cc537dbce0074bf8a7) |
-| Installer asset | [`Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build3/Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg) |
-| DMG SHA-256 from GitHub release asset metadata | `7b5adb42155cff6f18fd312778b9edfcf46987731927f79b7d057dac3bec9f3a` |
+| GitHub release tag | `v1.0.0-build8` (published `2026-11-26T00:21:45Z`) |
+| Approved candidate source commit | [`bfc314c7`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/commit/bfc314c7ea7f352784cc0421ab0a7a815099cfc6) |
+| Installer asset | [`Sentinel-Node-Wallet-BTCB2-v1.0.0-build8-macOS-arm64-notarized.dmg`](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/download/v1.0.0-build8/Sentinel-Node-Wallet-BTCB2-v1.0.0-build8-macOS-arm64-notarized.dmg) (`14,197,833` bytes) |
+| DMG SHA-256 | `449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119` |
 | App Store Connect record | [App ID `6833290684`](https://appstoreconnect.apple.com/apps/6833290684/distribution/macos/version/inflight) |
 | Current macOS bundle identifier in release scripts | `pool.sentineldefensetechnologies.co.za` |
-| Version / build in packaging scripts | `1.0 (3)` |
+| Version / build in published DMG | `1.0.0 (8)` |
 | Pin in build scripts | Bitcoin Knots `29.4.3.knots20260508` |
-| CI for current main docs/source baseline | [#43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) — **144 executed, 143 passed, 0 failed, 1 skipped** |
+| CI & Phase C feed verification | [PR #41 CI #45564463622](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45564463622) — **339 executed, 338 passed, 0 failed, 1 skipped** · [Phase C #45736669756](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45736669756) **SUCCESS** (`dist/appcast.xml` SHA-256 `90eaebe859c413648f60f50ca8d6ad0479f0410e3e504a3d8db525231a597f83`) |
 
-> **Release qualification:** The DMG asset is publicly available on GitHub; that is **not** evidence of Apple Developer ID notarization, Gatekeeper acceptance, App Store approval or an independently audited BTCB2 wallet. The direct-DMG script attempts **Apple Development** signing when that identity is installed, not Developer ID signing/notarization. The interactive Keychain XCTest remains skipped in hosted CI. Consult [Project Status](docs/PROJECT_STATUS.md), [Security](SECURITY.md) and [Test Matrix](TEST_AND_RELEASE_MATRIX.md) before trusting the app with funds.
+> **Release qualification:** `v1.0.0-build8` is Developer ID signed (`S8QMQZA656`), hardened runtime, embedded provisioning profile (`043f266e...`), Apple notarized and ticket-stapled, with Sparkle EdDSA signature verification and Phase C live feed verification complete. However, the interactive Keychain `.userPresence` XCTest remains skipped in hosted CI, full clean-Mac post-enrollment wallet/Keychain GUI acceptance is not complete, and independent BTCB2 real-funds signing audit remains **OPEN**. Consult [Project Status](docs/PROJECT_STATUS.md), [Security](SECURITY.md) and [Test Matrix](TEST_AND_RELEASE_MATRIX.md) before trusting the app with funds. Previous releases `v1.0.0-build6` (missing embedded profile) and `v1.0.0-build7` (clean-Mac enrollment failure `missingRegistryInEstablishedNode`) are suppressed in `dist/appcast.xml`; upgrade directly to `v1.0.0-build8` without resetting existing data.
 
-## Install the published DMG
+## Install or upgrade to Build 8
 
-1. Open the [Build 3 release](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) and download the DMG.
-2. Verify its SHA-256 against the value above and the downloadable `SHA256SUMS.txt` release asset: `shasum -a 256 Sentinel-Node-Wallet-v1.0-Build3-macOS-arm64.dmg`.
-3. Mount the DMG and drag **Sentinel Node Wallet.app** to **Applications**.
-4. Review the installed app's macOS signature and Gatekeeper decision before running. Do **not** assume a development-signed image is trusted or notarized; do not bypass security warnings merely to install.
-5. On first launch, use a **disposable, zero-funds wallet** until the pending native acceptance and BTCB2 signing audits are completed.
+1. Open the [Build 8 release](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build8) and download `Sentinel-Node-Wallet-BTCB2-v1.0.0-build8-macOS-arm64-notarized.dmg` (or use `Sentinel Node Wallet > Check for Updates…` from Build 7+; scheduled checks discover updates automatically while unattended background `autoDownload` remains disabled and installation/relaunch require operator confirmation).
+2. Verify its SHA-256 against `449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119` and `SHA256SUMS.txt`: `shasum -a 256 Sentinel-Node-Wallet-BTCB2-v1.0.0-build8-macOS-arm64-notarized.dmg`.
+3. Mount the DMG and drag **Sentinel Node Wallet.app** to **Applications** (replacing only the `.app` bundle; existing data in `~/Library/Application Support/NodePocketBTCB2` is preserved).
+4. Review the installed app's macOS signature and Gatekeeper decision before running (`spctl --assess --type exec -vv "/Applications/Sentinel Node Wallet.app"`). Do **not** bypass OS security warnings.
+5. For untested workflows, use a **disposable, zero-funds wallet** until the pending native Keychain/GUI acceptance and BTCB2 signing audits are completed.
 
 The downloadable `BUILD_MANIFEST.json` and `SHA256SUMS.txt` on the release page are separate artifacts. Verify their contents against the installer you actually download; GitHub's published digest establishes file-integrity metadata, not source-to-binary reproducibility or financial safety.
 

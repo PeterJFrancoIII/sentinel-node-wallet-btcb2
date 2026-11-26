@@ -1,6 +1,6 @@
 # Security Policy — Sentinel Node Wallet BTCB2
 
-**Release presence is not security certification.** The [v1.0.0 Build 3 macOS DMG](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build3) is published. However, independent BTCB2 transaction-signing, signed native credential/user-presence tests, GUI backup→restore and Developer ID notarization/Gatekeeper verification have not been established in this public audit record. **Do not entrust real funds to the build on the basis of GitHub publication or CI alone.**
+**Release presence is not security certification.** The [v1.0.0 Build 8 macOS DMG](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/releases/tag/v1.0.0-build8) is Developer ID signed, Apple notarized/stapled, and published on the signed Sparkle feed (`dist/appcast.xml`). However, independent BTCB2 transaction-signing, signed native credential/user-presence tests, and full GUI backup→restore acceptance remain open in this public audit record. **Do not entrust real funds to the build on the basis of GitHub publication, notarization, or CI alone.**
 
 Report vulnerabilities privately through GitHub's security-advisory reporting mechanism when available, or through an authenticated maintainer channel. Do not publish seeds, private keys, passwords, TOTP values, wallet backups, RPC cookies, exploit details or personal user data in public issues.
 
@@ -22,9 +22,9 @@ Report vulnerabilities privately through GitHub's security-advisory reporting me
 
 ## CI and artifact evidence
 
-[Current main CI #43663913374](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/43663913374) at baseline `31f888b`: **144 executed / 143 passed / 0 failed / 1 skipped** (interactive Keychain). It compiles SwiftUI Release, checks a development app bundle and runs an isolated Knots regtest encrypted backup→restore via CLI. This **does not** validate actual signed-app Keychain acceptance, a user's GUI restore or real-funds transfers.
+[PR #41 CI #45564463622](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45564463622) at candidate `bfc314c7`: **339 executed / 338 passed / 0 failed / 1 skipped** (interactive Keychain). [Phase C #45736669756](https://github.com/PeterJFrancoIII/sentinel-node-wallet-btcb2/actions/runs/45736669756) verified live CDN `dist/appcast.xml` (`90eaebe859c413648f60f50ca8d6ad0479f0410e3e504a3d8db525231a597f83`). This **does not** validate full post-enrollment signed-app Keychain `.userPresence` acceptance, a user's GUI restore, or real-funds transfers.
 
-The published Build 3 GitHub DMG asset has SHA-256 `892798a3a7bf4c50b4cf220d6ac3e4a0b071c8c8acc1d993da1d04212d01b114`. Current `scripts/build_dmg.sh` attempts signing with an **Apple Development** identity, not independently verified Developer ID/notarization. SHA-256 checks content integrity only. Obtain an authorized on-device `codesign`, Gatekeeper, notarization and source-to-binary supply-chain report before stating public macOS security acceptance.
+The published Build 8 GitHub DMG asset has SHA-256 `449323dce965e1ae35a539d3e655a397f6a2b12f6df25421dd765c7510646119` (`14,197,833` bytes), Developer ID signing (`S8QMQZA656`), embedded provisioning profile (`043f266e...`), and stapled Apple notarization ticket. Direct local `scripts/build_dmg.sh` builds are unsandboxed/development-signed unless produced by the hardened Developer ID release workflow.
 
 ## Outstanding release gates
 
