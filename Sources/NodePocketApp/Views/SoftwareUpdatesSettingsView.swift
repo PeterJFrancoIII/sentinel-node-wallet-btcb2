@@ -37,13 +37,13 @@ public struct SoftwareUpdatesSettingsView: View {
                                 .font(.caption)
                         }
                     }
-                    .disabled(coordinator.isChecking || coordinator.isInstalling || coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch)
+                    .disabled(coordinator.isChecking || coordinator.isNativeSessionOrCommitActive)
                     .buttonStyle(.borderedProminent)
                     .controlSize(.regular)
                 }
             }
 
-            if coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch || coordinator.relaunchBlockedReason != nil {
+            if coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch || coordinator.hasHandedOffToNativeInstaller || coordinator.relaunchBlockedReason != nil {
                 postponedRelaunchBanner
             }
 
@@ -163,12 +163,16 @@ public struct SoftwareUpdatesSettingsView: View {
             HStack(spacing: 8) {
                 Image(systemName: coordinator.relaunchBlockedReason != nil ? "exclamationmark.triangle.fill" : "clock.arrow.circlepath")
                     .foregroundColor(coordinator.relaunchBlockedReason != nil ? .orange : .blue)
-                Text(coordinator.isPreparingRelaunch ? "Preparing Safe Update Relaunch…" : "Update Staged & Waiting to Relaunch")
+                Text(
+                    coordinator.hasHandedOffToNativeInstaller
+                        ? "Update Handed Off — Waiting to Quit"
+                        : (coordinator.isPreparingRelaunch ? "Preparing Safe Update Relaunch…" : "Update Staged & Waiting to Relaunch")
+                )
                     .font(.subheadline)
                     .bold()
             }
 
-            Text(coordinator.relaunchBlockedReason ?? coordinator.errorMessage ?? "The update is verified and staged. Close any other active dialogs or let node operations finish, then click Retry Relaunch (or quit the app manually to complete installation).")
+            Text(coordinator.relaunchBlockedReason ?? coordinator.errorMessage ?? (coordinator.hasHandedOffToNativeInstaller ? "Update installation has been handed off to Sparkle. Wait for the app to quit, or perform a normal Quit cleanly if any dialog delayed termination." : "The update is verified and staged. Close any other active dialogs or let node operations finish, then click Retry Relaunch (or quit the app manually to complete installation)."))
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -280,7 +284,7 @@ public struct SoftwareUpdatesSettingsView: View {
                             }
                         }
                     }
-                    .disabled(coordinator.isInstalling || coordinator.isRelaunchPostponed || coordinator.isPreparingRelaunch)
+                    .disabled(coordinator.isNativeSessionOrCommitActive)
                     .buttonStyle(.borderedProminent)
 
                     Button("Remind Me Later") {

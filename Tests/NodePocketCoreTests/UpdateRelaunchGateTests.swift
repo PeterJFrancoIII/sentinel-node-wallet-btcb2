@@ -460,4 +460,78 @@ final class UpdateRelaunchGateTests: XCTestCase {
         }
         XCTAssertTrue(abortMsg.contains("signature mismatch"))
     }
+
+    func testHandlerConsumedDelayedOrBlockedNativeQuitKeepsCommittedStateNeverReinvokesThenClearsOnTerminalAbort() async throws {
+        var installCalls = 0
+        var unrelatedBlocker: String? = nil
+        var statuses: [SoftwareUpdateStatus] = []
+
+        let gate = UpdateRelaunchGate(
+            supportsPostponedInstallCancellation: false,
+            isBusyCheck: { false },
+            onGracefulShutdownRequested: {},
+            requestDismissScopedSheets: {},
+            hasActiveScopedSheets: { false },
+            findUnrelatedModalBlocker: { unrelatedBlocker },
+            onStatusChange: { statuses.append($0) },
+            nativeQuitTimeoutNanoseconds: 40_000_000
+        )
+
+        gate.beginPostponedRelaunch(targetVersion: "1.0.0 (9)") {
+            installCalls += 1
+        }
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+
+        // Handler was consumed once, but process has NOT terminated yet.
+        XCTAssertEqual(installCalls, 1)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        XCTAssertNil(gate.pendingInstallHandler)
+        XCTAssertTrue(gate.hasHandedOffToNativeInstaller)
+        XCTAssertTrue(gate.hasCommittedNativeInstall)
+        XCTAssertTrue(gate.isBlockingNewChecksOrInstalls)
+
+        // Retry after native handoff MUST fail closed and NEVER re-invoke consumed handler.
+        do {
+            try await gate.retryPostponedRelaunch()
+            XCTFail("Expected retry after handoff to fail closed")
+        } catch SoftwareUpdateError.installationFailed {
+            XCTAssertEqual(installCalls, 1)
+        }
+
+        // Unsupported cancel after handoff must preserve committed state.
+        let cancelOutcome = gate.requestCancelPostponedRelaunch()
+        guard case .unsupportedAfterCommit = cancelOutcome else {
+            return XCTFail("Expected unsupportedAfterCommit after handoff, got \(cancelOutcome)")
+        }
+        XCTAssertTrue(gate.hasHandedOffToNativeInstaller)
+        XCTAssertTrue(gate.hasCommittedNativeInstall)
+        XCTAssertTrue(gate.isBlockingNewChecksOrInstalls)
+
+        // Simulate late blocker delaying/blocking native quit after handler was already invoked.
+        unrelatedBlocker = "An unrelated sheet opened right as Sparkle tried to quit."
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(installCalls, 1)
+        XCTAssertTrue(gate.hasHandedOffToNativeInstaller)
+        XCTAssertTrue(gate.hasCommittedNativeInstall)
+        XCTAssertTrue(gate.isBlockingNewChecksOrInstalls)
+        XCTAssertTrue(gate.blockedReason?.contains("quitting is blocked") == true)
+        guard case .error(let blockedQuitMsg) = statuses.last else {
+            return XCTFail("Expected .error status when native quit is blocked/delayed")
+        }
+        XCTAssertTrue(blockedQuitMsg.contains("normal Quit"))
+
+        // Only a genuine terminal native abort clears the committed/handed-off state.
+        gate.invalidateNativeSession(reason: "Sparkle installer helper exited with error.")
+        XCTAssertEqual(installCalls, 1)
+        XCTAssertFalse(gate.hasHandedOffToNativeInstaller)
+        XCTAssertFalse(gate.hasCommittedNativeInstall)
+        XCTAssertFalse(gate.isRelaunchPostponed)
+        XCTAssertFalse(gate.isBlockingNewChecksOrInstalls)
+        guard case .error(let abortMsg) = statuses.last else {
+            return XCTFail("Expected terminal abort error message")
+        }
+        XCTAssertTrue(abortMsg.contains("Sparkle installer helper"))
+    }
 }

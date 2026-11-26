@@ -122,7 +122,14 @@ public final class UpdateRelaunchGate {
     public private(set) var isRelaunchPostponed: Bool = false
     public private(set) var isPreparingRelaunch: Bool = false
     public private(set) var hasCommittedNativeInstall: Bool = false
+    public private(set) var hasHandedOffToNativeInstaller: Bool = false
     public private(set) var blockedReason: String? = nil
+
+    /// True whenever an update relaunch is postponed, actively preparing, or already handed off
+    /// to Sparkle's native installer pending process exit or terminal abort.
+    public var isBlockingNewChecksOrInstalls: Bool {
+        isRelaunchPostponed || isPreparingRelaunch || hasCommittedNativeInstall || hasHandedOffToNativeInstaller
+    }
 
     /// True only if the underlying updater backend provides a supported API to cancel
     /// an already-staged postponed installation session. Pinned Sparkle 2 has no public
@@ -142,15 +149,19 @@ public final class UpdateRelaunchGate {
     public var onRelaunchPostponedChange: ((Bool) -> Void)?
     public var onPreparingChange: ((Bool) -> Void)?
     public var onBlockedReasonChange: ((String?) -> Void)?
+    public var onNativeHandoffChange: ((Bool) -> Void)?
 
     /// Maximum bounded time waiting for scoped SwiftUI/AppKit settings sheets to finish detaching.
     public var sheetDetachmentTimeoutNanoseconds: UInt64
     public var sheetPollIntervalNanoseconds: UInt64
+    /// Grace window after invoking Sparkle's `installHandler` before surfacing a delayed/blocked quit warning.
+    public var nativeQuitTimeoutNanoseconds: UInt64
 
     private var generation: UInt64 = 0
     private var isWorkerActive: Bool = false
     private var pendingRescheduleAfterWorker: Bool = false
     private var pendingCancellationRequested: Bool = false
+    private var nativeQuitMonitorTask: Task<Void, Never>?
 
     public init(
         supportsPostponedInstallCancellation: Bool = false,
@@ -164,8 +175,10 @@ public final class UpdateRelaunchGate {
         onRelaunchPostponedChange: ((Bool) -> Void)? = nil,
         onPreparingChange: ((Bool) -> Void)? = nil,
         onBlockedReasonChange: ((String?) -> Void)? = nil,
+        onNativeHandoffChange: ((Bool) -> Void)? = nil,
         sheetDetachmentTimeoutNanoseconds: UInt64 = 1_500_000_000,
-        sheetPollIntervalNanoseconds: UInt64 = 20_000_000
+        sheetPollIntervalNanoseconds: UInt64 = 20_000_000,
+        nativeQuitTimeoutNanoseconds: UInt64 = 5_000_000_000
     ) {
         self.supportsPostponedInstallCancellation = supportsPostponedInstallCancellation
         self.isBusyCheck = isBusyCheck
@@ -190,8 +203,10 @@ public final class UpdateRelaunchGate {
         self.onRelaunchPostponedChange = onRelaunchPostponedChange
         self.onPreparingChange = onPreparingChange
         self.onBlockedReasonChange = onBlockedReasonChange
+        self.onNativeHandoffChange = onNativeHandoffChange
         self.sheetDetachmentTimeoutNanoseconds = sheetDetachmentTimeoutNanoseconds
         self.sheetPollIntervalNanoseconds = sheetPollIntervalNanoseconds
+        self.nativeQuitTimeoutNanoseconds = nativeQuitTimeoutNanoseconds
     }
 
     /// Registers Sparkle's deferred `installHandler` and begins (or coalesces into)
@@ -200,11 +215,14 @@ public final class UpdateRelaunchGate {
         targetVersion: String? = nil,
         installHandler: @escaping () -> Void
     ) {
+        nativeQuitMonitorTask?.cancel()
+        nativeQuitMonitorTask = nil
         generation &+= 1
         pendingInstallHandler = installHandler
         if let targetVersion {
             pendingTargetVersion = targetVersion
         }
+        setHandedOffToNativeInstaller(false)
         hasCommittedNativeInstall = true
         pendingCancellationRequested = false
         setBlockedReason(nil)
@@ -223,14 +241,16 @@ public final class UpdateRelaunchGate {
         }
     }
 
-    /// Invalidates a staged handler when the native Sparkle updater aborts, skips, or ends
-    /// without installing. If a shutdown is currently running, clears the handler so it cannot
-    /// be invoked when that shutdown unwinds.
+    /// Invalidates a staged or handed-off session ONLY when the native Sparkle updater
+    /// reaches a terminal abort or explicit non-committed skip. Benign cycle completion must not clear committed state.
     public func invalidateNativeSession(reason: String? = nil) {
+        nativeQuitMonitorTask?.cancel()
+        nativeQuitMonitorTask = nil
         generation &+= 1
         pendingInstallHandler = nil
         pendingTargetVersion = nil
         hasCommittedNativeInstall = false
+        setHandedOffToNativeInstaller(false)
         pendingRescheduleAfterWorker = false
         pendingCancellationRequested = false
         setRelaunchPostponed(false)
@@ -247,6 +267,14 @@ public final class UpdateRelaunchGate {
     /// Requests cancellation of a postponed relaunch with honest native contract semantics.
     @discardableResult
     public func requestCancelPostponedRelaunch() -> CancelPostponedOutcome {
+        if hasHandedOffToNativeInstaller {
+            let versionLabel = pendingTargetVersion.map { " (\($0))" } ?? ""
+            let msg = "Update\(versionLabel) has already been handed off to Sparkle's installer and cannot be cancelled. Close any blocking dialogs and perform a normal Quit cleanly to complete installation."
+            setBlockedReason(msg)
+            onStatusChange?(.error(msg))
+            return .unsupportedAfterCommit(msg)
+        }
+
         guard hasCommittedNativeInstall, pendingInstallHandler != nil else {
             generation &+= 1
             pendingTargetVersion = nil
@@ -301,6 +329,9 @@ public final class UpdateRelaunchGate {
     public func retryPostponedRelaunch() async throws {
         guard !isWorkerActive && !isPreparingRelaunch else {
             throw SoftwareUpdateError.installationFailed("Update relaunch preparation is already in progress.")
+        }
+        if hasHandedOffToNativeInstaller {
+            throw SoftwareUpdateError.installationFailed("Update installation has already been handed off to Sparkle. Finish any blocking dialogs and perform a normal Quit to complete installation.")
         }
         guard pendingInstallHandler != nil else {
             throw SoftwareUpdateError.installationFailed("No postponed update relaunch handler is pending.")
@@ -462,15 +493,42 @@ public final class UpdateRelaunchGate {
                 return
             }
 
-            // Single-shot consumption: clear state before invoking native handler.
+            // Single-shot consumption: preserve committed/handed-off native state until
+            // process exits or Sparkle reports a terminal abort/error (never reinvoke handler).
             pendingInstallHandler = nil
-            pendingTargetVersion = nil
-            hasCommittedNativeInstall = false
             pendingRescheduleAfterWorker = false
             setBlockedReason(nil)
+            setHandedOffToNativeInstaller(true)
             setRelaunchPostponed(false)
+            startNativeQuitWatch(expectedGeneration: cycleGeneration)
             handler()
             return
+        }
+    }
+
+    private func startNativeQuitWatch(expectedGeneration: UInt64) {
+        nativeQuitMonitorTask?.cancel()
+        guard nativeQuitTimeoutNanoseconds > 0 else { return }
+        let timeout = nativeQuitTimeoutNanoseconds
+        nativeQuitMonitorTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: timeout)
+            guard let self,
+                  !Task.isCancelled,
+                  self.generation == expectedGeneration,
+                  self.hasHandedOffToNativeInstaller else {
+                return
+            }
+
+            let blocker = self.findUnrelatedModalBlocker?()
+            let versionLabel = self.pendingTargetVersion.map { " (\($0))" } ?? ""
+            let msg: String
+            if let blocker {
+                msg = "Update\(versionLabel) was handed off to Sparkle, but quitting is blocked: \(blocker) Finish or close it and perform a normal Quit of Sentinel Node Wallet to complete installation."
+            } else {
+                msg = "Update\(versionLabel) was handed off to Sparkle, but automatic quit has not completed yet. Perform a normal Quit of Sentinel Node Wallet cleanly to finish installation (do not start another update check)."
+            }
+            self.setBlockedReason(msg)
+            self.onStatusChange?(.error(msg))
         }
     }
 
@@ -537,5 +595,11 @@ public final class UpdateRelaunchGate {
         guard blockedReason != reason else { return }
         blockedReason = reason
         onBlockedReasonChange?(reason)
+    }
+
+    private func setHandedOffToNativeInstaller(_ value: Bool) {
+        guard hasHandedOffToNativeInstaller != value else { return }
+        hasHandedOffToNativeInstaller = value
+        onNativeHandoffChange?(value)
     }
 }

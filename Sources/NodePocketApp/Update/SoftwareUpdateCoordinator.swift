@@ -24,8 +24,18 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     @Published public var isRelaunchPostponed: Bool = false
     @Published public var isPreparingRelaunch: Bool = false
     @Published public var isInstalling: Bool = false
+    @Published public var hasHandedOffToNativeInstaller: Bool = false
     @Published public var canCancelPostponedRelaunch: Bool = false
     @Published public var relaunchBlockedReason: String? = nil
+
+    public var isNativeSessionOrCommitActive: Bool {
+        #if canImport(Sparkle) && !APP_STORE
+        if let sparkle = driver as? SparkleUpdateDriver, sparkle.isNativeSessionInProgress {
+            return true
+        }
+        #endif
+        return isInstalling || isRelaunchPostponed || isPreparingRelaunch || hasHandedOffToNativeInstaller
+    }
 
     public var requestDismissScopedSheets: (@MainActor () -> Void)? {
         didSet {
@@ -147,10 +157,22 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
             }
             sparkle.onRelaunchPostponedChange = { [weak self] postponed in
                 Task { @MainActor [weak self] in
-                    self?.isRelaunchPostponed = postponed
-                    self?.canCancelPostponedRelaunch = sparkle.relaunchGate.supportsPostponedInstallCancellation
-                    if !postponed {
-                        self?.isInstalling = false
+                    guard let self else { return }
+                    self.isRelaunchPostponed = postponed
+                    self.canCancelPostponedRelaunch = sparkle.relaunchGate.supportsPostponedInstallCancellation
+                    if !postponed && !self.hasHandedOffToNativeInstaller && !sparkle.relaunchGate.hasCommittedNativeInstall {
+                        self.isInstalling = false
+                    }
+                }
+            }
+            sparkle.onNativeHandoffChange = { [weak self] handedOff in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    self.hasHandedOffToNativeInstaller = handedOff
+                    if handedOff {
+                        self.isInstalling = true
+                    } else if !self.isRelaunchPostponed && !sparkle.relaunchGate.hasCommittedNativeInstall {
+                        self.isInstalling = false
                     }
                 }
             }
@@ -167,19 +189,21 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
             sparkle.onNativeCycleEnded = { [weak self] err in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    if !self.isRelaunchPostponed {
-                        self.isInstalling = false
-                    }
                     if let err {
                         let msg = err.localizedDescription
+                        self.isInstalling = false
+                        self.hasHandedOffToNativeInstaller = false
                         self.errorMessage = msg
+                        self.relaunchBlockedReason = msg
                         self.status = .error(msg)
+                    } else if !self.isRelaunchPostponed && !self.hasHandedOffToNativeInstaller && !sparkle.isNativeSessionInProgress {
+                        self.isInstalling = false
                     }
                 }
             }
             sparkle.onWillRelaunchApplication = { [weak self] in
                 Task { @MainActor [weak self] in
-                    self?.isInstalling = false
+                    // Keep committed/installing guard locked until actual process termination or terminal abort.
                     self?.relaunchBlockedReason = nil
                 }
             }
@@ -218,9 +242,9 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     // MARK: - Update Check Execution
 
     public func checkForUpdates(isUserInitiated: Bool) async {
-        // Never overwrite an active installation, postponed relaunch, or relaunch-blocked error state
-        // from scheduled background checks or duplicate clicks.
-        guard !isChecking && !isInstalling && !isRelaunchPostponed && !isPreparingRelaunch else { return }
+        // Never overwrite an active installation, native handoff, postponed relaunch,
+        // active Sparkle session, or relaunch-blocked error state.
+        guard !isChecking && !isNativeSessionOrCommitActive else { return }
         if !isUserInitiated && relaunchBlockedReason != nil {
             return
         }
@@ -264,6 +288,10 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 cachedETag: cachedETag
             )
 
+            // Guard against overwriting native committed/postponed/handed-off state if
+            // an update installation committed while discovery was awaiting the network.
+            guard !isNativeSessionOrCommitActive else { return }
+
             if let etag = newETag {
                 config.setLastCheckETag(etag, for: targetUrl)
             }
@@ -302,6 +330,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 showUpdateBanner = false
             }
         } catch SoftwareUpdateError.notModified {
+            guard !isNativeSessionOrCommitActive else { return }
             config.lastCheckDate = Date()
             if let existing = discoveredRelease {
                 status = .updateAvailable(existing)
@@ -309,6 +338,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
                 status = .upToDate(lastChecked: Date())
             }
         } catch let updateErr as SoftwareUpdateError {
+            guard !isNativeSessionOrCommitActive else { return }
             let desc: String
             if case .networkError(let msg) = updateErr, msg.contains("404") {
                 desc = (config.channel == .beta)
@@ -321,6 +351,7 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
             errorMessage = desc
             showUpdateBanner = false
         } catch {
+            guard !isNativeSessionOrCommitActive else { return }
             status = .error(error.localizedDescription)
             errorMessage = error.localizedDescription
             showUpdateBanner = false
@@ -390,9 +421,9 @@ public final class SoftwareUpdateCoordinator: ObservableObject {
     }
 
     public func confirmAndInstallUpdate(release: AppReleaseInfo) async throws {
-        // Guard duplicate clicks / concurrent installation sessions.
-        guard !isInstalling && !isRelaunchPostponed && !isPreparingRelaunch else {
-            throw SoftwareUpdateError.installationFailed("An update installation or postponed relaunch is already in progress.")
+        // Guard duplicate clicks / concurrent or already handed-off native installation sessions.
+        guard !isNativeSessionOrCommitActive else {
+            throw SoftwareUpdateError.installationFailed("An update installation, postponed relaunch, or active Sparkle session is already in progress.")
         }
 
         // If Mac App Store distribution, binary self-updates from GitHub are forbidden.

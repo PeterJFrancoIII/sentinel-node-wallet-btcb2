@@ -29,6 +29,7 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
     public var onRelaunchPostponedChange: ((Bool) -> Void)?
     public var onPreparingChange: ((Bool) -> Void)?
     public var onBlockedReasonChange: ((String?) -> Void)?
+    public var onNativeHandoffChange: ((Bool) -> Void)?
     public var onNativeCycleEnded: ((Error?) -> Void)?
     public var onWillRelaunchApplication: (() -> Void)?
 
@@ -38,6 +39,18 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
     public private(set) var isRelaunchPostponed: Bool = false
     public private(set) var isPreparingRelaunch: Bool = false
+    public private(set) var hasHandedOffToNativeInstaller: Bool = false
+
+    @MainActor
+    public var isNativeSessionInProgress: Bool {
+        if relaunchGate.isBlockingNewChecksOrInstalls {
+            return true
+        }
+        if let updater = updaterController?.updater {
+            return updater.sessionInProgress || !updater.canCheckForUpdates
+        }
+        return false
+    }
 
     @MainActor
     public var postponedInstallHandler: (() -> Void)? {
@@ -97,6 +110,10 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
             },
             onBlockedReasonChange: { [weak self] reason in
                 self?.onBlockedReasonChange?(reason)
+            },
+            onNativeHandoffChange: { [weak self] handedOff in
+                self?.hasHandedOffToNativeInstaller = handedOff
+                self?.onNativeHandoffChange?(handedOff)
             }
         )
     }()
@@ -257,6 +274,8 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
             guard let self else { return }
             if !isAuthLater && !isNoUpdate {
                 self.relaunchGate.invalidateNativeSession(reason: isCanceled ? nil : error.localizedDescription)
+            } else if isCanceled {
+                self.relaunchGate.invalidateNativeSession(reason: nil)
             }
             self.onNativeCycleEnded?(isNoUpdate || isCanceled ? nil : error)
         }
@@ -280,6 +299,9 @@ public final class SparkleUpdateDriver: NSObject, SoftwareUpdating, SPUUpdaterDe
 
         let finish: @MainActor () -> Void = { [weak self] in
             guard let self else { return }
+            if let surfacedError {
+                self.relaunchGate.invalidateNativeSession(reason: surfacedError.localizedDescription)
+            }
             self.onNativeCycleEnded?(surfacedError)
         }
         if Thread.isMainThread {
